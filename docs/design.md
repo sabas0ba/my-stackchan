@@ -1,0 +1,101 @@
+# 設計
+
+M5Stack CoreS3 (Stack-chan) に顔・テキスト・画像を表示し、PC から USB 経由で情報を流し込む。firmware と host CLI をともに Rust で実装し、プロトコル定義を両者で共有する。
+
+## 目標と制約
+
+- 依存は最小限とし、すべて一意に固定する ([dependencies.md](dependencies.md))
+- firmware は host からの入力を「描画対象のデータ」としてのみ扱い、コマンド実行、ファイルシステムへの書込、設定変更、再起動等の操作系を持たない
+- 任意のバイト列、任意長のテキスト、不正な画像ヘッダが流入しても firmware が停止・破損しない
+- Wi-Fi と BT は許可するまで有効化しない。有効化する場合も transport 層の差し替えとして行い、描画側のコードに影響させない
+- 「顔」は自前の図形描画とし、第三者のアセットを取り込まない
+
+## 構成
+
+```
+PC (host)                              CoreS3 (firmware)
++-------------------------+   USB CDC   +------------------------------+
+| collector (使用量等の取得) |  COBS frame | transport (USB Serial/JTAG)  |  <- 将来 Wi-Fi/BT に差替
+| card builder (レイアウト) | ----------> | codec: decode + validate     |  <- protocol crate (共有)
+| sender (CLI)            | <---------- | model: slot ごとの表示内容    |  <- 検証済みデータのみ保持
++-------------------------+  Reply      | renderer: face / text / image|
+                                        +------------------------------+
+```
+
+| crate | 役割 | 環境 |
+| --- | --- | --- |
+| `crates/protocol` | メッセージ型、上限値、encode/decode、検証。fuzz と単体テストの対象 | no_std (host では `std` feature) |
+| `crates/host` | CLI。port の検出、Card の組み立て、送信、collector | std |
+| `crates/fontgen` | GNU Unifont の `.hex` から埋め込み用ビットマップを生成する | std (build 時のみ) |
+| `firmware/` | esp-hal ベースの firmware。独立した workspace | no_std, `xtensa-esp32s3-none-elf` |
+
+firmware を別 workspace にしているのは、target と `build-std` の設定が host と異なり、同一 workspace では `cargo build` の既定動作が衝突するためである。
+
+## Firmware
+
+### 選択: esp-hal (no_std)
+
+`esp-idf-hal` (std) ではなく `esp-hal` (no_std) を採用する。
+
+- ESP-IDF の C コードとビルド時ダウンロードを持たず、依存が Cargo.lock と Nix の固定で閉じる
+- Wi-Fi/BT のコードは `esp-radio` を依存に入れない限りリンクされない。「許可まで動かさない」を build flag ではなく依存の有無で担保する
+- 代償として、電源 IC (AXP2101)、GPIO 拡張 (AW9523)、LCD (ILI9342C) の初期化を自前で記述する。レジスタの値は各データシートと M5Stack の回路図を一次情報とする
+
+### ペリフェラル (CoreS3)
+
+| 部品 | 接続 | 用途 |
+| --- | --- | --- |
+| ILI9342C (320x240) | SPI | 表示。`mipidsi` crate の ILI9342C model を使用 |
+| AXP2101 | I2C | 電源。LCD バックライトの電源制御を含む |
+| AW9523 | I2C | GPIO 拡張。LCD リセット等 |
+| USB Serial/JTAG | ESP32-S3 内蔵 | host との通信。書込と共用 |
+| UART0 | GPIO | ログ出力 (panic、backtrace)。USB とは分離する |
+
+ピン番号と初期化手順は Phase 1 で一次情報を確認して本節に記載する。
+
+### ログと通信の分離
+
+USB Serial/JTAG はプロトコル専用とし、`esp-println` の出力先は UART0 に固定する。ログがプロトコルのストリームに混入すると host 側の同期が乱れるためである。
+
+## プロトコル
+
+詳細は [protocol.md](protocol.md)。要点:
+
+- シリアライズは `postcard` (serde 互換、no_std)。フレーミングは COBS で、0x00 をフレーム終端とする
+- 可変長データは `heapless` の上限付き型で表す。上限を超える入力は復号の時点で失敗する
+- firmware の受信は固定長バッファ (`MAX_FRAME_BYTES`) と状態機械で処理し、動的確保を行わない。不正なフレームは破棄し、カウンタに記録する
+- firmware から host へは `Reply` (Pong / Ack / Rejected) のみを返す
+- USB では物理接続を信頼境界とし、認証は行わない。Wi-Fi/BT 化する場合は transport 層で事前共有鍵と HMAC を追加する
+
+## 表示モデル (Card)
+
+HTML そのものを firmware で解釈することはしない。要素数、入れ子深さ、文字列長を固定した宣言的な Card を定義する。
+
+- Slot: `BannerTop` / `BannerBottom` (帯) / `Overlay` (全画面)。顔は常駐し、Overlay の間だけ隠れる
+- TTL: 各 Card は秒単位の TTL を持ち、経過後に自動的に消える
+- 要素: `Text` (style, align, str) / `Bar` (ratio, label) / `Image` (RGB565 の inline または事前登録 ID) / `Spacer`
+- 構造: Column -> Row -> 要素 の 2 段に限定し、要素数に上限を設ける
+- 振分け: 短文なら Banner、長文や画像なら Overlay、といった判断は host 側で行う。firmware は受け取った Card を検証して配置するだけとする
+
+## フォント
+
+日本語を表示するため、ビットマップフォントを firmware に埋め込む。
+
+- 元データは GNU Unifont の `.hex` 形式 (OFL 1.1 と GPLv2+ (font embedding exception 付) の dual license)。行単位のテキストであり、解析に外部 crate を要しない
+- `crates/fontgen` が ASCII と JIS X 0208 の部分集合を選び、16 px のビットマップ配列として出力する。約 7,000 字で 220 KB 程度
+- 収録外の文字は host 側で置換文字に落とすか、host でラスタライズした画像として送る
+- Unifont の配布物も sha256 で固定する
+
+## 使用量の取得 (collector)
+
+認証を持たない。Claude Code と Codex がローカルに残すセッションログの読み取り専用集計を第一候補とし、取得できなければ表示しない。取得元は `trait Source` として差し替え可能にする。具体的な取得元は Phase 3 の着手時に確定する。
+
+## フェーズと受入条件
+
+| Phase | 内容 | 受入条件 |
+| --- | --- | --- |
+| 0 | 環境整備 | `scripts/container.sh check` が `--network none` で成功する。firmware の最小構成が build できる |
+| 1 | 表示 | CoreS3 で自前の顔、ASCII テキスト、RGB565 画像を表示できる |
+| 2 | プロトコル + host CLI | USB 経由で Card を表示できる。protocol の decoder が fuzz テストを通過する |
+| 3 | collector | ローカルログの集計を定期送信できる。取得失敗時に表示を汚さない |
+| 4 | 日本語フォント | fontgen の出力で日本語の Card を表示できる |
