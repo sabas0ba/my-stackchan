@@ -51,7 +51,31 @@ firmware を別 workspace にしているのは、target と `build-std` の設�
 | USB Serial/JTAG | ESP32-S3 内蔵 | host との通信。書込と共用 |
 | UART0 | GPIO | ログ出力 (panic、backtrace)。USB とは分離する |
 
-ピン番号と初期化手順は Phase 1 で一次情報を確認して本節に記載する。
+### CoreS3 の表示系接続
+
+2026-09-07 に M5Stack の公式資料と公式実装を照合した。参照した版は次のとおり。
+
+- [CoreS3 公式資料](https://docs.m5stack.com/en/core/CoreS3)（製品ページおよび
+  [回路図 v1.0](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/490/Sch_M5_CoreS3_v1.0.pdf)）
+- [M5GFX `d91077b9`](https://github.com/m5stack/M5GFX/blob/d91077b9a607b59404e4e4a49f775c792bfae382/src/M5GFX.cpp)
+- [M5Unified `8530f537`](https://github.com/m5stack/M5Unified/blob/8530f5377d782e4a25a6c482de2e71c3f75ca8eb/src/utility/Power_Class.cpp)
+
+| 信号 | 接続先 | 備考 |
+| --- | --- | --- |
+| 内部 I2C SCL / SDA | GPIO11 / GPIO12 | AXP2101 と AW9523B を 400 kHz で制御する |
+| LCD SPI SCK / MOSI | GPIO36 / GPIO37 | LCD と microSD がバスを共有する |
+| LCD CS | GPIO3 | active low |
+| LCD D/C | GPIO35 | microSD の MISO と兼用するため、LCD 選択中だけ出力として扱う |
+| LCD reset | AW9523B (0x58) P1_1 | AW9523B の Port 1 output register (0x03) で制御する |
+| LCD backlight | AXP2101 (0x34) DLDO1 | enable は register 0x90 bit 7、電圧は register 0x99 で設定する |
+
+Phase 1 では内部 I2C を先に初期化し、DLDO1、LCD reset、SPI の順に初期化する。
+GPIO35 は LCD の D/C と microSD の MISO に共有されるため、将来 microSD を使用する場合も
+同時に駆動しない。M5GFX は LCD の CS 操作に合わせて GPIO35 の入出力を切り替えている。
+
+M5Unified の AXP2101 初期化にはカメラ、音声、microSD 等の電源設定も含まれる。本 firmware
+では未使用回路を有効にせず、Phase 1 で表示に必要な DLDO1 だけを設定する。Wi-Fi/BT は
+この初期化とは独立しており、引き続き依存も機能も追加しない。
 
 ### ログと通信の分離
 
