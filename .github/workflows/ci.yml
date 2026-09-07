@@ -1,0 +1,35 @@
+# 検査はコンテナ内で実行する。ランナーへ Nix を導入する方式では、CI 環境が
+# ホストおよびコンテナと別の環境になり、検証対象がずれるため。
+#
+# 依存する外部 action はコミット SHA で固定する。タグは再割り当てが可能であり、
+# 固定にはならない。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 検査しか行わないため、GITHUB_TOKEN には読み取りのみを与える。
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # ランナーはバージョンを指定する。ubuntu-latest は可変であり、更新時期を制御できない。
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: イメージを構築する
+        run: docker build -t my-stackchan-dev .
+
+      - name: コンテナ内で検査を実行する
+        # --network none で実行し、イメージが自己完結していることも同時に検証する。
+        run: docker run --rm --network none my-stackchan-dev make check

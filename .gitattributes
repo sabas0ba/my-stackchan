@@ -1,0 +1,3 @@
+# 改行コードを LF に統一する。Windows の core.autocrlf=true でチェックアウトすると
+# シェルスクリプトや Nix の定義が CRLF になり、コンテナ内で実行できなくなるため。
+* text=auto eol=lf
