@@ -1,0 +1,40 @@
+# firmware workspace の cargo-deny 設定。内容はルートの deny.toml と同一に保つ。
+
+[advisories]
+yanked = "deny"
+# 無視する advisory は理由を明記し、docs/dependencies.md にも記録する。
+ignore = [
+  # paste は esp-hal 1.1.x の直接依存であり、本プロジェクト側で差し替えられない。
+  # 保守終了 (unmaintained) の通知であって脆弱性ではない。esp-hal の更新時に解消を確認する。
+  { id = "RUSTSEC-2024-0436", reason = "paste (unmaintained) は esp-hal 1.1.x の直接依存。脆弱性ではない" },
+]
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "MPL-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# workspace 内の path 依存は版を持たないため wildcard として扱われる。これのみ許可する。
+allow-wildcard-paths = true
+# 2026-08-20 の crates.io 侵害事案 (docs/dependencies.md) に関係する crate を禁止する。
+# 当該版は crates.io から削除済みだが、推移的依存に現れないことを明示的に検査する。
+deny = [
+  { crate = "proc-macro1", reason = "proc-macro2 の typosquat。build script で外部の payload を実行した" },
+  { crate = "arrayref@=0.3.10", reason = "侵害された maintainer アカウントから publish された版" },
+  { crate = "internment@=0.8.7", reason = "侵害された maintainer アカウントから publish された版" },
+  { crate = "append-only-vec@=0.1.9", reason = "侵害された maintainer アカウントから publish された版" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

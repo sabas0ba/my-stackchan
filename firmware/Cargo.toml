@@ -1,0 +1,39 @@
+# firmware は host 側の workspace とは独立した workspace とする (理由はルートの Cargo.toml)。
+[workspace]
+
+[package]
+name = "my-stackchan-firmware"
+description = "CoreS3 向け firmware。顔・テキスト・画像の表示と USB 経由の受信"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/sabas0ba/my-stackchan"
+rust-version = "1.88"
+# crates.io に publish しない。cargo-deny の path 依存の扱いにも関係する (deny.toml)。
+publish = false
+
+[dependencies]
+protocol = { path = "../crates/protocol", default-features = false }
+
+esp-hal = { version = "1.1.2", features = ["esp32s3", "unstable"] }
+# panic と例外の出力先。ログは UART0 に出し、USB Serial/JTAG はプロトコル専用にする。
+esp-backtrace = { version = "0.19.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-println = { version = "0.17.0", default-features = false, features = ["esp32s3", "uart"] }
+
+embedded-hal = "1.0.0"
+embedded-hal-bus = "0.3.0"
+embedded-graphics = "0.8.2"
+mipidsi = "0.10.0"
+static_cell = "2.1.1"
+heapless = { version = "0.9.3", default-features = false }
+
+[profile.dev]
+# デバッグビルドでも最適化しないと実機で動作が遅く、タイミング依存の初期化が崩れる。
+opt-level = "s"
+debug = true
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = "fat"
+codegen-units = 1
