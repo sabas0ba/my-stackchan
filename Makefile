@@ -50,6 +50,9 @@ check-rust: ## Rust の検査 (fmt --check, clippy, test, firmware の build)
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 	cargo test --workspace --locked --offline
+	# ルートから実行し、firmware/.cargo の Xtensa/build-std 設定を適用しない。
+	cargo clippy --manifest-path $(FIRMWARE_DIR)/Cargo.toml --lib --locked --offline -- -D warnings
+	cargo test --manifest-path $(FIRMWARE_DIR)/Cargo.toml --lib --locked --offline
 	cd $(FIRMWARE_DIR) && cargo fmt --all --check
 	cd $(FIRMWARE_DIR) && cargo clippy --locked --offline -- -D warnings
 	cd $(FIRMWARE_DIR) && cargo build --locked --offline --release

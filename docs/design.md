@@ -69,13 +69,25 @@ firmware を別 workspace にしているのは、target と `build-std` の設�
 | LCD reset | AW9523B (0x58) P1_1 | AW9523B の Port 1 output register (0x03) で制御する |
 | LCD backlight | AXP2101 (0x34) DLDO1 | enable は register 0x90 bit 7、電圧は register 0x99 で設定する |
 
-Phase 1 では内部 I2C を先に初期化し、DLDO1、LCD reset、SPI の順に初期化する。
+Phase 1 では内部 I2C を先に初期化し、DLDO1 を消灯したまま電圧を設定し、LCD reset、SPI、初期描画の後に点灯する。
 GPIO35 は LCD の D/C と microSD の MISO に共有されるため、将来 microSD を使用する場合も
 同時に駆動しない。M5GFX は LCD の CS 操作に合わせて GPIO35 の入出力を切り替えている。
 
 M5Unified の AXP2101 初期化にはカメラ、音声、microSD 等の電源設定も含まれる。本 firmware
 では未使用回路を有効にせず、Phase 1 で表示に必要な DLDO1 だけを設定する。Wi-Fi/BT は
 この初期化とは独立しており、引き続き依存も機能も追加しない。
+
+### Phase 1 の表示確認画面
+
+起動時に 320×240 の黒背景へ、白い外枠、自前の図形による顔、ASCII 文字列、96×16 の RGB565 画像を描画する。画像は赤・緑・青・白のカラーバーを big-endian の画素列としてコンパイル時に生成する。フレームバッファと動的確保は使わず、SPI 転送用に 512 byte のバッファを使う。
+
+内部 I2C は 400 kHz、LCD SPI は mode 0 / 40 MHz とする。AXP2101 は 0x90 bit 7 と 0x99 bits 4:0 のみを更新し、DLDO1 を 2.8 V に設定する。AW9523B は Port 1 の出力ラッチ (0x03)、GPIO/LED mode (0x13)、方向 (0x05) の P1_1 のみを更新する。リセットは Low 20 ms、解除後 120 ms とし、その他のビットは読み出した値を保存する。
+
+GPIO35 の D/C は出力ラッチを先に設定し、LCD CS が Low の期間だけ出力を有効にする。SPI の転送完了後に出力を無効化してから CS を High に戻す。microSD CS (GPIO4) は High に保持する。Phase 1 は microSD カードを取り外した状態で検証する。カードの利用には、SD mode から SPI mode への移行とバスの仲裁を別途実装する必要がある。
+
+LCD は固定済み `mipidsi 0.10.0` の `ILI9342CRgb565` を使用し、BGR 順序・色反転ありで初期化する。実機で画面方向、色順、初期化の成立を確認するまで Phase 1 の受入完了とはしない。表示系の I2C/SPI エラーは UART0 の panic 出力で識別し、初期描画が失敗した場合は点灯処理へ進まない。
+
+実装時の参照資料は [CoreS3 公式 PinMap](https://docs.m5stack.com/en/core/CoreS3)、前節で固定した M5GFX の `Light_M5StackCoreS3` と AW9523B 初期化、および [mipidsi 0.10.0 の Builder](https://docs.rs/mipidsi/0.10.0/mipidsi/struct.Builder.html)。実機確認手順は [environment.md](environment.md#phase-1-の実機確認) に記載する。
 
 ### ログと通信の分離
 

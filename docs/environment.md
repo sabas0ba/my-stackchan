@@ -56,6 +56,19 @@ scripts/container.sh device stackchan ping
 
 nix を持つ場合は `nix develop` または `direnv allow` で開発シェルに入り、`make help` で操作を一覧する。コンテナを使う場合は `make docker-build` / `make docker-shell` / `make docker-check`。
 
+## Phase 1 の実機確認
+
+実機への書込は利用者の許可を得てから行う。対象は ILI9342C 搭載の CoreS3。microSD カードは取り外す。
+
+1. `scripts/container.sh check` で静的検査・テスト・firmware の release build を通す。
+2. 前節の手順で対象 CoreS3 の USB を Podman machine に接続する。
+3. `scripts/container.sh device make flash` で書き込む。
+4. 起動後、外枠の四辺が欠けず、上部の `my-stackchan / CoreS3` が正しい向きで読めることを確認する。
+5. 中央の顔、下部の `ASCII 0123456789 !?` と `RGB565`、左から赤・緑・青・白のカラーバーを確認する。
+6. リセット後と電源再投入後の両方で同じ画面になることを確認する。
+
+成功時は UART0 に `Phase 1 display ready: face / ASCII / RGB565` を出力する。USB Serial/JTAG へログは出さないため、USB monitor でこのログは観測できない。表示が点灯しない場合は UART0 のエラーと内部 I2C の応答を確認する。ビルド成功だけでは実機の表示確認を代替できない。
+
 ## 検査
 
 ```bash
@@ -66,6 +79,8 @@ make audit        # cargo-deny による advisory と license の検査 (ネッ�
 ```
 
 CI (`.github/workflows/ci.yml`) はイメージを構築し、`--network none` のコンテナ内で `make check` を実行する。
+
+`make check` は firmware の電源制御と描画処理も host 上でテストする。対象外レジスタビットの保持、I2C エラー伝播、描画範囲、RGB565 の色順、描画エラー伝播を検証する。単独実行は開発シェル内のリポジトリルートから `cargo test --manifest-path firmware/Cargo.toml --lib --locked --offline` を使う。`firmware/` 内から実行すると Xtensa 用の Cargo 設定が適用されるため、host テストではルートから実行する。
 
 ## cargo の依存とネットワーク
 
