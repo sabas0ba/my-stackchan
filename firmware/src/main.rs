@@ -27,6 +27,19 @@ use mipidsi::{
 mod board;
 use my_stackchan_firmware::{power, renderer};
 
+// 壁時計を含めず、同じソースから同じ記述子を生成する。
+esp_bootloader_esp_idf::esp_app_desc!(
+    env!("CARGO_PKG_VERSION"),
+    env!("CARGO_PKG_NAME"),
+    "00:00:00",
+    "1970-01-01",
+    esp_bootloader_esp_idf::ESP_IDF_COMPATIBLE_VERSION,
+    esp_bootloader_esp_idf::MMU_PAGE_SIZE,
+    0,
+    u16::MAX,
+    esp_bootloader_esp_idf::SECURE_VERSION
+);
+
 #[main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default());

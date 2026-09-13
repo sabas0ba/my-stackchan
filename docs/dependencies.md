@@ -58,7 +58,24 @@ sha256 の取得元は GitHub Releases の asset digest (API の `digest` フィ
 - firmware workspace: RUSTSEC-2024-0436 (`paste` が unmaintained) のみ。`paste` は esp-hal 1.1.x の直接依存で本プロジェクト側では差し替えられず、脆弱性ではないため `firmware/deny.toml` で理由付きで ignore する。esp-hal の更新時に解消を確認する
 - 同一 crate の複数版 (bitflags, embedded-hal, heapless 等) は警告として検出される。esp-hal エコシステム内の版差によるもので、現時点では許容する
 
-## 未調査・保留
+## Phase 1 書込対応の追加調査 (2026-09-13)
+
+利用者の承認を得て `esp-bootloader-esp-idf =0.5.0` を追加する。espflash 4.4.0 の書込前検査で必要なアプリ記述子を生成するためであり、OTA や Flash 書込 API は使用しない。`default-features = false`、`esp32s3` feature のみを指定する。
+
+| crate | 版 | 公開日 | 配布物 sha256 |
+| --- | --- | --- | --- |
+| esp-bootloader-esp-idf | 0.5.0 | 2026-04-16 | `35ffc117c3a9859835d89d0e90f5ee9886ce2264a71a849a7a22ab5308f6653c` |
+| jiff | 0.2.13 | 2025-05-06 | `f02000660d30638906021176af16b17498bd0d12813dbfe7b276d8bc7f3c0806` |
+| jiff-static | 0.2.13 | 2025-05-06 | `f3c30758ddd7188629c6713fc45d1188af4f44c90582311d0c8d8c9907f60c48` |
+| portable-atomic-util | 0.2.8 | 2026-09-04 | `10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715` |
+
+公開日、checksum、yank されていないことを crates.io API で確認した。すべて公開後 7 日を経過している。既存 crate の版は変更せず、追加分も `firmware/Cargo.lock` で固定する。lockfile は非選択の optional 依存も含むため、追加件数は実際のコンパイル対象数とは異なる。
+
+RustSec の公開一覧で esp-bootloader-esp-idf の該当なし。GitHub Advisory API で追加 4 crate と esp-rs/esp-hal の公開 advisory は該当なし。検索した範囲では esp-bootloader-esp-idf の公開経路の侵害報告は確認されなかった。これは未知の問題がないことを保証するものではない。
+
+[公式の固定タグ](https://github.com/esp-rs/esp-hal/tree/esp-bootloader-esp-idf-v0.5.0/esp-bootloader-esp-idf) の Cargo.toml、src/lib.rs、build.rs を確認した。build.rs は設定生成と日時の埋込を行い、外部取得やコマンド実行はない。0.5.0 の SOURCE_DATE_EPOCH の解釈には秒／マイクロ秒の不一致があるため、記述子の macro に日時を明示し、壁時計への依存を避ける。jiff はビルド時依存として 0.2.13 に固定する。
+
+## 未調査・保留の項目
 
 - GNU Unifont の版と sha256 (Phase 4 で固定する)
 - `cargo fuzz` 用の toolchain (Phase 2)

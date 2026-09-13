@@ -89,8 +89,8 @@ CI (`.github/workflows/ci.yml`) はイメージを構築し、`--network none` �
 依存を追加・更新する (`Cargo.lock` が変わる) 場合のみ、置き換えを外して crates.io を参照する。
 
 ```bash
-scripts/container.sh run env MY_STACKCHAN_ONLINE=1 cargo update -p <crate> --precise <version>
-scripts/container.sh run env MY_STACKCHAN_ONLINE=1 cargo generate-lockfile   # 初回
+scripts/container.sh run env CARGO_HOME=/workspace/.work/cargo-online cargo update -p <crate> --precise <version>
+scripts/container.sh run env CARGO_HOME=/workspace/.work/cargo-online cargo generate-lockfile   # 初回
 scripts/container.sh build                                                   # 新しい lock を vendor に取り込む
 ```
 

@@ -56,6 +56,9 @@ check-rust: ## Rust の検査 (fmt --check, clippy, test, firmware の build)
 	cd $(FIRMWARE_DIR) && cargo fmt --all --check
 	cd $(FIRMWARE_DIR) && cargo clippy --locked --offline -- -D warnings
 	cd $(FIRMWARE_DIR) && cargo build --locked --offline --release
+	mkdir -p .work
+	espflash save-image --skip-update-check --chip esp32s3 --flash-size 16mb \
+		$(FIRMWARE_DIR)/target/xtensa-esp32s3-none-elf/release/my-stackchan-firmware .work/firmware.bin
 
 .PHONY: fmt
 fmt: ## Nix、シェルスクリプト、Rust を整形する
@@ -98,7 +101,7 @@ build-firmware: ## firmware を build する
 
 .PHONY: flash
 flash: build-firmware ## firmware を書き込む (SERIAL_DEVICE、既定 /dev/ttyACM0)
-	cd $(FIRMWARE_DIR) && espflash flash --port $${SERIAL_DEVICE:-/dev/ttyACM0} \
+	cd $(FIRMWARE_DIR) && espflash flash --skip-update-check --port $${SERIAL_DEVICE:-/dev/ttyACM0} \
 		target/xtensa-esp32s3-none-elf/release/my-stackchan-firmware
 
 .PHONY: clean

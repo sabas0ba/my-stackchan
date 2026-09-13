@@ -24,6 +24,7 @@ heapless = { version = "0.9.3", default-features = false }
 
 # 表示と電源制御を host 上でテストできるよう、SoC 固有の依存だけを限定する。
 [target.'cfg(target_arch = "xtensa")'.dependencies]
+esp-bootloader-esp-idf = { version = "=0.5.0", default-features = false, features = ["esp32s3"] }
 esp-hal = { version = "1.1.2", features = ["esp32s3", "unstable"] }
 # panic と例外の出力先。ログは UART0 に出し、USB Serial/JTAG はプロトコル専用にする。
 esp-backtrace = { version = "0.19.0", features = ["esp32s3", "panic-handler", "println"] }
