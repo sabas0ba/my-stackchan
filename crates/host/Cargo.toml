@@ -1,0 +1,19 @@
+[package]
+name = "my-stackchan-host"
+description = "PC 側 CLI。表示内容を組み立て、シリアル経由で firmware に送る"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# crates.io に publish しない。cargo-deny の path 依存の扱いにも関係する (deny.toml)。
+publish = false
+
+[[bin]]
+name = "stackchan"
+path = "src/main.rs"
+
+[dependencies]
+protocol = { path = "../protocol", features = ["std"] }
+clap = { workspace = true }
+serialport = { workspace = true }

@@ -1,0 +1,24 @@
+# firmware の build 設定。firmware/ で cargo を実行した場合にのみ適用される。
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor"
+rustflags = [
+  # Xtensa target のリンクは xtensa-esp32s3-elf-gcc を経由する。crt0 を持ち込まず、
+  # esp-hal (xtensa-lx-rt) が提供する linker script を使用する。
+  "-C", "link-arg=-nostartfiles",
+  "-C", "link-arg=-Wl,-Tlinkall.x",
+  # ESP32-S3 は IRAM に置くコードとデータを同一セグメントに持つため、ld の RWX 警告は
+  # 構造上避けられない。警告を抑止する。
+  "-C", "link-arg=-Wl,--no-warn-rwx-segments",
+  "-C", "force-frame-pointers",
+]
+
+[unstable]
+# Xtensa target 向けの core/alloc は sysroot に無く、rust-src から build する。
+build-std = ["core", "alloc"]
+
+[env]
+ESP_LOG = "info"

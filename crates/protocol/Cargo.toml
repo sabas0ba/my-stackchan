@@ -1,0 +1,20 @@
+[package]
+name = "protocol"
+description = "host と firmware が共有するメッセージ定義、上限、encode/decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# crates.io に publish しない。cargo-deny の path 依存の扱いにも関係する (deny.toml)。
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+postcard = { workspace = true }
+heapless = { workspace = true }
+
+[features]
+default = []
+# host 側でのみ有効にする。std の型との相互変換を提供する。
+std = ["serde/std", "postcard/use-std"]

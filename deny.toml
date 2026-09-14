@@ -1,0 +1,39 @@
+# cargo-deny の設定。`make audit` から使用する。
+#
+# advisories: RustSec advisory DB と照合する (ネットワークを使用)。
+# licenses:   許可する license を明示する。一覧に無いものは失敗させる。
+# bans:       wildcard 依存を禁止する。
+# sources:    crates.io 以外の registry と git 依存を禁止する。
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "MPL-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# workspace 内の path 依存は版を持たないため wildcard として扱われる。これのみ許可する。
+allow-wildcard-paths = true
+# 2026-08-20 の crates.io 侵害事案 (docs/dependencies.md) に関係する crate を禁止する。
+# 当該版は crates.io から削除済みだが、推移的依存に現れないことを明示的に検査する。
+deny = [
+  { crate = "proc-macro1", reason = "proc-macro2 の typosquat。build script で外部の payload を実行した" },
+  { crate = "arrayref@=0.3.10", reason = "侵害された maintainer アカウントから publish された版" },
+  { crate = "internment@=0.8.7", reason = "侵害された maintainer アカウントから publish された版" },
+  { crate = "append-only-vec@=0.1.9", reason = "侵害された maintainer アカウントから publish された版" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,37 @@
+# host 側の workspace。protocol (no_std 両用)、host CLI、fontgen を含む。
+#
+# firmware/ は本 workspace に含めない。target (xtensa-esp32s3-none-elf) と build-std の
+# 設定が host と異なり、同一 workspace では `cargo build` の既定動作が衝突するため。
+# firmware は path 依存で crates/protocol を参照する。
+[workspace]
+resolver = "2"
+members = [
+  "crates/protocol",
+  "crates/host",
+  "crates/fontgen",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/sabas0ba/my-stackchan"
+# esp-hal 1.1.x の MSRV に合わせる。実際の toolchain は nix/esp-rust.nix が固定する。
+rust-version = "1.88"
+
+# 依存の版はここで一元管理する。一意な固定は Cargo.lock (checksum 付き) が担う。
+# 追加・更新時は docs/dependencies.md の調査記録を併せて更新する。
+[workspace.dependencies]
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+postcard = { version = "1.1.3", default-features = false }
+heapless = { version = "0.9.3", default-features = false, features = ["serde"] }
+clap = { version = "4.6.6", features = ["derive"] }
+# 4.10.0 (2026-08-26) は crates.io の侵害事案の直後に publish されており、必要が
+# 生じるまで採らない (docs/dependencies.md)。caret では 4.10.0 に解決されるため = で止める。
+# 既定の libudev feature は C ライブラリ (libudev) への依存を持ち込む。Linux では
+# feature 無しでも sysfs から VID/PID を列挙できるため無効にする。
+serialport = { version = "=4.9.0", default-features = false }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

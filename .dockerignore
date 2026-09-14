@@ -1,0 +1,13 @@
+# イメージに含める必要がないもの。COPY . . の対象から除外される。
+# .github/ は scripts/check-pins.sh がワークフローを検査するため除外しない。
+
+.git
+.direnv/
+.envrc.local
+.work/
+target/
+**/target/
+result
+result-*
+*.swp
+.DS_Store
