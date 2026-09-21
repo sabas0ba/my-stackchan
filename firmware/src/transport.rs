@@ -21,12 +21,12 @@ impl Default for Receiver {
 }
 
 impl Receiver {
-    /// 完全なフレームを受け取ったときだけ応答を返す。
-    pub fn push(&mut self, byte: u8) -> Option<Reply> {
+    /// 完全なフレームを受け取ったときだけメッセージまたは拒否応答を返す。
+    pub fn push(&mut self, byte: u8) -> Option<Result<Message, Reply>> {
         if self.discarding {
             if byte == 0 {
                 self.discarding = false;
-                return Some(self.reject());
+                return Some(Err(self.reject()));
             }
             return None;
         }
@@ -50,17 +50,10 @@ impl Receiver {
         self.frame[self.len] = 0;
         let message = protocol::decode::<Message>(&mut self.frame[..=self.len]);
         self.len = 0;
-        Some(match message {
-            Ok(Message::Ping { nonce }) => Reply::Pong {
-                nonce,
-                version: protocol::VERSION,
-            },
-            // 描画命令は未実装のため、適用していない命令へ Ack を返さない。
-            Ok(Message::Clear | Message::Text { .. }) | Err(_) => self.reject(),
-        })
+        Some(message.map_err(|_| self.reject()))
     }
 
-    fn reject(&mut self) -> Reply {
+    pub fn reject(&mut self) -> Reply {
         self.rejected = self.rejected.saturating_add(1);
         Reply::Rejected {
             count: self.rejected,
@@ -78,7 +71,7 @@ mod tests {
         protocol::encode(message, &mut buffer).unwrap().to_vec()
     }
 
-    fn receive(receiver: &mut Receiver, bytes: &[u8]) -> Vec<Reply> {
+    fn receive(receiver: &mut Receiver, bytes: &[u8]) -> Vec<Result<Message, Reply>> {
         bytes
             .iter()
             .filter_map(|&byte| receiver.push(byte))
@@ -91,13 +84,7 @@ mod tests {
         for nonce in [0, 0x5A5A_1234, u32::MAX] {
             let frame = frame(&Message::Ping { nonce });
             assert!(receive(&mut receiver, &frame[..frame.len() - 1]).is_empty());
-            assert_eq!(
-                receiver.push(0),
-                Some(Reply::Pong {
-                    nonce,
-                    version: protocol::VERSION
-                })
-            );
+            assert_eq!(receiver.push(0), Some(Ok(Message::Ping { nonce })));
         }
     }
 
@@ -110,44 +97,32 @@ mod tests {
         assert_eq!(
             receive(&mut receiver, &stream),
             [
-                Reply::Pong {
-                    nonce: 1,
-                    version: protocol::VERSION
-                },
-                Reply::Pong {
-                    nonce: 2,
-                    version: protocol::VERSION
-                },
+                Ok(Message::Ping { nonce: 1 }),
+                Ok(Message::Ping { nonce: 2 }),
             ]
         );
     }
 
     #[test]
-    fn malformed_and_unsupported_frames_do_not_prevent_next_ping() {
+    fn malformed_frame_does_not_prevent_display_messages_or_ping() {
         let mut receiver = Receiver::default();
         assert_eq!(
             receive(&mut receiver, &[0xFF, 1, 2, 0]),
-            [Reply::Rejected { count: 1 }]
+            [Err(Reply::Rejected { count: 1 })]
         );
         assert_eq!(
             receive(&mut receiver, &frame(&Message::Clear)),
-            [Reply::Rejected { count: 2 }]
+            [Ok(Message::Clear)]
         );
         let text = Message::Text {
             slot: protocol::Slot::Overlay,
             ttl_s: 1,
             text: heapless::String::try_from("test").unwrap(),
         };
-        assert_eq!(
-            receive(&mut receiver, &frame(&text)),
-            [Reply::Rejected { count: 3 }]
-        );
+        assert_eq!(receive(&mut receiver, &frame(&text)), [Ok(text)]);
         assert_eq!(
             receive(&mut receiver, &frame(&Message::Ping { nonce: 3 })),
-            [Reply::Pong {
-                nonce: 3,
-                version: protocol::VERSION
-            },]
+            [Ok(Message::Ping { nonce: 3 })]
         );
     }
 
@@ -158,14 +133,11 @@ mod tests {
         let ping = frame(&Message::Ping { nonce: 4 });
         assert_eq!(
             receive(&mut receiver, &ping),
-            [Reply::Rejected { count: 1 }]
+            [Err(Reply::Rejected { count: 1 })]
         );
         assert_eq!(
             receive(&mut receiver, &ping),
-            [Reply::Pong {
-                nonce: 4,
-                version: protocol::VERSION
-            },]
+            [Ok(Message::Ping { nonce: 4 })]
         );
     }
 
@@ -173,13 +145,10 @@ mod tests {
     fn frame_at_capacity_rejects_once_and_recovers() {
         let mut receiver = Receiver::default();
         assert!(receive(&mut receiver, &[0xFF; MAX_FRAME_BYTES - 1]).is_empty());
-        assert_eq!(receiver.push(0), Some(Reply::Rejected { count: 1 }));
+        assert_eq!(receiver.push(0), Some(Err(Reply::Rejected { count: 1 })));
         assert_eq!(
             receive(&mut receiver, &frame(&Message::Ping { nonce: 5 })),
-            [Reply::Pong {
-                nonce: 5,
-                version: protocol::VERSION
-            },]
+            [Ok(Message::Ping { nonce: 5 })]
         );
     }
 
@@ -191,7 +160,7 @@ mod tests {
         };
         assert_eq!(
             receive(&mut receiver, &[0xFF, 0]),
-            [Reply::Rejected { count: u32::MAX }]
+            [Err(Reply::Rejected { count: u32::MAX })]
         );
     }
 }

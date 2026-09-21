@@ -1,6 +1,6 @@
 //! CoreS3 向け firmware。
 //!
-//! 起動時に表示確認画面を描画し、USB 経由の Ping に応答する。
+//! 起動時に表示確認画面を描画し、USB 経由の表示更新と Ping に応答する。
 
 #![no_std]
 #![no_main]
@@ -10,7 +10,7 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_backtrace as _;
 use esp_hal::delay::Delay;
 use esp_hal::main;
-use esp_hal::time::Duration;
+use esp_hal::time::{Duration, Instant};
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_hal::{
     gpio::{Flex, Level, Output, OutputConfig},
@@ -26,7 +26,7 @@ use mipidsi::{
 };
 
 mod board;
-use my_stackchan_firmware::{power, renderer, transport::Receiver};
+use my_stackchan_firmware::{model::Controller, power, renderer, transport::Receiver};
 
 // 壁時計を含めず、同じソースから同じ記述子を生成する。
 esp_bootloader_esp_idf::esp_app_desc!(
@@ -85,17 +85,31 @@ fn main() -> ! {
 
     let mut usb = UsbSerialJtag::new(peripherals.USB_DEVICE);
     let mut receiver = Receiver::default();
+    let mut controller = Controller::default();
     let mut tx = [0u8; 32];
     let mut tx_len = 0;
     let mut tx_sent = 0;
     loop {
+        let now_ms = Instant::now().duration_since_epoch().as_millis();
+        if controller.tick(now_ms, &mut display).is_err() {
+            esp_println::println!("display expiry drawing failed");
+        }
         // 応答 1 件分だけを保持し、送信待ちでもブロッキング API を使わない。
         if tx_len == 0 {
             for _ in 0..64 {
                 let Ok(byte) = usb.read_byte() else {
                     break;
                 };
-                if let Some(reply) = receiver.push(byte) {
+                if let Some(message) = receiver.push(byte) {
+                    let reply = match message {
+                        Ok(message) => controller
+                            .handle(message, now_ms, &mut display)
+                            .unwrap_or_else(|_| {
+                                esp_println::println!("display update failed");
+                                receiver.reject()
+                            }),
+                        Err(reply) => reply,
+                    };
                     // bootloader が USB に出したログと応答の境界を保証する。
                     tx[0] = 0;
                     tx_len = 1 + protocol::encode(&reply, &mut tx[1..])
