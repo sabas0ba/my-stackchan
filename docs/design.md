@@ -48,6 +48,7 @@ firmware を別 workspace にしているのは、target と `build-std` の設�
 | ILI9342C (320x240) | SPI | 表示。`mipidsi` crate の ILI9342C model を使用 |
 | AXP2101 | I2C | 電源。LCD バックライトの電源制御を含む |
 | AW9523 | I2C | GPIO 拡張。LCD リセット等 |
+| FT6336U | I2C (0x38) | タッチ入力。画面タップで表情デモを進める |
 | USB Serial/JTAG | ESP32-S3 内蔵 | host との通信。書込と共用 |
 | UART0 | GPIO | ログ出力 (panic、backtrace)。USB とは分離する |
 
@@ -135,6 +136,14 @@ PC 側の状態取得は手動 CLI またはスクリプトからの呼び出し
 `embedded-graphics` の図形で構成する。生成時の条件は「標準の顔を参照し、黒背景に白い目と口だけを
 配置した 4×3 の表情案。黒目・灰色・文字を使わず、320×240 の小型画面で再現できる線と円」とした。
 視線は白い目全体を上下左右へ移動し、開閉状態は表情とは独立に指定できる。
+
+CoreS3 の FT6336U は内部 I2C (GPIO11/12) に接続される。firmware は 20 ms 間隔で
+接触点数レジスタを読み、押下の立ち上がりで1回だけ表情を進める。離した状態を
+2回連続で確認するまで次のタップを受け付けない。デモは全12表情を循環し、
+画面下に番号と表情名を表示する。PC から表示命令を受けるとデモは終了する。
+タッチ IC が初期化できない場合も USB 表示は継続する。
+タッチ接続は [CoreS3 公式資料](https://docs.m5stack.com/en/core/CoreS3)、
+レジスタ操作は [M5GFX の FT5x06 実装](https://github.com/lovyan03/LovyanGFX/blob/master/src/lgfx/v1/touch/Touch_FT5x06.cpp) を参照した。
 
 画面上の視線は CoreS3 単体で動作する。物理的な首振りは、接続される機構の種類、
 ピン割当て、電源、可動域を確認してから追加する。

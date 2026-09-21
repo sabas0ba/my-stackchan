@@ -26,7 +26,7 @@ use mipidsi::{
 };
 
 mod board;
-use my_stackchan_firmware::{model::Controller, power, renderer, transport::Receiver};
+use my_stackchan_firmware::{model::Controller, power, renderer, touch, transport::Receiver};
 use static_cell::StaticCell;
 
 static RECEIVER: StaticCell<Receiver> = StaticCell::new();
@@ -87,6 +87,13 @@ fn main() -> ! {
     power::set_backlight(&mut i2c, true).expect("display backlight");
     esp_println::println!("Phase 1 display ready: face / ASCII / RGB565");
 
+    let mut touch_enabled = touch::init(&mut i2c).is_ok();
+    if !touch_enabled {
+        esp_println::println!("touch initialization failed; USB display remains active");
+    }
+    let mut tap_detector = touch::TapDetector::default();
+    let mut next_touch_poll_ms = 0u64;
+
     let mut usb = UsbSerialJtag::new(peripherals.USB_DEVICE);
     // Card を含む表示状態と受信バッファは大きいため、main のスタックから分離する。
     let receiver = RECEIVER.init_with(Receiver::default);
@@ -98,6 +105,21 @@ fn main() -> ! {
         let now_ms = Instant::now().duration_since_epoch().as_millis();
         if controller.tick(now_ms, &mut display).is_err() {
             esp_println::println!("display expiry drawing failed");
+        }
+        if touch_enabled && now_ms >= next_touch_poll_ms {
+            next_touch_poll_ms = now_ms.saturating_add(20);
+            match touch::read_pressed(&mut i2c) {
+                Ok(pressed) if tap_detector.sample(pressed) => {
+                    if controller.tap(now_ms, &mut display).is_err() {
+                        esp_println::println!("touch demo drawing failed");
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    touch_enabled = false;
+                    esp_println::println!("touch read failed; USB display remains active");
+                }
+            }
         }
         // 応答 1 件分だけを保持し、送信待ちでもブロッキング API を使わない。
         if tx_len == 0 {

@@ -228,6 +228,12 @@ scripts/container.sh device target/debug/stackchan clear
 `clear` は顔と帯をすべて消す。描画例は `.work/simulation/index.html` の
 `07-working.bmp` から `24-eyes-half-lidded.bmp` に含まれる。
 
+CoreS3 の画面を1回タップするとデモの先頭 `01/12 HAPPY` を表示し、指を離して
+再びタップすると `02/12 FOCUSED` に進む。12番目の後は先頭に戻る。画面下の
+番号と表情名、顔の変化を確認する。PC から `face` / `status` / `text` / `card` /
+`clear` を送るとデモは終了する。タッチデモは USB の Ack 通し番号を増やさない。
+シミュレーションの `demo-01.bmp` から `demo-12.bmp` は同じモデルの順送り描画である。
+
 この版は画面上の視線のみを制御する。物理的な首振りは駆動機構、接続端子、可動域を
 確認した後に実装する。
 

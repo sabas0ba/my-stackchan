@@ -411,6 +411,17 @@ fn generate(options: &Options) -> io::Result<()> {
         );
         save_bmp(&options.output_dir.join(name), &screen)?;
     }
+    for index in 0..my_stackchan_firmware::model::DEMO_FACE_COUNT {
+        controller
+            .tap(index as u64, &mut screen)
+            .expect("screen is infallible");
+        save_bmp(
+            &options
+                .output_dir
+                .join(format!("demo-{:02}.bmp", index + 1)),
+            &screen,
+        )?;
+    }
 
     fs::write(
         options.output_dir.join("index.html"),
@@ -420,7 +431,7 @@ fn generate(options: &Options) -> io::Result<()> {
 }
 
 fn gallery_html(ttl_s: u16) -> String {
-    format!(
+    let mut html = format!(
         r#"<!doctype html>
 <html lang="ja">
 <meta charset="utf-8">
@@ -461,10 +472,15 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="22-eyes-wide.bmp" width="320" height="240" alt="目を見開く"><figcaption>22. Eyes wide</figcaption></figure>
 <figure><img src="23-eyes-closed.bmp" width="320" height="240" alt="目を閉じる"><figcaption>23. Eyes closed</figcaption></figure>
 <figure><img src="24-eyes-half-lidded.bmp" width="320" height="240" alt="ジト目"><figcaption>24. Half-lidded eyes</figcaption></figure>
-</div>
-</html>
 "#
-    )
+    );
+    for index in 1..=my_stackchan_firmware::model::DEMO_FACE_COUNT {
+        html.push_str(&format!(
+            "<figure><img src=\"demo-{index:02}.bmp\" width=\"320\" height=\"240\" alt=\"タップデモ {index}\"><figcaption>Tap {index}</figcaption></figure>\n"
+        ));
+    }
+    html.push_str("</div>\n</html>\n");
+    html
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
