@@ -1,6 +1,6 @@
 //! 起動確認画面と Slot の描画。フレームバッファを持たず描画先へ直接出力する。
 
-use crate::model::DisplayState;
+use crate::model::{Content, DisplayState};
 use embedded_graphics::{
     image::{Image, ImageRawBE},
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
@@ -9,7 +9,7 @@ use embedded_graphics::{
     primitives::{Circle, Line, PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
-use protocol::Slot;
+use protocol::{Card, Element, Slot};
 
 const IMAGE_WIDTH: usize = 96;
 const IMAGE_HEIGHT: usize = 16;
@@ -87,18 +87,18 @@ pub fn draw_state<D: DrawTarget<Color = Rgb565>>(
 ) -> Result<(), D::Error> {
     display.clear(Rgb565::BLACK)?;
     if let Some(entry) = state.get(Slot::Overlay) {
-        draw_text(
+        draw_content(
             display,
-            &entry.text,
+            &entry.content,
             Rectangle::new(Point::zero(), Size::new(320, 240)),
         )?;
     } else {
         draw_face(display)?;
         for (slot, y) in [(Slot::BannerTop, 0), (Slot::BannerBottom, 192)] {
             if let Some(entry) = state.get(slot) {
-                draw_text(
+                draw_content(
                     display,
-                    &entry.text,
+                    &entry.content,
                     Rectangle::new(Point::new(0, y), Size::new(320, 48)),
                 )?;
             }
@@ -107,12 +107,103 @@ pub fn draw_state<D: DrawTarget<Color = Rgb565>>(
     Ok(())
 }
 
+fn draw_content<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    content: &Content,
+    area: Rectangle,
+) -> Result<(), D::Error> {
+    match content {
+        Content::Text(text) => draw_text(display, text, area),
+        Content::Card(card) => draw_card(display, card, area),
+    }
+}
+
+fn draw_card<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    card: &Card,
+    area: Rectangle,
+) -> Result<(), D::Error> {
+    let mut y = area.top_left.y + 4;
+    for row in &card.rows {
+        let width = (area.size.width - 20) / row.elements.len() as u32;
+        for (index, element) in row.elements.iter().enumerate() {
+            let cell = Rectangle::new(
+                Point::new(area.top_left.x + 10 + index as i32 * width as i32, y),
+                Size::new(width, u32::from(row.height())),
+            );
+            let mut clipped = display.clipped(&cell);
+            match element {
+                Element::Text { text } => draw_cell_label(&mut clipped, text, cell)?,
+                Element::Bar { ratio, label } => {
+                    let label_width = (width / 3).min(80);
+                    draw_cell_label(
+                        &mut clipped,
+                        label,
+                        Rectangle::new(cell.top_left, Size::new(label_width, 20)),
+                    )?;
+                    let bar_width = width - label_width - 8;
+                    let bar = Rectangle::new(
+                        Point::new(cell.top_left.x + label_width as i32 + 4, y + 6),
+                        Size::new(bar_width, 8),
+                    );
+                    bar.into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
+                        .draw(&mut clipped)?;
+                    Rectangle::new(
+                        bar.top_left + Point::new(1, 1),
+                        Size::new((bar_width - 2) * u32::from(*ratio) / 100, 6),
+                    )
+                    .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                    .draw(&mut clipped)?;
+                }
+                Element::Spacer { .. } => {}
+            }
+        }
+        y += i32::from(row.height());
+    }
+    Ok(())
+}
+
+fn draw_cell_label<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    text: &str,
+    cell: Rectangle,
+) -> Result<(), D::Error> {
+    let mut clipped = display.clipped(&cell);
+    for (column, ch) in text.chars().filter(|ch| !ch.is_control()).enumerate() {
+        if column as u32 >= cell.size.width / 10 {
+            break;
+        }
+        draw_glyph(
+            &mut clipped,
+            ch,
+            cell.top_left + Point::new(column as i32 * 10, 0),
+        )?;
+    }
+    Ok(())
+}
+
+fn draw_glyph<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    ch: char,
+    point: Point,
+) -> Result<(), D::Error> {
+    let glyph = if ch.is_ascii() { ch as u8 } else { b'?' };
+    let bytes = [glyph];
+    Text::with_baseline(
+        core::str::from_utf8(&bytes).expect("ASCII glyph"),
+        point,
+        MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+        Baseline::Top,
+    )
+    .draw(display)?;
+    Ok(())
+}
+
 fn draw_text<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     text: &str,
     area: Rectangle,
 ) -> Result<(), D::Error> {
-    let style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
     let mut clipped = display.clipped(&area);
     let mut column = 0;
     let mut row = 0;
@@ -135,16 +226,11 @@ fn draw_text<D: DrawTarget<Color = Rgb565>>(
             break;
         }
         // 日本語フォント導入前も UTF-8 のバイト単位で文字を分断しない。
-        let glyph = if ch.is_ascii() { ch as u8 } else { b'?' };
-        let bytes = [glyph];
-        let glyph = core::str::from_utf8(&bytes).expect("ASCII glyph");
-        Text::with_baseline(
-            glyph,
+        draw_glyph(
+            &mut clipped,
+            ch,
             area.top_left + Point::new(10 + column * 10, 4 + row as i32 * 20),
-            style,
-            Baseline::Top,
-        )
-        .draw(&mut clipped)?;
+        )?;
         column += 1;
     }
     Ok(())
@@ -300,5 +386,49 @@ mod tests {
             Rectangle::new(Point::zero(), Size::new(320, 240)),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn card_bar_ratio_and_layout_are_rendered_inside_banner() {
+        use crate::model::Controller;
+        use protocol::{Message, Row};
+        let mut rows = heapless::Vec::new();
+        rows.push(Row {
+            elements: heapless::Vec::from_slice(&[
+                Element::Text {
+                    text: "CPU".try_into().unwrap(),
+                },
+                Element::Text {
+                    text: "75%".try_into().unwrap(),
+                },
+            ])
+            .unwrap(),
+        })
+        .unwrap();
+        rows.push(Row {
+            elements: heapless::Vec::from_slice(&[Element::Bar {
+                ratio: 75,
+                label: "Usage".try_into().unwrap(),
+            }])
+            .unwrap(),
+        })
+        .unwrap();
+        let mut controller = Controller::default();
+        let mut screen = Screen(vec![Rgb565::BLACK; 320 * 240]);
+        controller
+            .handle(
+                Message::Card(Card {
+                    slot: Slot::BannerTop,
+                    ttl_s: 0,
+                    rows,
+                }),
+                0,
+                &mut screen,
+            )
+            .unwrap();
+        // バーの外枠と、75% の内側が塗られている。右端側は黒のまま。
+        assert_eq!(screen.0[33 * 320 + 117], Rgb565::WHITE);
+        assert_eq!(screen.0[33 * 320 + 260], Rgb565::BLACK);
+        assert!(!screen.0[48 * 320..72 * 320].contains(&Rgb565::WHITE));
     }
 }

@@ -1,11 +1,17 @@
 //! Slot の内容と単調時計に基づく表示期限。描画の成功後に状態を確定する。
 
 use embedded_graphics::{pixelcolor::Rgb565, prelude::DrawTarget};
-use protocol::{MAX_TEXT_BYTES, Message, Reply, Slot};
+use protocol::{Card, MAX_TEXT_BYTES, Message, Reply, Slot};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Content {
+    Text(heapless::String<MAX_TEXT_BYTES>),
+    Card(Card),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    pub text: heapless::String<MAX_TEXT_BYTES>,
+    pub content: Content,
     deadline_ms: Option<u64>,
 }
 
@@ -19,9 +25,9 @@ impl DisplayState {
         self.slots[slot_index(slot)].as_ref()
     }
 
-    fn set(&mut self, slot: Slot, text: heapless::String<MAX_TEXT_BYTES>, ttl_s: u16, now_ms: u64) {
+    fn set(&mut self, slot: Slot, content: Content, ttl_s: u16, now_ms: u64) {
         self.slots[slot_index(slot)] = Some(Entry {
-            text,
+            content,
             deadline_ms: (ttl_s != 0).then(|| now_ms.saturating_add(u64::from(ttl_s) * 1000)),
         });
     }
@@ -59,13 +65,19 @@ pub struct Controller {
     seq: u32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum HandleError<E> {
+    InvalidCard,
+    Draw(E),
+}
+
 impl Controller {
     pub fn handle<D: DrawTarget<Color = Rgb565>>(
         &mut self,
         message: Message,
         now_ms: u64,
         display: &mut D,
-    ) -> Result<Reply, D::Error> {
+    ) -> Result<Reply, HandleError<D::Error>> {
         let mut next = self.state.clone();
         match message {
             Message::Ping { nonce } => {
@@ -75,11 +87,19 @@ impl Controller {
                 });
             }
             Message::Clear => next = DisplayState::default(),
-            Message::Text { slot, ttl_s, text } => next.set(slot, text, ttl_s, now_ms),
+            Message::Text { slot, ttl_s, text } => {
+                next.set(slot, Content::Text(text), ttl_s, now_ms)
+            }
+            Message::Card(card) => {
+                card.validate().map_err(|_| HandleError::InvalidCard)?;
+                let slot = card.slot;
+                let ttl_s = card.ttl_s;
+                next.set(slot, Content::Card(card), ttl_s, now_ms);
+            }
         }
         // Overlay の背後の期限切れも、再表示の前に除去する。
         next.expire(now_ms);
-        crate::renderer::draw_state(display, &next)?;
+        crate::renderer::draw_state(display, &next).map_err(HandleError::Draw)?;
         self.state = next;
         self.seq = self.seq.wrapping_add(1);
         Ok(Reply::Ack { seq: self.seq })
@@ -138,6 +158,60 @@ mod tests {
         }
     }
 
+    fn card(slot: Slot, ttl_s: u16, ratio: u8) -> Message {
+        let mut rows = heapless::Vec::new();
+        rows.push(protocol::Row {
+            elements: heapless::Vec::from_slice(&[protocol::Element::Text {
+                text: "CPU".try_into().unwrap(),
+            }])
+            .unwrap(),
+        })
+        .unwrap();
+        rows.push(protocol::Row {
+            elements: heapless::Vec::from_slice(&[protocol::Element::Bar {
+                ratio,
+                label: "Usage".try_into().unwrap(),
+            }])
+            .unwrap(),
+        })
+        .unwrap();
+        Message::Card(Card { slot, ttl_s, rows })
+    }
+
+    #[test]
+    fn card_replaces_slot_and_expires_without_affecting_other_slots() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        controller
+            .handle(text(Slot::BannerBottom, 0, "keep"), 0, &mut display)
+            .unwrap();
+        assert_eq!(
+            controller.handle(card(Slot::BannerTop, 1, 75), 100, &mut display),
+            Ok(Reply::Ack { seq: 2 })
+        );
+        assert!(matches!(
+            controller.state.get(Slot::BannerTop).unwrap().content,
+            Content::Card(_)
+        ));
+        controller.tick(1100, &mut display).unwrap();
+        assert!(controller.state.get(Slot::BannerTop).is_none());
+        assert!(controller.state.get(Slot::BannerBottom).is_some());
+    }
+
+    #[test]
+    fn invalid_card_is_rejected_before_drawing_or_state_change() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        let pixels = display.pixels;
+        assert_eq!(
+            controller.handle(card(Slot::BannerTop, 0, 101), 0, &mut display),
+            Err(HandleError::InvalidCard)
+        );
+        assert_eq!(display.pixels, pixels);
+        assert_eq!(controller.seq, 0);
+        assert_eq!(controller.state, DisplayState::default());
+    }
+
     #[test]
     fn slots_expire_independently_at_deadline_and_zero_persists() {
         let mut controller = Controller::default();
@@ -173,7 +247,10 @@ mod tests {
             .handle(text(Slot::BannerTop, 2, "new"), 500, &mut display)
             .unwrap();
         controller.tick(1000, &mut display).unwrap();
-        assert_eq!(controller.state.get(Slot::BannerTop).unwrap().text, "new");
+        assert_eq!(
+            controller.state.get(Slot::BannerTop).unwrap().content,
+            Content::Text("new".try_into().unwrap())
+        );
         assert_eq!(
             controller.handle(Message::Clear, 1000, &mut display),
             Ok(Reply::Ack { seq: 3 })
@@ -193,7 +270,10 @@ mod tests {
             .unwrap();
         let before = controller.state.clone();
         display.fail = true;
-        assert_eq!(controller.handle(Message::Clear, 1, &mut display), Err(()));
+        assert_eq!(
+            controller.handle(Message::Clear, 1, &mut display),
+            Err(HandleError::Draw(()))
+        );
         assert_eq!(controller.state, before);
         assert_eq!(controller.seq, 1);
         assert_eq!(controller.tick(1000, &mut display), Err(()));
