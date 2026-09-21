@@ -53,6 +53,8 @@ check-rust: ## Rust の検査 (fmt --check, clippy, test, firmware の build)
 	# ルートから実行し、firmware/.cargo の Xtensa/build-std 設定を適用しない。
 	cargo clippy --manifest-path $(FIRMWARE_DIR)/Cargo.toml --lib --locked --offline -- -D warnings
 	cargo test --manifest-path $(FIRMWARE_DIR)/Cargo.toml --lib --locked --offline
+	cargo clippy --manifest-path $(FIRMWARE_DIR)/Cargo.toml --example simulate --locked --offline -- -D warnings
+	cargo test --manifest-path $(FIRMWARE_DIR)/Cargo.toml --example simulate --locked --offline
 	cd $(FIRMWARE_DIR) && cargo fmt --all --check
 	cd $(FIRMWARE_DIR) && cargo clippy --locked --offline -- -D warnings
 	cd $(FIRMWARE_DIR) && cargo build --locked --offline --release
@@ -98,6 +100,10 @@ build-host: ## host CLI と protocol を build する
 .PHONY: build-firmware
 build-firmware: ## firmware を build する
 	cd $(FIRMWARE_DIR) && cargo build --locked --release
+
+.PHONY: simulate
+simulate: ## 実機と同じ描画処理で表示の各状態を .work/simulation/ に生成する
+	cargo run --manifest-path $(FIRMWARE_DIR)/Cargo.toml --example simulate --locked --offline
 
 .PHONY: flash
 flash: build-firmware ## firmware を書き込む (SERIAL_DEVICE、既定 /dev/ttyACM0)

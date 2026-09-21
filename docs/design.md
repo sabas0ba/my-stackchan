@@ -132,6 +132,10 @@ HTML そのものを firmware で解釈することはしない。要素数、�
 レイアウト付き Card と decoder の fuzz 検証は後続作業とする。操作手順は
 [environment.md](environment.md#text--clear-の実機確認)、現行の表示仕様は [protocol.md](protocol.md) を参照する。
 
+実機との表示比較には [表示シミュレーション](environment.md#表示シミュレーション)を利用できる。
+`firmware` のモデルと描画器を host 上で直接実行し、起動時・帯表示・Overlay 中・TTL 満了後を
+画像化する。シミュレーター側には表示配置を複製せず、画素を BMP へ保存する描画先だけを置く。
+
 | Phase | 内容 | 受入条件 |
 | --- | --- | --- |
 | 0 | 環境整備 | `scripts/container.sh check` が `--network none` で成功する。firmware の最小構成が build できる |

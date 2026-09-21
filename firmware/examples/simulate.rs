@@ -1,0 +1,340 @@
+//! 実機と同じ描画処理を PC 上で実行し、表示状態を画像で比較する。
+
+use std::{
+    fs::{self, File},
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+};
+
+use embedded_graphics::{
+    pixelcolor::{Rgb565, RgbColor},
+    prelude::{DrawTarget, OriginDimensions, Pixel, Point, Size},
+};
+use my_stackchan_firmware::{model::Controller, renderer};
+use protocol::{MAX_TEXT_BYTES, Message, Reply, Slot};
+
+const WIDTH: usize = 320;
+const HEIGHT: usize = 240;
+
+#[derive(Debug)]
+struct ScreenError(Point);
+
+impl std::fmt::Display for ScreenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "画面外への描画: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for ScreenError {}
+
+struct Screen {
+    pixels: Vec<Rgb565>,
+}
+
+impl Default for Screen {
+    fn default() -> Self {
+        Self {
+            pixels: vec![Rgb565::BLACK; WIDTH * HEIGHT],
+        }
+    }
+}
+
+impl OriginDimensions for Screen {
+    fn size(&self) -> Size {
+        Size::new(WIDTH as u32, HEIGHT as u32)
+    }
+}
+
+impl DrawTarget for Screen {
+    type Color = Rgb565;
+    type Error = ScreenError;
+
+    fn draw_iter<I: IntoIterator<Item = Pixel<Rgb565>>>(
+        &mut self,
+        pixels: I,
+    ) -> Result<(), Self::Error> {
+        for Pixel(Point { x, y }, color) in pixels {
+            if !(0..WIDTH as i32).contains(&x) || !(0..HEIGHT as i32).contains(&y) {
+                return Err(ScreenError(Point::new(x, y)));
+            }
+            self.pixels[y as usize * WIDTH + x as usize] = color;
+        }
+        Ok(())
+    }
+}
+
+/// 24-bit BMP は Windows とブラウザーで開け、追加 crate や非固定の画像変換器を要しない。
+fn write_bmp(mut output: impl Write, screen: &Screen) -> io::Result<()> {
+    let row_bytes = WIDTH * 3;
+    let padding = (4 - row_bytes % 4) % 4;
+    let image_bytes = (row_bytes + padding) * HEIGHT;
+    let file_bytes = 54 + image_bytes;
+
+    output.write_all(b"BM")?;
+    output.write_all(&(file_bytes as u32).to_le_bytes())?;
+    output.write_all(&[0; 4])?;
+    output.write_all(&54u32.to_le_bytes())?;
+    output.write_all(&40u32.to_le_bytes())?;
+    output.write_all(&(WIDTH as i32).to_le_bytes())?;
+    // 負の高さで上から下へ格納し、DrawTarget の座標系と一致させる。
+    output.write_all(&(-(HEIGHT as i32)).to_le_bytes())?;
+    output.write_all(&1u16.to_le_bytes())?;
+    output.write_all(&24u16.to_le_bytes())?;
+    output.write_all(&0u32.to_le_bytes())?;
+    output.write_all(&(image_bytes as u32).to_le_bytes())?;
+    output.write_all(&[0; 16])?;
+
+    for row in screen.pixels.chunks_exact(WIDTH) {
+        for color in row {
+            let red = color.r();
+            let green = color.g();
+            let blue = color.b();
+            output.write_all(&[
+                (blue << 3) | (blue >> 2),
+                (green << 2) | (green >> 4),
+                (red << 3) | (red >> 2),
+            ])?;
+        }
+        output.write_all(&[0; 3][..padding])?;
+    }
+    Ok(())
+}
+
+fn save_bmp(path: &Path, screen: &Screen) -> io::Result<()> {
+    write_bmp(BufWriter::new(File::create(path)?), screen)
+}
+
+struct Options {
+    output_dir: PathBuf,
+    top: String,
+    bottom: String,
+    overlay: String,
+    ttl_s: u16,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            output_dir: PathBuf::from(".work/simulation"),
+            top: "USB Text OK".into(),
+            bottom: "BannerBottom OK".into(),
+            overlay: "Overlay test".into(),
+            ttl_s: 5,
+        }
+    }
+}
+
+impl Options {
+    fn parse(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
+        let mut options = Self::default();
+        while let Some(flag) = args.next() {
+            let value = args
+                .next()
+                .ok_or_else(|| format!("{flag} に値が必要です"))?;
+            match flag.as_str() {
+                "--out" => options.output_dir = value.into(),
+                "--top" => options.top = value,
+                "--bottom" => options.bottom = value,
+                "--overlay" => options.overlay = value,
+                "--ttl" => {
+                    options.ttl_s = value
+                        .parse()
+                        .map_err(|_| "--ttl は 1..65535 の整数にしてください")?;
+                }
+                _ => return Err(format!("不明なオプション: {flag}")),
+            }
+        }
+        if options.ttl_s == 0 {
+            return Err("--ttl は 1..65535 の整数にしてください".into());
+        }
+        for (name, text) in [
+            ("--top", &options.top),
+            ("--bottom", &options.bottom),
+            ("--overlay", &options.overlay),
+        ] {
+            if text.len() > MAX_TEXT_BYTES {
+                return Err(format!(
+                    "{name} は UTF-8 で {MAX_TEXT_BYTES} byte 以下にしてください"
+                ));
+            }
+        }
+        Ok(options)
+    }
+}
+
+fn text(slot: Slot, content: &str, ttl_s: u16) -> Message {
+    Message::Text {
+        slot,
+        ttl_s,
+        text: content.try_into().expect("validated text length"),
+    }
+}
+
+fn apply(controller: &mut Controller, screen: &mut Screen, message: Message) {
+    let reply = controller
+        .handle(message, 0, screen)
+        .expect("screen is infallible");
+    assert!(matches!(reply, Reply::Ack { .. }));
+}
+
+fn generate(options: &Options) -> io::Result<()> {
+    fs::create_dir_all(&options.output_dir)?;
+    let mut screen = Screen::default();
+    let mut controller = Controller::default();
+
+    renderer::draw(&mut screen).expect("screen is infallible");
+    save_bmp(&options.output_dir.join("01-startup.bmp"), &screen)?;
+
+    apply(
+        &mut controller,
+        &mut screen,
+        text(Slot::BannerTop, &options.top, 0),
+    );
+    apply(
+        &mut controller,
+        &mut screen,
+        text(Slot::BannerBottom, &options.bottom, 0),
+    );
+    save_bmp(&options.output_dir.join("02-banners.bmp"), &screen)?;
+
+    apply(
+        &mut controller,
+        &mut screen,
+        text(Slot::Overlay, &options.overlay, options.ttl_s),
+    );
+    save_bmp(&options.output_dir.join("03-overlay.bmp"), &screen)?;
+
+    controller
+        .tick(u64::from(options.ttl_s) * 1000, &mut screen)
+        .expect("screen is infallible");
+    save_bmp(&options.output_dir.join("04-expired.bmp"), &screen)?;
+
+    fs::write(
+        options.output_dir.join("index.html"),
+        gallery_html(options.ttl_s),
+    )?;
+    Ok(())
+}
+
+fn gallery_html(ttl_s: u16) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>my-stackchan 表示シミュレーション</title>
+<style>
+body {{ margin: 2rem auto; max-width: 82rem; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; background: #f4f5f7; color: #17212b; }}
+h1 {{ font-size: 1.5rem; }}
+.frames {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 1rem; }}
+figure {{ margin: 0; padding: 1rem; background: white; border: 1px solid #d8dee6; border-radius: .5rem; }}
+img {{ display: block; width: 320px; height: 240px; max-width: 100%; image-rendering: pixelated; background: black; }}
+figcaption {{ margin-top: .5rem; font-weight: 600; }}
+</style>
+<h1>my-stackchan 表示シミュレーション</h1>
+<p>実機と同じ描画・表示状態のコードを PC 上で実行した結果。時刻は表示命令の受理からの経過時間です。</p>
+<div class="frames">
+<figure><img src="01-startup.bmp" width="320" height="240" alt="起動確認画面"><figcaption>1. 起動時</figcaption></figure>
+<figure><img src="02-banners.bmp" width="320" height="240" alt="上下の帯と顔"><figcaption>2. 上下の帯</figcaption></figure>
+<figure><img src="03-overlay.bmp" width="320" height="240" alt="Overlay 表示"><figcaption>3. Overlay 表示直後</figcaption></figure>
+<figure><img src="04-expired.bmp" width="320" height="240" alt="期限満了後の上下の帯と顔"><figcaption>4. Overlay 期限満了後（{ttl_s} 秒）</figcaption></figure>
+</div>
+</html>
+"#
+    )
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!(
+            "usage: simulate [--out DIR] [--top TEXT] [--bottom TEXT] [--overlay TEXT] [--ttl SECONDS (1..65535)]"
+        );
+        return Ok(());
+    }
+    let options = Options::parse(args.into_iter())?;
+    generate(&options)?;
+    println!("{}", options.output_dir.join("index.html").display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bmp_has_expected_dimensions_colors_and_top_down_order() {
+        let mut screen = Screen::default();
+        screen.pixels[0] = Rgb565::RED;
+        screen.pixels[WIDTH - 1] = Rgb565::GREEN;
+        screen.pixels[(HEIGHT - 1) * WIDTH] = Rgb565::BLUE;
+        let mut bmp = Vec::new();
+        write_bmp(&mut bmp, &screen).unwrap();
+        assert_eq!(&bmp[..2], b"BM");
+        assert_eq!(
+            u32::from_le_bytes(bmp[2..6].try_into().unwrap()) as usize,
+            bmp.len()
+        );
+        assert_eq!(
+            i32::from_le_bytes(bmp[18..22].try_into().unwrap()),
+            WIDTH as i32
+        );
+        assert_eq!(
+            i32::from_le_bytes(bmp[22..26].try_into().unwrap()),
+            -(HEIGHT as i32)
+        );
+        assert_eq!(&bmp[54..57], &[0, 0, 255]);
+        assert_eq!(&bmp[54 + (WIDTH - 1) * 3..54 + WIDTH * 3], &[0, 255, 0]);
+        assert_eq!(
+            &bmp[54 + (HEIGHT - 1) * WIDTH * 3..54 + (HEIGHT - 1) * WIDTH * 3 + 3],
+            &[255, 0, 0]
+        );
+    }
+
+    #[test]
+    fn screen_rejects_out_of_bounds_pixels() {
+        let mut screen = Screen::default();
+        assert!(
+            screen
+                .draw_iter([Pixel(Point::new(-1, 0), Rgb565::WHITE)])
+                .is_err()
+        );
+        assert!(
+            screen
+                .draw_iter([Pixel(Point::new(320, 0), Rgb565::WHITE)])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn simulator_reuses_controller_and_renderer_for_ttl_transition() {
+        let mut controller = Controller::default();
+        let mut screen = Screen::default();
+        apply(
+            &mut controller,
+            &mut screen,
+            text(Slot::BannerTop, "VISIBLE", 0),
+        );
+        let banners = screen.pixels.clone();
+        apply(
+            &mut controller,
+            &mut screen,
+            text(Slot::Overlay, "OVERLAY", 1),
+        );
+        assert_ne!(screen.pixels, banners);
+        controller.tick(999, &mut screen).unwrap();
+        assert_ne!(screen.pixels, banners);
+        controller.tick(1000, &mut screen).unwrap();
+        assert_eq!(screen.pixels, banners);
+    }
+
+    #[test]
+    fn options_reject_invalid_ttl_and_utf8_byte_limit() {
+        assert!(Options::parse(["--ttl", "0"].into_iter().map(String::from)).is_err());
+        assert!(Options::parse(["--ttl", "65536"].into_iter().map(String::from)).is_err());
+        assert!(
+            Options::parse(["--top", &"日".repeat(171)].into_iter().map(String::from)).is_err()
+        );
+        assert!(Options::parse(["--top", &"日".repeat(170)].into_iter().map(String::from)).is_ok());
+    }
+}
