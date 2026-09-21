@@ -4,7 +4,7 @@
 //! 使用量の取得 (collector) は docs/design.md のフェーズに従って追加する。
 
 use std::io::{Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
@@ -77,6 +77,8 @@ fn ping(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut port = serialport::new(&port_name, 115_200)
         .timeout(Duration::from_millis(1000))
         .open()?;
+    // 書き込み直後に残る bootloader のログを今回の応答に混入させない。
+    port.clear(serialport::ClearBuffer::Input)?;
 
     let nonce = 0x5A5A_1234;
     let mut buf = [0u8; 32];
@@ -84,23 +86,42 @@ fn ping(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     port.write_all(frame)?;
     port.flush()?;
 
+    let reply = read_reply(&mut port)?;
+    println!("{port_name}: {reply:?}");
+    validate_pong(&reply, nonce).map_err(Into::into)
+}
+
+fn read_reply(reader: &mut impl Read) -> Result<protocol::Reply, Box<dyn std::error::Error>> {
     let mut rx = [0u8; protocol::MAX_FRAME_BYTES];
     let mut len = 0;
-    loop {
-        let n = port.read(&mut rx[len..])?;
+    let mut discarding = false;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    // 起動ログや空の区切りを読み飛ばしても、連続入力で永久に待たない。
+    while Instant::now() < deadline {
+        let mut byte = [0];
+        let n = reader.read(&mut byte)?;
         if n == 0 {
             return Err("応答がありません".into());
         }
-        len += n;
-        if let Some(end) = rx[..len].iter().position(|&b| b == 0) {
-            let reply: protocol::Reply = protocol::decode(&mut rx[..=end])?;
-            println!("{port_name}: {reply:?}");
-            return validate_pong(&reply, nonce).map_err(Into::into);
-        }
-        if len == rx.len() {
-            return Err("フレームが長すぎます".into());
+        if byte[0] == 0 {
+            if !discarding && len != 0 {
+                rx[len] = 0;
+                if let Ok(reply) = protocol::decode(&mut rx[..=len]) {
+                    return Ok(reply);
+                }
+            }
+            len = 0;
+            discarding = false;
+        } else if !discarding {
+            if len == rx.len() - 1 {
+                discarding = true;
+            } else {
+                rx[len] = byte[0];
+                len += 1;
+            }
         }
     }
+    Err("応答待ちがタイムアウトしました".into())
 }
 
 fn validate_pong(reply: &protocol::Reply, expected_nonce: u32) -> Result<(), String> {
@@ -174,24 +195,36 @@ mod tests {
     }
 
     #[test]
+    fn reply_reader_resynchronizes_after_boot_log_and_oversized_frame() {
+        let reply = protocol::Reply::Pong {
+            nonce: NONCE,
+            version: protocol::VERSION,
+        };
+        let mut buffer = [0; 32];
+        let frame = protocol::encode(&reply, &mut buffer).unwrap();
+        let mut stream = b"boot: Loaded app\r\n\0\0".to_vec();
+        stream.extend([1; protocol::MAX_FRAME_BYTES]);
+        // 上限超過フレームの末尾にある正しい応答も、区切りまでは捨てる。
+        stream.extend(frame);
+        stream.extend(frame);
+        assert_eq!(read_reply(&mut stream.as_slice()).unwrap(), reply);
+    }
+
+    #[test]
+    fn reply_reader_rejects_truncated_input() {
+        let mut stream = &[1, 6, 1, 2][..];
+        assert!(read_reply(&mut stream).is_err());
+    }
+
+    #[test]
     #[ignore = "Ping 対応 firmware の実機と STACKCHAN_TEST_PORT が必要"]
     fn hardware_ping_and_frame_recovery() {
-        fn read_reply(port: &mut dyn serialport::SerialPort) -> protocol::Reply {
-            let mut frame = [0; protocol::MAX_FRAME_BYTES];
-            for end in 0..frame.len() {
-                port.read_exact(&mut frame[end..=end]).unwrap();
-                if frame[end] == 0 {
-                    return protocol::decode(&mut frame[..=end]).unwrap();
-                }
-            }
-            panic!("実機からの応答がフレーム上限を超えました");
-        }
-
         let port_name = std::env::var("STACKCHAN_TEST_PORT").expect("STACKCHAN_TEST_PORT が必要");
         let mut port = serialport::new(port_name, 115_200)
             .timeout(Duration::from_secs(2))
             .open()
             .unwrap();
+        port.clear(serialport::ClearBuffer::Input).unwrap();
         let mut buffer = [0; 32];
         let ping =
             protocol::encode(&protocol::Message::Ping { nonce: NONCE }, &mut buffer).unwrap();
@@ -202,11 +235,14 @@ mod tests {
             port.flush().unwrap();
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert_eq!(validate_pong(&read_reply(&mut *port), NONCE), Ok(()));
+        assert_eq!(
+            validate_pong(&read_reply(&mut port).unwrap(), NONCE),
+            Ok(())
+        );
 
         port.write_all(&[0xFF, 1, 2, 0]).unwrap();
         port.flush().unwrap();
-        let protocol::Reply::Rejected { count } = read_reply(&mut *port) else {
+        let protocol::Reply::Rejected { count } = read_reply(&mut port).unwrap() else {
             panic!("不正フレームが拒否されませんでした");
         };
         assert!(count > 0);
@@ -216,7 +252,7 @@ mod tests {
         port.write_all(ping).unwrap();
         port.flush().unwrap();
         assert_eq!(
-            read_reply(&mut *port),
+            read_reply(&mut port).unwrap(),
             protocol::Reply::Rejected {
                 count: count.saturating_add(1)
             }
@@ -227,7 +263,10 @@ mod tests {
         port.write_all(ping).unwrap();
         port.flush().unwrap();
         for _ in 0..2 {
-            assert_eq!(validate_pong(&read_reply(&mut *port), NONCE), Ok(()));
+            assert_eq!(
+                validate_pong(&read_reply(&mut port).unwrap(), NONCE),
+                Ok(())
+            );
         }
     }
 }

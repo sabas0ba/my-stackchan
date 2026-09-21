@@ -96,7 +96,9 @@ fn main() -> ! {
                     break;
                 };
                 if let Some(reply) = receiver.push(byte) {
-                    tx_len = protocol::encode(&reply, &mut tx)
+                    // bootloader が USB に出したログと応答の境界を保証する。
+                    tx[0] = 0;
+                    tx_len = 1 + protocol::encode(&reply, &mut tx[1..])
                         .expect("reply buffer capacity")
                         .len();
                     break;
@@ -109,7 +111,11 @@ fn main() -> ! {
             }
             tx_sent += 1;
         }
-        if tx_len != 0 && tx_sent == tx_len && usb.flush_tx_nb().is_ok() {
+        if tx_len != 0 && tx_sent == tx_len {
+            // flush はパケットを送信要求する操作なので 1 度だけ行う。
+            // WouldBlock でも FIFO へのコピーは完了している。次のパケットは
+            // write_byte_nb が FIFO の空きを確認してから書き込む。
+            let _ = usb.flush_tx_nb();
             tx_len = 0;
             tx_sent = 0;
         }
