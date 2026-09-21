@@ -172,4 +172,62 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    #[ignore = "Ping 対応 firmware の実機と STACKCHAN_TEST_PORT が必要"]
+    fn hardware_ping_and_frame_recovery() {
+        fn read_reply(port: &mut dyn serialport::SerialPort) -> protocol::Reply {
+            let mut frame = [0; protocol::MAX_FRAME_BYTES];
+            for end in 0..frame.len() {
+                port.read_exact(&mut frame[end..=end]).unwrap();
+                if frame[end] == 0 {
+                    return protocol::decode(&mut frame[..=end]).unwrap();
+                }
+            }
+            panic!("実機からの応答がフレーム上限を超えました");
+        }
+
+        let port_name = std::env::var("STACKCHAN_TEST_PORT").expect("STACKCHAN_TEST_PORT が必要");
+        let mut port = serialport::new(port_name, 115_200)
+            .timeout(Duration::from_secs(2))
+            .open()
+            .unwrap();
+        let mut buffer = [0; 32];
+        let ping =
+            protocol::encode(&protocol::Message::Ping { nonce: NONCE }, &mut buffer).unwrap();
+
+        // USB パケットが分割されても終端まで蓄積できることを実機で確認する。
+        for byte in ping {
+            port.write_all(&[*byte]).unwrap();
+            port.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(validate_pong(&read_reply(&mut *port), NONCE), Ok(()));
+
+        port.write_all(&[0xFF, 1, 2, 0]).unwrap();
+        port.flush().unwrap();
+        let protocol::Reply::Rejected { count } = read_reply(&mut *port) else {
+            panic!("不正フレームが拒否されませんでした");
+        };
+        assert!(count > 0);
+
+        // 上限超過フレームの末尾が正しい Ping でも、その区切りまでは破棄する。
+        port.write_all(&[1; protocol::MAX_FRAME_BYTES * 2]).unwrap();
+        port.write_all(ping).unwrap();
+        port.flush().unwrap();
+        assert_eq!(
+            read_reply(&mut *port),
+            protocol::Reply::Rejected {
+                count: count.saturating_add(1)
+            }
+        );
+
+        // 連結されたフレームを順番どおり返し、拒否後にも正常に復帰する。
+        port.write_all(ping).unwrap();
+        port.write_all(ping).unwrap();
+        port.flush().unwrap();
+        for _ in 0..2 {
+            assert_eq!(validate_pong(&read_reply(&mut *port), NONCE), Ok(()));
+        }
+    }
 }

@@ -71,6 +71,31 @@ nix を持つ場合は `nix develop` または `direnv allow` で開発シェル
 
 ## 検査
 
+### Ping/Pong の実機確認
+
+前節の USB 接続と書き込みを済ませてから実行する。書き込みには利用者の許可が必要。
+
+```bash
+scripts/container.sh device make flash
+scripts/container.sh device bash scripts/check-ping-device.sh /dev/ttyACM0
+```
+
+`check-ping-device.sh` は通常の `stackchan ping`、分割・連結フレーム、不正・過長フレームを
+拒否した後の復帰を検証する。続いて `.work/ping-device.*` に host ソースを複製し、
+検証用コピーの `protocol::VERSION` だけを変更して build する。実機の `Pong` に対して
+版不一致エラーと終了コード 1 を確認し、最後に通常の host でもう一度 Ping を確認する。
+検証用コピーと結果の `mismatch.log` は `.work/` に残る。firmware の版は変更しない。
+
+通常のテスト実行では実機テストをスキップする。単独実行する場合は次のように明示する。
+
+```bash
+scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
+  cargo test --locked --offline -p my-stackchan-host \
+  -- --ignored --exact tests::hardware_ping_and_frame_recovery
+```
+
+### 静的検査・単体テスト
+
 ```bash
 make check        # nix flake check + 環境 + Rust の fmt/clippy/test
 make lint         # 静的解析のみ
