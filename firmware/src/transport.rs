@@ -163,4 +163,37 @@ mod tests {
             [Err(Reply::Rejected { count: u32::MAX })]
         );
     }
+
+    #[test]
+    fn arbitrary_streams_recover_at_next_delimiter() {
+        let mut state = 0x6A1B_79C3_05D4_EF28u64;
+        let ping = frame(&Message::Ping { nonce: 0x1234_5678 });
+        for length in [
+            0,
+            1,
+            254,
+            255,
+            MAX_FRAME_BYTES - 1,
+            MAX_FRAME_BYTES,
+            MAX_FRAME_BYTES + 1,
+        ]
+        .into_iter()
+        .chain((0..256).map(|index| index * 7 % (MAX_FRAME_BYTES * 2)))
+        {
+            let mut receiver = Receiver::default();
+            let mut input = std::vec![0; length];
+            for byte in &mut input {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = state as u8;
+            }
+            let _ = receive(&mut receiver, &input);
+            let _ = receiver.push(0);
+            assert_eq!(
+                receive(&mut receiver, &ping),
+                [Ok(Message::Ping { nonce: 0x1234_5678 })]
+            );
+        }
+    }
 }

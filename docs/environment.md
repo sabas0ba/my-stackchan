@@ -222,6 +222,18 @@ CI (`.github/workflows/ci.yml`) はイメージを構築し、`--network none` �
 
 `make check` は firmware の電源制御と描画処理も host 上でテストする。対象外レジスタビットの保持、I2C エラー伝播、描画範囲、RGB565 の色順、描画エラー伝播を検証する。単独実行は開発シェル内のリポジトリルートから `cargo test --manifest-path firmware/Cargo.toml --lib --locked --offline` を使う。シミュレーターの BMP ヘッダー・色・TTL 復帰は `cargo test --manifest-path firmware/Cargo.toml --example simulate --locked --offline` で確認する。`firmware/` 内から実行すると Xtensa 用の Cargo 設定が適用されるため、host テストではルートから実行する。
 
+`make check` は protocol の固定 seed 変異検査を 20,000 件実行する。正常フレーム、最大長 Card、
+境界長のバイト列を変異し、Message / Reply の復号と Card の検証に panic がないことを確認する。
+長時間検査は次のように件数と seed を指定する。失敗時には同じ seed とケース番号が出力される。
+
+```bash
+scripts/container.sh run cargo run --locked --offline -p protocol \
+  --example decoder_stress -- --cases 1000000 --seed 0x7c3a4d92b615ef08
+```
+
+firmware の単体テストは任意バイト列の後のフレーム再同期も検査する。この検査は決定的で
+coverage-guided ではない。`cargo fuzz` 用の固定済み環境による検証は後続作業とする。
+
 ## cargo の依存とネットワーク
 
 開発シェルでは crates.io を Nix の store 内の vendor (`nix/cargo-vendor.nix`) で置き換える。`Cargo.lock` に記録された crate と、build-std が要求する rust-src 同梱の crate がイメージの構築時に取り込まれるため、build と検査はネットワーク無しで完結する。
