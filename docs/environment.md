@@ -94,6 +94,36 @@ scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
   -- --ignored --exact tests::hardware_ping_and_frame_recovery
 ```
 
+### Text / Clear の実機確認
+
+Text / Clear 対応 firmware を書き込んでから、既存コンテナで host を build する。
+
+```bash
+scripts/container.sh run cargo build --locked --offline -p my-stackchan-host
+scripts/container.sh device target/debug/stackchan text --slot top --ttl 0 'USB Text OK'
+scripts/container.sh device target/debug/stackchan text --slot bottom --ttl 0 'BannerBottom'
+scripts/container.sh device target/debug/stackchan text --slot overlay --ttl 5 'Overlay: expires in 5s'
+scripts/container.sh device target/debug/stackchan clear
+```
+
+Overlay 中は顔と帯が隠れ、5 秒後に両方の帯と顔が復帰することを確認する。
+Clear はこの復帰を確認してから実行し、顔のみの表示になることを確認する。
+各コマンドは送信前に Ping で版を照合し、描画後の Ack を表示する。`--port` 省略時は
+VID:PID から自動検出する。明示する場合は各サブコマンドへ `--port /dev/ttyACM0` を加える。
+
+通信用の実機回帰テストは次のコマンドで実行する。最大 512 byte の Text、3 Slot、
+Ack の通し番号、TTL 待機後の通信継続、Clear を確認する。テストは最後に Clear する。
+Ack の受信だけでは画面や期限満了の目視確認は代替できない。
+
+```bash
+scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
+  cargo test --locked --offline -p my-stackchan-host \
+  -- --ignored --exact tests::hardware_text_and_clear
+```
+
+Slot ごとの期限・上書き・描画失敗・領域外描画・Overlay 解除時の復帰は通常の単体テストでも検証する。
+電源再投入時は表示状態を保持せず、表示確認画面へ戻る。
+
 ### 静的検査・単体テスト
 
 ```bash

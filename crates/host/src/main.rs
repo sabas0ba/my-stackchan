@@ -1,12 +1,12 @@
 //! PC 側 CLI。
 //!
-//! 現段階では port の列挙と疎通確認のみを提供する。表示内容の組み立て (Card) と
+//! port の列挙、疎通確認、テキスト表示を提供する。表示内容の組み立て (Card) と
 //! 使用量の取得 (collector) は docs/design.md のフェーズに従って追加する。
 
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
 const ESP_USB_SERIAL_JTAG: (u16, u16) = (0x303A, 0x1001);
@@ -28,6 +28,40 @@ enum Command {
         #[arg(long)]
         port: Option<String>,
     },
+    /// 指定した領域へテキストを表示する（非 ASCII 文字は ? として表示）
+    Text {
+        #[arg(long)]
+        port: Option<String>,
+        #[arg(long, value_enum, default_value = "top")]
+        slot: TextSlot,
+        /// 表示秒数。0 は Clear または上書きまで保持する
+        #[arg(long, default_value_t = 0)]
+        ttl: u16,
+        /// UTF-8 で最大 512 byte。改行と領域幅で折り返す
+        text: String,
+    },
+    /// すべての表示領域を消し、顔のみの表示へ戻す
+    Clear {
+        #[arg(long)]
+        port: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TextSlot {
+    Top,
+    Bottom,
+    Overlay,
+}
+
+impl From<TextSlot> for protocol::Slot {
+    fn from(slot: TextSlot) -> Self {
+        match slot {
+            TextSlot::Top => Self::BannerTop,
+            TextSlot::Bottom => Self::BannerBottom,
+            TextSlot::Overlay => Self::Overlay,
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,6 +69,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::ListPorts => list_ports(),
         Command::Ping { port } => ping(port),
+        Command::Text {
+            port,
+            slot,
+            ttl,
+            text,
+        } => send_display(port, &text_message(slot, ttl, &text)?),
+        Command::Clear { port } => send_display(port, &protocol::Message::Clear),
     }
 }
 
@@ -69,26 +110,77 @@ fn detect_port() -> Result<String, Box<dyn std::error::Error>> {
         .ok_or_else(|| "USB Serial/JTAG (303a:1001) の port が見つかりません".into())
 }
 
-fn ping(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn open_port(
+    port: Option<String>,
+) -> Result<(String, Box<dyn serialport::SerialPort>), Box<dyn std::error::Error>> {
     let port_name = match port {
         Some(p) => p,
         None => detect_port()?,
     };
-    let mut port = serialport::new(&port_name, 115_200)
+    let port = serialport::new(&port_name, 115_200)
         .timeout(Duration::from_millis(1000))
         .open()?;
     // 書き込み直後に残る bootloader のログを今回の応答に混入させない。
     port.clear(serialport::ClearBuffer::Input)?;
+    Ok((port_name, port))
+}
 
+fn ping(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let (port_name, mut port) = open_port(port)?;
     let nonce = 0x5A5A_1234;
-    let mut buf = [0u8; 32];
-    let frame = protocol::encode(&protocol::Message::Ping { nonce }, &mut buf)?;
-    port.write_all(frame)?;
-    port.flush()?;
-
-    let reply = read_reply(&mut port)?;
+    let reply = exchange(&mut port, &protocol::Message::Ping { nonce })?;
     println!("{port_name}: {reply:?}");
     validate_pong(&reply, nonce).map_err(Into::into)
+}
+
+fn text_message(slot: TextSlot, ttl_s: u16, text: &str) -> Result<protocol::Message, String> {
+    Ok(protocol::Message::Text {
+        slot: slot.into(),
+        ttl_s,
+        text: text.try_into().map_err(|_| {
+            format!(
+                "テキストは UTF-8 で {} byte 以下にしてください",
+                protocol::MAX_TEXT_BYTES
+            )
+        })?,
+    })
+}
+
+fn exchange(
+    port: &mut (impl Read + Write),
+    message: &protocol::Message,
+) -> Result<protocol::Reply, Box<dyn std::error::Error>> {
+    let mut buffer = [0; protocol::MAX_FRAME_BYTES];
+    let frame = protocol::encode(message, &mut buffer)?;
+    port.write_all(frame)?;
+    port.flush()?;
+    read_reply(port)
+}
+
+fn send_checked(
+    port: &mut (impl Read + Write),
+    message: &protocol::Message,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    let nonce = 0x5A5A_1234;
+    let reply = exchange(port, &protocol::Message::Ping { nonce })?;
+    validate_pong(&reply, nonce)?;
+    match exchange(port, message)? {
+        protocol::Reply::Ack { seq } => Ok(seq),
+        protocol::Reply::Rejected { count } => {
+            Err(format!("表示更新が拒否されました: rejected={count}").into())
+        }
+        protocol::Reply::Pong { .. } => Err("表示更新に対して Ack 以外の応答を受信しました".into()),
+    }
+}
+
+fn send_display(
+    port: Option<String>,
+    message: &protocol::Message,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (port_name, mut port) = open_port(port)?;
+    let seq = send_checked(&mut port, message)?;
+    println!("{port_name}: Ack {{ seq: {seq} }}");
+    Ok(())
 }
 
 fn read_reply(reader: &mut impl Read) -> Result<protocol::Reply, Box<dyn std::error::Error>> {
@@ -143,6 +235,90 @@ mod tests {
     use super::*;
 
     const NONCE: u32 = 0x5A5A_1234;
+
+    struct Link {
+        input: std::io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+    impl Link {
+        fn new(replies: &[protocol::Reply]) -> Self {
+            let mut bytes = Vec::new();
+            for reply in replies {
+                let mut buffer = [0; 32];
+                bytes.extend(protocol::encode(reply, &mut buffer).unwrap());
+            }
+            Self {
+                input: std::io::Cursor::new(bytes),
+                output: Vec::new(),
+            }
+        }
+        fn messages(&self) -> Vec<protocol::Message> {
+            self.output
+                .split_inclusive(|&byte| byte == 0)
+                .map(|frame| protocol::decode(&mut frame.to_vec()).unwrap())
+                .collect()
+        }
+    }
+    impl Read for Link {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+    impl Write for Link {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.output.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn display_command_is_not_sent_when_handshake_fails() {
+        for reply in [
+            protocol::Reply::Pong {
+                nonce: NONCE,
+                version: protocol::VERSION.wrapping_add(1),
+            },
+            protocol::Reply::Pong {
+                nonce: NONCE + 1,
+                version: protocol::VERSION,
+            },
+            protocol::Reply::Rejected { count: 1 },
+        ] {
+            let mut link = Link::new(&[reply]);
+            assert!(send_checked(&mut link, &protocol::Message::Clear).is_err());
+            assert_eq!(link.messages(), [protocol::Message::Ping { nonce: NONCE }]);
+        }
+    }
+
+    #[test]
+    fn text_requires_ack_after_successful_handshake() {
+        let message = text_message(TextSlot::Bottom, 7, "Hello").unwrap();
+        let pong = protocol::Reply::Pong {
+            nonce: NONCE,
+            version: protocol::VERSION,
+        };
+        let mut link = Link::new(&[pong, protocol::Reply::Ack { seq: 42 }]);
+        assert_eq!(send_checked(&mut link, &message).unwrap(), 42);
+        assert_eq!(
+            link.messages(),
+            [protocol::Message::Ping { nonce: NONCE }, message.clone()]
+        );
+        for reply in [protocol::Reply::Rejected { count: 1 }, pong] {
+            assert!(send_checked(&mut Link::new(&[pong, reply]), &message).is_err());
+        }
+    }
+
+    #[test]
+    fn text_limit_counts_utf8_bytes_and_cli_validates_ttl_and_slot() {
+        assert!(text_message(TextSlot::Top, 0, &"a".repeat(512)).is_ok());
+        assert!(text_message(TextSlot::Top, 0, &"a".repeat(513)).is_err());
+        assert!(text_message(TextSlot::Overlay, 1, &"日".repeat(171)).is_err());
+        assert!(Cli::try_parse_from(["stackchan", "text", "--ttl", "65536", "test"]).is_err());
+        assert!(Cli::try_parse_from(["stackchan", "text", "--slot", "unknown", "test"]).is_err());
+    }
 
     #[test]
     fn accepts_matching_nonce_and_version() {
@@ -268,5 +444,35 @@ mod tests {
                 Ok(())
             );
         }
+    }
+
+    #[test]
+    #[ignore = "Text/Clear 対応 firmware の実機と STACKCHAN_TEST_PORT が必要"]
+    fn hardware_text_and_clear() {
+        let port_name = std::env::var("STACKCHAN_TEST_PORT").expect("STACKCHAN_TEST_PORT が必要");
+        let (_, mut port) = open_port(Some(port_name)).unwrap();
+        let mut seq = send_checked(&mut port, &protocol::Message::Clear).unwrap();
+        for (slot, text, ttl) in [
+            (TextSlot::Top, "USB Text OK".to_string(), 0),
+            (TextSlot::Bottom, "TTL test".to_string(), 1),
+            (TextSlot::Overlay, "W".repeat(protocol::MAX_TEXT_BYTES), 1),
+        ] {
+            let next = send_checked(&mut port, &text_message(slot, ttl, &text).unwrap()).unwrap();
+            assert_eq!(next, seq.wrapping_add(1));
+            seq = next;
+        }
+        // TTL 処理中も通信が継続し、自発的な Ack を送らないことを確認する。
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(
+            send_checked(&mut port, &protocol::Message::Clear).unwrap(),
+            seq.wrapping_add(1)
+        );
+        assert_eq!(
+            validate_pong(
+                &exchange(&mut port, &protocol::Message::Ping { nonce: NONCE }).unwrap(),
+                NONCE
+            ),
+            Ok(())
+        );
     }
 }

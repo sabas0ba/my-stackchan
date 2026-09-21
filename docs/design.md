@@ -128,6 +128,10 @@ HTML そのものを firmware で解釈することはしない。要素数、�
 
 ## フェーズと受入条件
 
+現在は Phase 2 の Text / Clear、Slot ごとの TTL、USB 経由の描画完了応答まで実装している。
+レイアウト付き Card と decoder の fuzz 検証は後続作業とする。操作手順は
+[environment.md](environment.md#text--clear-の実機確認)、現行の表示仕様は [protocol.md](protocol.md) を参照する。
+
 | Phase | 内容 | 受入条件 |
 | --- | --- | --- |
 | 0 | 環境整備 | `scripts/container.sh check` が `--network none` で成功する。firmware の最小構成が build できる |
