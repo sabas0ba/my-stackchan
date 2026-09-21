@@ -9,7 +9,7 @@ use embedded_graphics::{
     primitives::{Circle, Line, PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
-use protocol::{Card, Element, Slot};
+use protocol::{Activity, Card, Element, Expression, EyeStyle, Gaze, Presence, Slot};
 
 const IMAGE_WIDTH: usize = 96;
 const IMAGE_HEIGHT: usize = 16;
@@ -42,7 +42,7 @@ pub fn draw<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(), D::Err
     )
     .draw(display)?;
 
-    draw_face(display)?;
+    draw_face(display, None)?;
 
     Text::new(
         "ASCII 0123456789 !?",
@@ -61,23 +61,209 @@ pub fn draw<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(), D::Err
     Ok(())
 }
 
-fn draw_face<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(), D::Error> {
-    let face = PrimitiveStyle::with_fill(Rgb565::WHITE);
-    for x in [90, 202] {
-        Circle::new(Point::new(x, 72), 28)
-            .into_styled(face)
-            .draw(display)?;
+fn draw_face<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    presence: Option<&Presence>,
+) -> Result<(), D::Error> {
+    let expression = presence
+        .map(|value| value.expression)
+        .unwrap_or(Expression::Happy);
+    let eyes = presence.map(|value| value.eyes).unwrap_or(EyeStyle::Auto);
+    let (dx, dy) = match presence.map(|value| value.gaze).unwrap_or(Gaze::Center) {
+        Gaze::Center => (0, 0),
+        Gaze::Left => (-8, 0),
+        Gaze::Right => (8, 0),
+        Gaze::Up => (0, -7),
+        Gaze::Down => (0, 7),
+    };
+    for (index, x) in [90, 202].into_iter().enumerate() {
+        draw_eye(display, x + dx, 72 + dy, index, expression, eyes)?;
     }
-    for (start, end) in [
-        (Point::new(130, 126), Point::new(145, 140)),
-        (Point::new(145, 140), Point::new(175, 140)),
-        (Point::new(175, 140), Point::new(190, 126)),
-    ] {
-        Line::new(start, end)
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 4))
+    let brows: &[(i32, i32, i32, i32)] = match expression {
+        Expression::Focused | Expression::Determined => &[(90, 65, 118, 70), (202, 70, 230, 65)],
+        Expression::Worried | Expression::Sad => &[(90, 70, 118, 65), (202, 65, 230, 70)],
+        Expression::Curious => &[(202, 65, 230, 61)],
+        _ => &[],
+    };
+    for &(x1, y1, x2, y2) in brows {
+        Line::new(Point::new(x1 + dx, y1 + dy), Point::new(x2 + dx, y2 + dy))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 2))
             .draw(display)?;
     }
 
+    match expression {
+        Expression::Happy => draw_mouth_lines(
+            display,
+            &[
+                (130, 126, 145, 140),
+                (145, 140, 175, 140),
+                (175, 140, 190, 126),
+            ],
+        )?,
+        Expression::Focused => draw_mouth_lines(display, &[(140, 138, 180, 138)])?,
+        Expression::Sleepy => draw_mouth_lines(display, &[(148, 140, 172, 140)])?,
+        Expression::Worried => draw_mouth_lines(
+            display,
+            &[
+                (130, 140, 145, 126),
+                (145, 126, 175, 126),
+                (175, 126, 190, 140),
+            ],
+        )?,
+        Expression::Surprised => Circle::new(Point::new(150, 126), 20)
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 3))
+            .draw(display)?,
+        Expression::Grin => draw_mouth_lines(
+            display,
+            &[
+                (130, 125, 190, 125),
+                (130, 125, 144, 143),
+                (144, 143, 176, 143),
+                (176, 143, 190, 125),
+            ],
+        )?,
+        Expression::Calm => draw_mouth_lines(
+            display,
+            &[
+                (140, 130, 150, 136),
+                (150, 136, 170, 136),
+                (170, 136, 180, 130),
+            ],
+        )?,
+        Expression::Curious => draw_mouth_lines(
+            display,
+            &[
+                (135, 130, 149, 139),
+                (149, 139, 173, 137),
+                (173, 137, 188, 128),
+            ],
+        )?,
+        Expression::Playful => draw_mouth_lines(
+            display,
+            &[
+                (135, 128, 185, 128),
+                (150, 128, 150, 144),
+                (150, 144, 160, 150),
+                (160, 150, 170, 144),
+                (170, 144, 170, 128),
+            ],
+        )?,
+        Expression::Wink => draw_mouth_lines(
+            display,
+            &[
+                (130, 126, 145, 140),
+                (145, 140, 175, 140),
+                (175, 140, 190, 126),
+            ],
+        )?,
+        Expression::Sad => draw_mouth_lines(
+            display,
+            &[
+                (130, 143, 145, 129),
+                (145, 129, 175, 129),
+                (175, 129, 190, 143),
+            ],
+        )?,
+        Expression::Determined => draw_mouth_lines(
+            display,
+            &[
+                (132, 131, 148, 140),
+                (148, 140, 172, 140),
+                (172, 140, 188, 131),
+            ],
+        )?,
+    }
+    Ok(())
+}
+
+fn draw_eye<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    x: i32,
+    y: i32,
+    index: usize,
+    expression: Expression,
+    eyes: EyeStyle,
+) -> Result<(), D::Error> {
+    let outline = PrimitiveStyle::with_stroke(Rgb565::WHITE, 3);
+    match eyes {
+        EyeStyle::Auto => {}
+        EyeStyle::Open => {
+            Circle::new(Point::new(x, y), 28)
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                .draw(display)?;
+            return Ok(());
+        }
+        EyeStyle::Wide => {
+            Circle::new(Point::new(x - 3, y - 3), 34)
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                .draw(display)?;
+            return Ok(());
+        }
+        EyeStyle::Closed => {
+            Line::new(Point::new(x, y + 14), Point::new(x + 27, y + 14))
+                .into_styled(outline)
+                .draw(display)?;
+            return Ok(());
+        }
+        EyeStyle::HalfLidded => {
+            Circle::new(Point::new(x, y), 28)
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                .draw(display)?;
+            Rectangle::new(Point::new(x - 1, y - 1), Size::new(30, 15))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+                .draw(display)?;
+            Line::new(Point::new(x, y + 14), Point::new(x + 27, y + 14))
+                .into_styled(outline)
+                .draw(display)?;
+            return Ok(());
+        }
+    }
+    match expression {
+        Expression::Sleepy | Expression::Calm => {
+            Line::new(Point::new(x, y + 14), Point::new(x + 27, y + 14))
+                .into_styled(outline)
+                .draw(display)?;
+        }
+        Expression::Grin | Expression::Wink if expression == Expression::Grin || index == 1 => {
+            for (start, end) in [
+                (Point::new(x, y + 13), Point::new(x + 8, y + 5)),
+                (Point::new(x + 8, y + 5), Point::new(x + 19, y + 5)),
+                (Point::new(x + 19, y + 5), Point::new(x + 27, y + 13)),
+            ] {
+                Line::new(start, end).into_styled(outline).draw(display)?;
+            }
+        }
+        Expression::Playful if index == 0 => {
+            for (start, end) in [
+                (Point::new(x, y + 7), Point::new(x + 17, y + 14)),
+                (Point::new(x + 17, y + 14), Point::new(x, y + 21)),
+            ] {
+                Line::new(start, end).into_styled(outline).draw(display)?;
+            }
+        }
+        _ => {
+            let eye_y = if expression == Expression::Curious && index == 1 {
+                y - 5
+            } else {
+                y
+            };
+            Circle::new(Point::new(x, eye_y), 28)
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                .draw(display)?;
+        }
+    }
+    Ok(())
+}
+
+fn draw_mouth_lines<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    segments: &[(i32, i32, i32, i32)],
+) -> Result<(), D::Error> {
+    for &(x1, y1, x2, y2) in segments {
+        Line::new(Point::new(x1, y1), Point::new(x2, y2))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 4))
+            .draw(display)?;
+    }
     Ok(())
 }
 
@@ -93,7 +279,10 @@ pub fn draw_state<D: DrawTarget<Color = Rgb565>>(
             Rectangle::new(Point::zero(), Size::new(320, 240)),
         )?;
     } else {
-        draw_face(display)?;
+        draw_face(display, state.presence())?;
+        if let Some(presence) = state.presence() {
+            draw_presence_status(display, presence)?;
+        }
         for (slot, y) in [(Slot::BannerTop, 0), (Slot::BannerBottom, 192)] {
             if let Some(entry) = state.get(slot) {
                 draw_content(
@@ -103,6 +292,35 @@ pub fn draw_state<D: DrawTarget<Color = Rgb565>>(
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+fn draw_presence_status<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    presence: &Presence,
+) -> Result<(), D::Error> {
+    let activity = presence.activity.map(|value| match value {
+        Activity::Idle => "IDLE",
+        Activity::Working => "WORKING",
+        Activity::Waiting => "WAITING",
+        Activity::Done => "DONE",
+        Activity::Error => "ERROR",
+    });
+    if let Some(activity) = activity {
+        draw_cell_label(
+            display,
+            activity,
+            Rectangle::new(Point::new(10, 164), Size::new(90, 20)),
+        )?;
+    }
+    if !presence.detail.is_empty() {
+        let x = if activity.is_some() { 100 } else { 10 };
+        draw_cell_label(
+            display,
+            &presence.detail,
+            Rectangle::new(Point::new(x, 164), Size::new(310 - x as u32, 20)),
+        )?;
     }
     Ok(())
 }
@@ -372,6 +590,78 @@ mod tests {
         assert_eq!(screen.0[85 * 320 + 103], Rgb565::WHITE);
         assert!(!screen.0[..48 * 320].contains(&Rgb565::WHITE));
         assert!(!screen.0[192 * 320..].contains(&Rgb565::WHITE));
+    }
+
+    #[test]
+    fn presence_changes_gaze_and_status_then_expires_to_default_face() {
+        use crate::model::Controller;
+        use protocol::Message;
+        let mut controller = Controller::default();
+        let mut screen = Screen(vec![Rgb565::BLACK; 320 * 240]);
+        controller.handle(Message::Clear, 0, &mut screen).unwrap();
+        let default_face = screen.0.clone();
+        controller
+            .handle(
+                Message::Presence(Presence {
+                    activity: Some(Activity::Working),
+                    detail: "BUILD".try_into().unwrap(),
+                    expression: Expression::Focused,
+                    gaze: Gaze::Right,
+                    eyes: EyeStyle::Auto,
+                    ttl_s: 1,
+                }),
+                0,
+                &mut screen,
+            )
+            .unwrap();
+        assert_eq!(screen.0[86 * 320 + 92], Rgb565::BLACK);
+        assert_eq!(default_face[86 * 320 + 92], Rgb565::WHITE);
+        assert!(screen.0[164 * 320..184 * 320].contains(&Rgb565::WHITE));
+        controller.tick(999, &mut screen).unwrap();
+        assert_ne!(screen.0, default_face);
+        controller.tick(1000, &mut screen).unwrap();
+        assert_eq!(screen.0, default_face);
+    }
+
+    #[test]
+    fn eye_styles_change_shape_without_pupils() {
+        use crate::model::Controller;
+        use protocol::Message;
+        let mut controller = Controller::default();
+        let mut screen = Screen(vec![Rgb565::BLACK; 320 * 240]);
+        let mut frames = vec![];
+        for eyes in [
+            EyeStyle::Open,
+            EyeStyle::Wide,
+            EyeStyle::Closed,
+            EyeStyle::HalfLidded,
+        ] {
+            controller
+                .handle(
+                    Message::Presence(Presence {
+                        activity: None,
+                        detail: Default::default(),
+                        expression: Expression::Happy,
+                        gaze: Gaze::Center,
+                        eyes,
+                        ttl_s: 0,
+                    }),
+                    0,
+                    &mut screen,
+                )
+                .unwrap();
+            frames.push(screen.0.clone());
+        }
+        for left in 0..frames.len() {
+            for right in left + 1..frames.len() {
+                assert_ne!(frames[left], frames[right]);
+            }
+        }
+        assert_eq!(frames[0][86 * 320 + 103], Rgb565::WHITE);
+        assert_eq!(frames[1][86 * 320 + 103], Rgb565::WHITE);
+        assert_eq!(frames[2][80 * 320 + 103], Rgb565::BLACK);
+        assert_eq!(frames[3][80 * 320 + 103], Rgb565::BLACK);
+        assert_eq!(frames[3][90 * 320 + 103], Rgb565::WHITE);
     }
 
     #[test]

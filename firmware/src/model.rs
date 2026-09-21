@@ -1,7 +1,24 @@
 //! Slot の内容と単調時計に基づく表示期限。描画の成功後に状態を確定する。
 
 use embedded_graphics::{pixelcolor::Rgb565, prelude::DrawTarget};
-use protocol::{Card, MAX_TEXT_BYTES, Message, Reply, Slot};
+use protocol::{Card, Expression, EyeStyle, Gaze, MAX_TEXT_BYTES, Message, Presence, Reply, Slot};
+
+const DEMO_FACES: [(Expression, &str); 12] = [
+    (Expression::Happy, "01/12 HAPPY"),
+    (Expression::Focused, "02/12 FOCUSED"),
+    (Expression::Sleepy, "03/12 SLEEPY"),
+    (Expression::Worried, "04/12 WORRIED"),
+    (Expression::Surprised, "05/12 SURPRISED"),
+    (Expression::Grin, "06/12 GRIN"),
+    (Expression::Calm, "07/12 CALM"),
+    (Expression::Curious, "08/12 CURIOUS"),
+    (Expression::Playful, "09/12 PLAYFUL"),
+    (Expression::Wink, "10/12 WINK"),
+    (Expression::Sad, "11/12 SAD"),
+    (Expression::Determined, "12/12 DETERMINED"),
+];
+
+pub const DEMO_FACE_COUNT: usize = DEMO_FACES.len();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 // firmware では動的確保を使わず、固定長の Card を Slot の状態に保持する。
@@ -17,14 +34,25 @@ pub struct Entry {
     deadline_ms: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PresenceEntry {
+    value: Presence,
+    deadline_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayState {
     slots: [Option<Entry>; 3],
+    presence: Option<PresenceEntry>,
 }
 
 impl DisplayState {
     pub fn get(&self, slot: Slot) -> Option<&Entry> {
         self.slots[slot_index(slot)].as_ref()
+    }
+
+    pub fn presence(&self) -> Option<&Presence> {
+        self.presence.as_ref().map(|entry| &entry.value)
     }
 
     fn set(&mut self, slot: Slot, content: Content, ttl_s: u16, now_ms: u64) {
@@ -34,11 +62,23 @@ impl DisplayState {
         });
     }
 
+    fn set_presence(&mut self, value: Presence, now_ms: u64) {
+        self.presence = Some(PresenceEntry {
+            deadline_ms: (value.ttl_s != 0)
+                .then(|| now_ms.saturating_add(u64::from(value.ttl_s) * 1000)),
+            value,
+        });
+    }
+
     fn has_expired(&self, now_ms: u64) -> bool {
         self.slots
             .iter()
             .flatten()
             .any(|entry| entry.deadline_ms.is_some_and(|deadline| now_ms >= deadline))
+            || self
+                .presence
+                .as_ref()
+                .is_some_and(|entry| entry.deadline_ms.is_some_and(|deadline| now_ms >= deadline))
     }
 
     fn expire(&mut self, now_ms: u64) {
@@ -49,6 +89,13 @@ impl DisplayState {
             {
                 *slot = None;
             }
+        }
+        if self
+            .presence
+            .as_ref()
+            .is_some_and(|entry| entry.deadline_ms.is_some_and(|deadline| now_ms >= deadline))
+        {
+            self.presence = None;
         }
     }
 }
@@ -65,6 +112,7 @@ fn slot_index(slot: Slot) -> usize {
 pub struct Controller {
     state: DisplayState,
     seq: u32,
+    demo_index: Option<usize>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -90,21 +138,59 @@ impl Controller {
             }
             Message::Clear => next = DisplayState::default(),
             Message::Text { slot, ttl_s, text } => {
+                if self.demo_index.is_some() {
+                    next.presence = None;
+                }
                 next.set(slot, Content::Text(text), ttl_s, now_ms)
             }
             Message::Card(card) => {
                 card.validate().map_err(|_| HandleError::InvalidCard)?;
+                if self.demo_index.is_some() {
+                    next.presence = None;
+                }
                 let slot = card.slot;
                 let ttl_s = card.ttl_s;
                 next.set(slot, Content::Card(card), ttl_s, now_ms);
             }
+            Message::Presence(presence) => next.set_presence(presence, now_ms),
         }
         // Overlay の背後の期限切れも、再表示の前に除去する。
         next.expire(now_ms);
         crate::renderer::draw_state(display, &next).map_err(HandleError::Draw)?;
         self.state = next;
         self.seq = self.seq.wrapping_add(1);
+        self.demo_index = None;
         Ok(Reply::Ack { seq: self.seq })
+    }
+
+    pub fn tap<D: DrawTarget<Color = Rgb565>>(
+        &mut self,
+        now_ms: u64,
+        display: &mut D,
+    ) -> Result<(), D::Error> {
+        let index = self
+            .demo_index
+            .map_or(0, |previous| (previous + 1) % DEMO_FACE_COUNT);
+        let (expression, label) = DEMO_FACES[index];
+        let mut next = self.state.clone();
+        // 全画面 Overlay 中でも、タップした表情をその場で見られるようにする。
+        next.slots[slot_index(Slot::Overlay)] = None;
+        next.set_presence(
+            Presence {
+                activity: None,
+                detail: label.try_into().expect("demo label fits"),
+                expression,
+                gaze: Gaze::Center,
+                eyes: EyeStyle::Auto,
+                ttl_s: 0,
+            },
+            now_ms,
+        );
+        next.expire(now_ms);
+        crate::renderer::draw_state(display, &next)?;
+        self.state = next;
+        self.demo_index = Some(index);
+        Ok(())
     }
 
     pub fn tick<D: DrawTarget<Color = Rgb565>>(
@@ -217,6 +303,88 @@ mod tests {
         assert_eq!(display.pixels, pixels);
         assert_eq!(controller.seq, 0);
         assert_eq!(controller.state, DisplayState::default());
+    }
+
+    #[test]
+    fn presence_expires_independently_of_slots_and_overlay() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        controller
+            .handle(text(Slot::BannerBottom, 0, "keep"), 0, &mut display)
+            .unwrap();
+        let presence = Presence {
+            activity: Some(protocol::Activity::Working),
+            detail: "Build".try_into().unwrap(),
+            expression: protocol::Expression::Focused,
+            gaze: protocol::Gaze::Right,
+            eyes: protocol::EyeStyle::Auto,
+            ttl_s: 1,
+        };
+        assert_eq!(
+            controller.handle(Message::Presence(presence.clone()), 100, &mut display),
+            Ok(Reply::Ack { seq: 2 })
+        );
+        assert_eq!(controller.state.presence(), Some(&presence));
+        controller
+            .handle(text(Slot::Overlay, 0, "overlay"), 200, &mut display)
+            .unwrap();
+        controller.tick(1099, &mut display).unwrap();
+        assert!(controller.state.presence().is_some());
+        controller.tick(1100, &mut display).unwrap();
+        assert!(controller.state.presence().is_none());
+        assert!(controller.state.get(Slot::Overlay).is_some());
+        assert!(controller.state.get(Slot::BannerBottom).is_some());
+        assert_eq!(controller.seq, 3);
+    }
+
+    #[test]
+    fn taps_show_every_expression_and_wrap_without_usb_sequence() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        controller
+            .handle(text(Slot::BannerBottom, 0, "keep"), 0, &mut display)
+            .unwrap();
+        controller
+            .handle(text(Slot::Overlay, 0, "overlay"), 0, &mut display)
+            .unwrap();
+        let seq = controller.seq;
+        for (index, (expression, label)) in DEMO_FACES.iter().enumerate() {
+            controller.tap(index as u64, &mut display).unwrap();
+            let presence = controller.state.presence().unwrap();
+            assert_eq!(presence.expression, *expression);
+            assert_eq!(presence.detail.as_str(), *label);
+            assert_eq!(controller.demo_index, Some(index));
+            assert!(controller.state.get(Slot::Overlay).is_none());
+            assert!(controller.state.get(Slot::BannerBottom).is_some());
+            assert_eq!(controller.seq, seq);
+        }
+        controller.tap(12, &mut display).unwrap();
+        assert_eq!(
+            controller.state.presence().unwrap().expression,
+            Expression::Happy
+        );
+        controller
+            .handle(text(Slot::BannerTop, 0, "host"), 13, &mut display)
+            .unwrap();
+        assert!(controller.state.presence().is_none());
+        controller.tap(14, &mut display).unwrap();
+        assert_eq!(
+            controller.state.presence().unwrap().detail.as_str(),
+            "01/12 HAPPY"
+        );
+    }
+
+    #[test]
+    fn failed_tap_does_not_advance_demo() {
+        let mut controller = Controller::default();
+        let mut display = Display {
+            fail: true,
+            pixels: 0,
+        };
+        assert_eq!(controller.tap(0, &mut display), Err(()));
+        assert_eq!(controller.demo_index, None);
+        assert_eq!(controller.state, DisplayState::default());
+        assert_eq!(controller.seq, 0);
     }
 
     #[test]

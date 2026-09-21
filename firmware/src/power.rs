@@ -5,6 +5,8 @@ use embedded_hal::{delay::DelayNs, i2c::I2c};
 const AXP2101: u8 = 0x34;
 const AW9523: u8 = 0x58;
 const LCD_RESET: u8 = 1 << 1;
+const TOUCH_RESET: u8 = 1 << 0;
+const P0_PUSH_PULL: u8 = 1 << 4;
 const BACKLIGHT_ENABLE: u8 = 1 << 7;
 
 fn update<I: I2c>(
@@ -30,6 +32,18 @@ pub fn prepare_display<I: I2c>(bus: &mut I, delay: &mut impl DelayNs) -> Result<
     update(bus, AW9523, 0x05, LCD_RESET, 0)?;
     delay.delay_ms(20);
     update(bus, AW9523, 0x03, LCD_RESET, LCD_RESET)?;
+    delay.delay_ms(120);
+    Ok(())
+}
+
+pub fn prepare_touch<I: I2c>(bus: &mut I, delay: &mut impl DelayNs) -> Result<(), I::Error> {
+    // CoreS3 の TOUCH_RST は AW9523B P0_0。Low を出力してから解除する。
+    update(bus, AW9523, 0x02, TOUCH_RESET, 0)?;
+    update(bus, AW9523, 0x11, P0_PUSH_PULL, P0_PUSH_PULL)?;
+    update(bus, AW9523, 0x12, TOUCH_RESET, TOUCH_RESET)?;
+    update(bus, AW9523, 0x04, TOUCH_RESET, 0)?;
+    delay.delay_ms(20);
+    update(bus, AW9523, 0x02, TOUCH_RESET, TOUCH_RESET)?;
     delay.delay_ms(120);
     Ok(())
 }
@@ -150,6 +164,35 @@ mod tests {
             assert_eq!(bus.registers[0][0x90], initial | 0x80);
             set_backlight(&mut bus, false).unwrap();
             assert_eq!(bus.registers[0][0x90], initial & 0x7f);
+        }
+    }
+
+    #[test]
+    fn touch_reset_preserves_unrelated_expander_bits() {
+        for initial in 0..=255 {
+            let mut bus = Bus::new(initial);
+            let mut expected = bus.registers;
+            expected[1][0x02] |= TOUCH_RESET;
+            expected[1][0x11] |= P0_PUSH_PULL;
+            expected[1][0x12] |= TOUCH_RESET;
+            expected[1][0x04] &= !TOUCH_RESET;
+            let mut delay = Delay::default();
+            prepare_touch(&mut bus, &mut delay).unwrap();
+            assert_eq!(bus.registers, expected);
+            assert_eq!(delay.0, [20_000_000, 120_000_000]);
+        }
+    }
+
+    #[test]
+    fn touch_reset_stops_at_each_failed_i2c_transaction() {
+        for failure in 0..10 {
+            let mut bus = Bus::new(0);
+            bus.fail_at = Some(failure);
+            assert_eq!(
+                prepare_touch(&mut bus, &mut Delay::default()),
+                Err(ErrorKind::Other)
+            );
+            assert_eq!(bus.calls, failure + 1);
         }
     }
 }

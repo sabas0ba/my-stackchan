@@ -4,7 +4,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 
 ## 版
 
-`protocol::VERSION` (現在 2)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
+`protocol::VERSION` (現在 3)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
 
 ## 物理層
 
@@ -29,16 +29,17 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 | `Clear` | すべての slot を消す | - |
 | `Text { slot, ttl_s, text }` | テキストを表示する | `text` は `MAX_TEXT_BYTES` (512) バイト |
 | `Card(Card)` | 行と要素からなる表示内容を 1 Slot に配置する | 最大 4 行、各行最大 2 要素 |
+| `Presence(Presence)` | 活動状態・表情・視線を一括更新する | 詳細は UTF-8 で最大 20 byte |
 
 `protocol::Reply` (firmware -> host):
 
 | variant | 内容 |
 | --- | --- |
 | `Pong { nonce, version }` | `Ping` への応答 |
-| `Ack { seq }` | 描画に成功した Text / Card / Clear の通し番号 |
+| `Ack { seq }` | 描画に成功した Text / Card / Presence / Clear の通し番号 |
 | `Rejected { count }` | 破棄したフレームの累計。診断用 |
 
-Card への画像追加で版を 1 から 2 に上げた。既存 Message variant の番号は維持する。
+Card への画像追加で版を 1 から 2 に、Presence の追加で 3 に上げた。既存 Message variant の番号は維持する。
 
 ### 現在の実装範囲
 
@@ -47,7 +48,7 @@ firmware は USB Serial/JTAG から `Ping` を受信し、同じ nonce と
 両方が一致した場合だけ終了コード 0 を返す。版不一致時は両者の版を含むエラーで終了する。
 
 受信処理は USB パケットの分割・連結に依存しない。空の区切りは同期用として無視する。
-不正・上限超過フレーム、無効な Card、描画に失敗した `Clear` / `Text` / `Card` は `Rejected` を返す。
+不正・上限超過フレーム、無効な Card、描画に失敗した `Clear` / `Text` / `Card` / `Presence` は `Rejected` を返す。
 上限超過時は次の区切りまでを 1 フレームとして破棄する。破棄回数は `u32::MAX` で飽和する。
 応答 1 件分だけを保持し、USB FIFO に渡すまで次の要求の読み出しを待つ。
 USB の送受信は非ブロッキング API を使用する。
@@ -95,12 +96,29 @@ big-endian 画素列を同梱する。縦横とも 1〜16 px、画素列は `wid
 画像は該当セルの左上から 2 px 下へ置き、セルでクリップする。host CLI は無圧縮の 24-bit BMP
 から指定領域を切り出して RGB565 に変換する。Card 全体の COBS フレームは 1024 byte 以下に収める。
 
-Ack は描画完了後に返す。seq は起動時 0、Text / Card / Clear の成功ごとに加算し、最初の Ack は 1。
+### 活動状態・表情・視線
+
+`Presence` は Slot とは独立した現在の顔の状態である。`activity` は Idle / Working / Waiting /
+Done / Error または未指定。`expression` は Happy / Focused / Sleepy / Worried / Surprised /
+Grin / Calm / Curious / Playful / Wink / Sad / Determined を指定する。
+`gaze` は Center / Left / Right / Up / Down、`eyes` は Auto / Open / Wide / Closed /
+HalfLidded を指定する。Auto は表情ごとの目の形を使う。視線は白い目の位置で示し、
+黒目は描かない。`detail` は最大 20 UTF-8 byte で、
+画面中央下部に活動状態とともに表示する。表示フォントの制約から非 ASCII 文字は `?` になる。
+`ttl_s` は受信からの秒数で、0 は期限なし。期限満了時は活動状態と詳細を消し、既定の顔に戻る。
+Overlay 中も期限は進み、Overlay が消えると有効な Presence だけを再表示する。
+`Clear` は Presence と Slot をすべて消す。
+
+host CLI の `face` は表情・視線・目の開き方を明示し、`status` は活動状態から表情を選ぶ
+(Idle/Done: Happy、Working: Focused、Waiting: Sleepy、Error: Worried)。
+`status` の既定 TTL は 30 秒で、PC 側の更新が停止した状態を残さない。
+
+Ack は描画完了後に返す。seq は起動時 0、Text / Card / Presence / Clear の成功ごとに加算し、最初の Ack は 1。
 `u32::MAX` の次は 0 に戻る。Ping、拒否、TTL 満了では加算せず、TTL 満了の自発的応答も送らない。
 描画エラー時は Slot の状態と seq を確定せず Rejected を返す。ただし途中まで書かれた画素は
 元に戻せないため、表示装置の障害が解消した後に表示命令を再送する。
 
-decoder の coverage-guided fuzz 検証を含む Phase 2 全体は未完了。
+decoder の coverage-guided fuzz 検証は別途実施する。
 
 ## 不変条件
 

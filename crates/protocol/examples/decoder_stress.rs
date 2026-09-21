@@ -1,8 +1,9 @@
 //! 固定 seed から COBS フレームを変異させ、decoder の panic を検出する。
 
 use protocol::{
-    Card, Element, ImageData, MAX_CARD_ROWS, MAX_CARD_TEXT_BYTES, MAX_FRAME_BYTES, MAX_IMAGE_BYTES,
-    MAX_ROW_ELEMENTS, Message, Reply, Row, Slot,
+    Activity, Card, Element, Expression, EyeStyle, Gaze, ImageData, MAX_CARD_ROWS,
+    MAX_CARD_TEXT_BYTES, MAX_FRAME_BYTES, MAX_IMAGE_BYTES, MAX_ROW_ELEMENTS, Message, Presence,
+    Reply, Row, Slot,
 };
 use serde::Serialize;
 
@@ -77,6 +78,14 @@ fn corpus() -> Vec<Vec<u8>> {
             text: "x".repeat(512).as_str().try_into().unwrap(),
         }),
         wire(&largest_card()),
+        wire(&Message::Presence(Presence {
+            activity: Some(Activity::Working),
+            detail: "BUILD".try_into().unwrap(),
+            expression: Expression::Focused,
+            gaze: Gaze::Right,
+            eyes: EyeStyle::HalfLidded,
+            ttl_s: 30,
+        })),
         wire(&Reply::Pong {
             nonce: 0,
             version: protocol::VERSION,

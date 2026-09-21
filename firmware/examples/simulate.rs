@@ -12,7 +12,8 @@ use embedded_graphics::{
 };
 use my_stackchan_firmware::{model::Controller, renderer};
 use protocol::{
-    Card, Element, ImageData, MAX_CARD_TEXT_BYTES, MAX_TEXT_BYTES, Message, Reply, Row, Slot,
+    Activity, Card, Element, Expression, EyeStyle, Gaze, ImageData, MAX_CARD_TEXT_BYTES,
+    MAX_TEXT_BYTES, Message, Presence, Reply, Row, Slot,
 };
 
 const WIDTH: usize = 320;
@@ -259,6 +260,34 @@ fn image_card() -> Message {
     Message::Card(card)
 }
 
+fn presence(
+    activity: Option<Activity>,
+    detail: &str,
+    expression: Expression,
+    gaze: Gaze,
+    ttl_s: u16,
+) -> Message {
+    presence_with_eyes(activity, detail, expression, gaze, EyeStyle::Auto, ttl_s)
+}
+
+fn presence_with_eyes(
+    activity: Option<Activity>,
+    detail: &str,
+    expression: Expression,
+    gaze: Gaze,
+    eyes: EyeStyle,
+    ttl_s: u16,
+) -> Message {
+    Message::Presence(Presence {
+        activity,
+        detail: detail.try_into().expect("simulation detail fits"),
+        expression,
+        gaze,
+        eyes,
+        ttl_s,
+    })
+}
+
 fn apply(controller: &mut Controller, screen: &mut Screen, message: Message) {
     let reply = controller
         .handle(message, 0, screen)
@@ -304,6 +333,96 @@ fn generate(options: &Options) -> io::Result<()> {
     apply(&mut controller, &mut screen, image_card());
     save_bmp(&options.output_dir.join("06-image.bmp"), &screen)?;
 
+    apply(
+        &mut controller,
+        &mut screen,
+        presence(
+            Some(Activity::Working),
+            "BUILD",
+            Expression::Focused,
+            Gaze::Right,
+            0,
+        ),
+    );
+    save_bmp(&options.output_dir.join("07-working.bmp"), &screen)?;
+    apply(
+        &mut controller,
+        &mut screen,
+        presence(
+            Some(Activity::Waiting),
+            "REVIEW",
+            Expression::Sleepy,
+            Gaze::Up,
+            0,
+        ),
+    );
+    save_bmp(&options.output_dir.join("08-waiting.bmp"), &screen)?;
+    apply(
+        &mut controller,
+        &mut screen,
+        presence(
+            Some(Activity::Error),
+            "FAILED",
+            Expression::Worried,
+            Gaze::Down,
+            0,
+        ),
+    );
+    save_bmp(&options.output_dir.join("09-error.bmp"), &screen)?;
+    apply(
+        &mut controller,
+        &mut screen,
+        presence(None, "", Expression::Surprised, Gaze::Left, 0),
+    );
+    save_bmp(&options.output_dir.join("10-face.bmp"), &screen)?;
+    for (name, expression) in [
+        ("11-grin.bmp", Expression::Grin),
+        ("12-calm.bmp", Expression::Calm),
+        ("13-curious.bmp", Expression::Curious),
+        ("14-playful.bmp", Expression::Playful),
+        ("15-wink.bmp", Expression::Wink),
+        ("16-sad.bmp", Expression::Sad),
+        ("17-determined.bmp", Expression::Determined),
+    ] {
+        apply(
+            &mut controller,
+            &mut screen,
+            presence(None, "", expression, Gaze::Center, 0),
+        );
+        save_bmp(&options.output_dir.join(name), &screen)?;
+    }
+    for (name, gaze, eyes) in [
+        ("18-look-left.bmp", Gaze::Left, EyeStyle::Open),
+        ("19-look-right.bmp", Gaze::Right, EyeStyle::Open),
+        ("20-look-up.bmp", Gaze::Up, EyeStyle::Open),
+        ("21-look-down.bmp", Gaze::Down, EyeStyle::Open),
+        ("22-eyes-wide.bmp", Gaze::Center, EyeStyle::Wide),
+        ("23-eyes-closed.bmp", Gaze::Center, EyeStyle::Closed),
+        (
+            "24-eyes-half-lidded.bmp",
+            Gaze::Center,
+            EyeStyle::HalfLidded,
+        ),
+    ] {
+        apply(
+            &mut controller,
+            &mut screen,
+            presence_with_eyes(None, "", Expression::Happy, gaze, eyes, 0),
+        );
+        save_bmp(&options.output_dir.join(name), &screen)?;
+    }
+    for index in 0..my_stackchan_firmware::model::DEMO_FACE_COUNT {
+        controller
+            .tap(index as u64, &mut screen)
+            .expect("screen is infallible");
+        save_bmp(
+            &options
+                .output_dir
+                .join(format!("demo-{:02}.bmp", index + 1)),
+            &screen,
+        )?;
+    }
+
     fs::write(
         options.output_dir.join("index.html"),
         gallery_html(options.ttl_s),
@@ -312,7 +431,7 @@ fn generate(options: &Options) -> io::Result<()> {
 }
 
 fn gallery_html(ttl_s: u16) -> String {
-    format!(
+    let mut html = format!(
         r#"<!doctype html>
 <html lang="ja">
 <meta charset="utf-8">
@@ -335,10 +454,33 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="04-expired.bmp" width="320" height="240" alt="期限満了後の上下の帯と顔"><figcaption>4. Overlay 期限満了後（{ttl_s} 秒）</figcaption></figure>
 <figure><img src="05-card.bmp" width="320" height="240" alt="Card layout"><figcaption>5. Card layout</figcaption></figure>
 <figure><img src="06-image.bmp" width="320" height="240" alt="RGB565 image"><figcaption>6. RGB565 image</figcaption></figure>
-</div>
-</html>
+<figure><img src="07-working.bmp" width="320" height="240" alt="作業中の表情と状態"><figcaption>7. Working / Focused / Right</figcaption></figure>
+<figure><img src="08-waiting.bmp" width="320" height="240" alt="待機中の表情と状態"><figcaption>8. Waiting / Sleepy / Up</figcaption></figure>
+<figure><img src="09-error.bmp" width="320" height="240" alt="エラー時の表情と状態"><figcaption>9. Error / Worried / Down</figcaption></figure>
+<figure><img src="10-face.bmp" width="320" height="240" alt="驚いた表情と左視線"><figcaption>10. Surprised / Left</figcaption></figure>
+<figure><img src="11-grin.bmp" width="320" height="240" alt="笑顔"><figcaption>11. Grin</figcaption></figure>
+<figure><img src="12-calm.bmp" width="320" height="240" alt="穏やかな表情"><figcaption>12. Calm</figcaption></figure>
+<figure><img src="13-curious.bmp" width="320" height="240" alt="興味を示す表情"><figcaption>13. Curious</figcaption></figure>
+<figure><img src="14-playful.bmp" width="320" height="240" alt="遊び心のある表情"><figcaption>14. Playful</figcaption></figure>
+<figure><img src="15-wink.bmp" width="320" height="240" alt="ウィンク"><figcaption>15. Wink</figcaption></figure>
+<figure><img src="16-sad.bmp" width="320" height="240" alt="悲しい表情"><figcaption>16. Sad</figcaption></figure>
+<figure><img src="17-determined.bmp" width="320" height="240" alt="決意した表情"><figcaption>17. Determined</figcaption></figure>
+<figure><img src="18-look-left.bmp" width="320" height="240" alt="左を見る"><figcaption>18. Look left</figcaption></figure>
+<figure><img src="19-look-right.bmp" width="320" height="240" alt="右を見る"><figcaption>19. Look right</figcaption></figure>
+<figure><img src="20-look-up.bmp" width="320" height="240" alt="上を見る"><figcaption>20. Look up</figcaption></figure>
+<figure><img src="21-look-down.bmp" width="320" height="240" alt="下を見る"><figcaption>21. Look down</figcaption></figure>
+<figure><img src="22-eyes-wide.bmp" width="320" height="240" alt="目を見開く"><figcaption>22. Eyes wide</figcaption></figure>
+<figure><img src="23-eyes-closed.bmp" width="320" height="240" alt="目を閉じる"><figcaption>23. Eyes closed</figcaption></figure>
+<figure><img src="24-eyes-half-lidded.bmp" width="320" height="240" alt="ジト目"><figcaption>24. Half-lidded eyes</figcaption></figure>
 "#
-    )
+    );
+    for index in 1..=my_stackchan_firmware::model::DEMO_FACE_COUNT {
+        html.push_str(&format!(
+            "<figure><img src=\"demo-{index:02}.bmp\" width=\"320\" height=\"240\" alt=\"タップデモ {index}\"><figcaption>Tap {index}</figcaption></figure>\n"
+        ));
+    }
+    html.push_str("</div>\n</html>\n");
+    html
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

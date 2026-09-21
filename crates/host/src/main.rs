@@ -23,6 +23,34 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 表情と視線を表示する。
+    Face {
+        #[arg(long)]
+        port: Option<String>,
+        #[arg(long, value_enum, default_value = "happy")]
+        expression: FaceExpression,
+        #[arg(long, value_enum, default_value = "center")]
+        gaze: FaceGaze,
+        #[arg(long, value_enum, default_value = "auto")]
+        eyes: HostEyeStyle,
+        #[arg(long, default_value_t = 0)]
+        ttl: u16,
+    },
+    /// PC の活動状態を表情とともに表示する。
+    Status {
+        #[arg(long)]
+        port: Option<String>,
+        #[arg(long, value_enum)]
+        activity: HostActivity,
+        #[arg(long, default_value = "")]
+        detail: String,
+        #[arg(long, value_enum, default_value = "center")]
+        gaze: FaceGaze,
+        #[arg(long, value_enum, default_value = "auto")]
+        eyes: HostEyeStyle,
+        #[arg(long, default_value_t = 30)]
+        ttl: u16,
+    },
     /// 接続されているシリアル port を列挙する
     ListPorts,
     /// 疎通確認を送り、応答を待つ
@@ -87,6 +115,104 @@ enum TextSlot {
     Overlay,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum FaceExpression {
+    Happy,
+    Focused,
+    Sleepy,
+    Worried,
+    Surprised,
+    Grin,
+    Calm,
+    Curious,
+    Playful,
+    Wink,
+    Sad,
+    Determined,
+}
+
+impl From<FaceExpression> for protocol::Expression {
+    fn from(value: FaceExpression) -> Self {
+        match value {
+            FaceExpression::Happy => Self::Happy,
+            FaceExpression::Focused => Self::Focused,
+            FaceExpression::Sleepy => Self::Sleepy,
+            FaceExpression::Worried => Self::Worried,
+            FaceExpression::Surprised => Self::Surprised,
+            FaceExpression::Grin => Self::Grin,
+            FaceExpression::Calm => Self::Calm,
+            FaceExpression::Curious => Self::Curious,
+            FaceExpression::Playful => Self::Playful,
+            FaceExpression::Wink => Self::Wink,
+            FaceExpression::Sad => Self::Sad,
+            FaceExpression::Determined => Self::Determined,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum FaceGaze {
+    Center,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl From<FaceGaze> for protocol::Gaze {
+    fn from(value: FaceGaze) -> Self {
+        match value {
+            FaceGaze::Center => Self::Center,
+            FaceGaze::Left => Self::Left,
+            FaceGaze::Right => Self::Right,
+            FaceGaze::Up => Self::Up,
+            FaceGaze::Down => Self::Down,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HostEyeStyle {
+    Auto,
+    Open,
+    Wide,
+    Closed,
+    HalfLidded,
+}
+
+impl From<HostEyeStyle> for protocol::EyeStyle {
+    fn from(value: HostEyeStyle) -> Self {
+        match value {
+            HostEyeStyle::Auto => Self::Auto,
+            HostEyeStyle::Open => Self::Open,
+            HostEyeStyle::Wide => Self::Wide,
+            HostEyeStyle::Closed => Self::Closed,
+            HostEyeStyle::HalfLidded => Self::HalfLidded,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HostActivity {
+    Idle,
+    Working,
+    Waiting,
+    Done,
+    Error,
+}
+
+impl From<HostActivity> for protocol::Activity {
+    fn from(value: HostActivity) -> Self {
+        match value {
+            HostActivity::Idle => Self::Idle,
+            HostActivity::Working => Self::Working,
+            HostActivity::Waiting => Self::Waiting,
+            HostActivity::Done => Self::Done,
+            HostActivity::Error => Self::Error,
+        }
+    }
+}
+
 impl From<TextSlot> for protocol::Slot {
     fn from(slot: TextSlot) -> Self {
         match slot {
@@ -100,6 +226,43 @@ impl From<TextSlot> for protocol::Slot {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Face {
+            port,
+            expression,
+            gaze,
+            eyes,
+            ttl,
+        } => send_display(
+            port,
+            &presence_message(None, "", expression.into(), gaze.into(), eyes.into(), ttl)?,
+        ),
+        Command::Status {
+            port,
+            activity,
+            detail,
+            gaze,
+            eyes,
+            ttl,
+        } => {
+            let activity: protocol::Activity = activity.into();
+            let expression = match activity {
+                protocol::Activity::Idle | protocol::Activity::Done => protocol::Expression::Happy,
+                protocol::Activity::Working => protocol::Expression::Focused,
+                protocol::Activity::Waiting => protocol::Expression::Sleepy,
+                protocol::Activity::Error => protocol::Expression::Worried,
+            };
+            send_display(
+                port,
+                &presence_message(
+                    Some(activity),
+                    &detail,
+                    expression,
+                    gaze.into(),
+                    eyes.into(),
+                    ttl,
+                )?,
+            )
+        }
         Command::ListPorts => list_ports(),
         Command::Ping { port } => ping(port),
         Command::Text {
@@ -217,6 +380,30 @@ fn text_message(slot: TextSlot, ttl_s: u16, text: &str) -> Result<protocol::Mess
             )
         })?,
     })
+}
+
+fn presence_message(
+    activity: Option<protocol::Activity>,
+    detail: &str,
+    expression: protocol::Expression,
+    gaze: protocol::Gaze,
+    eyes: protocol::EyeStyle,
+    ttl_s: u16,
+) -> Result<protocol::Message, String> {
+    let detail = detail.try_into().map_err(|_| {
+        format!(
+            "状態の詳細は UTF-8 で {} byte 以下にしてください",
+            protocol::MAX_STATUS_DETAIL_BYTES
+        )
+    })?;
+    Ok(protocol::Message::Presence(protocol::Presence {
+        activity,
+        detail,
+        expression,
+        gaze,
+        eyes,
+        ttl_s,
+    }))
 }
 
 struct CardContent<'a> {
@@ -502,6 +689,66 @@ mod tests {
         assert!(text_message(TextSlot::Overlay, 1, &"日".repeat(171)).is_err());
         assert!(Cli::try_parse_from(["stackchan", "text", "--ttl", "65536", "test"]).is_err());
         assert!(Cli::try_parse_from(["stackchan", "text", "--slot", "unknown", "test"]).is_err());
+    }
+
+    #[test]
+    fn presence_cli_encodes_activity_and_checks_detail_bytes() {
+        let cli = Cli::try_parse_from([
+            "stackchan",
+            "status",
+            "--activity",
+            "working",
+            "--detail",
+            "BUILD",
+            "--gaze",
+            "left",
+            "--eyes",
+            "half-lidded",
+            "--ttl",
+            "5",
+        ])
+        .unwrap();
+        let Command::Status {
+            activity,
+            detail,
+            gaze,
+            eyes,
+            ttl,
+            ..
+        } = cli.command
+        else {
+            panic!("status expected")
+        };
+        assert_eq!(ttl, 5);
+        assert!(matches!(activity, HostActivity::Working));
+        let message = presence_message(
+            Some(activity.into()),
+            &detail,
+            protocol::Expression::Focused,
+            gaze.into(),
+            eyes.into(),
+            ttl,
+        )
+        .unwrap();
+        let protocol::Message::Presence(presence) = message else {
+            panic!("presence expected")
+        };
+        assert_eq!(presence.activity, Some(protocol::Activity::Working));
+        assert_eq!(presence.gaze, protocol::Gaze::Left);
+        assert_eq!(presence.eyes, protocol::EyeStyle::HalfLidded);
+        assert_eq!(presence.detail.as_str(), "BUILD");
+        assert!(
+            presence_message(
+                None,
+                &"日".repeat(7),
+                protocol::Expression::Happy,
+                protocol::Gaze::Center,
+                protocol::EyeStyle::Auto,
+                0
+            )
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["stackchan", "status", "--activity", "unknown"]).is_err());
     }
 
     #[test]
@@ -851,6 +1098,50 @@ mod tests {
         assert_eq!(
             send_checked(&mut port, &protocol::Message::Clear).unwrap(),
             seq.wrapping_add(3)
+        );
+    }
+
+    #[test]
+    #[ignore = "Presence 対応 firmware の実機と STACKCHAN_TEST_PORT が必要"]
+    fn hardware_presence_and_ttl() {
+        let port_name = std::env::var("STACKCHAN_TEST_PORT").expect("STACKCHAN_TEST_PORT が必要");
+        let (_, mut port) = open_port(Some(port_name)).unwrap();
+        let mut seq = send_checked(&mut port, &protocol::Message::Clear).unwrap();
+        for message in [
+            presence_message(
+                None,
+                "",
+                protocol::Expression::Surprised,
+                protocol::Gaze::Left,
+                protocol::EyeStyle::Wide,
+                0,
+            )
+            .unwrap(),
+            presence_message(
+                Some(protocol::Activity::Working),
+                "BUILD",
+                protocol::Expression::Focused,
+                protocol::Gaze::Right,
+                protocol::EyeStyle::HalfLidded,
+                1,
+            )
+            .unwrap(),
+        ] {
+            let next = send_checked(&mut port, &message).unwrap();
+            assert_eq!(next, seq.wrapping_add(1));
+            seq = next;
+        }
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(
+            validate_pong(
+                &exchange(&mut port, &protocol::Message::Ping { nonce: NONCE }).unwrap(),
+                NONCE
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            send_checked(&mut port, &protocol::Message::Clear).unwrap(),
+            seq.wrapping_add(1)
         );
     }
 }
