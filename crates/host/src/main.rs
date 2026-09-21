@@ -95,13 +95,81 @@ fn ping(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(end) = rx[..len].iter().position(|&b| b == 0) {
             let reply: protocol::Reply = protocol::decode(&mut rx[..=end])?;
             println!("{port_name}: {reply:?}");
-            return match reply {
-                protocol::Reply::Pong { nonce: n, .. } if n == nonce => Ok(()),
-                _ => Err("nonce が一致しません".into()),
-            };
+            return validate_pong(&reply, nonce).map_err(Into::into);
         }
         if len == rx.len() {
             return Err("フレームが長すぎます".into());
+        }
+    }
+}
+
+fn validate_pong(reply: &protocol::Reply, expected_nonce: u32) -> Result<(), String> {
+    match reply {
+        protocol::Reply::Pong { nonce, .. } if *nonce != expected_nonce => {
+            Err("nonce が一致しません".into())
+        }
+        protocol::Reply::Pong { version, .. } if *version != protocol::VERSION => Err(format!(
+            "プロトコル版が一致しません: host={}, firmware={version}",
+            protocol::VERSION
+        )),
+        protocol::Reply::Pong { .. } => Ok(()),
+        _ => Err("Ping に対して Pong 以外の応答を受信しました".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NONCE: u32 = 0x5A5A_1234;
+
+    #[test]
+    fn accepts_matching_nonce_and_version() {
+        let reply = protocol::Reply::Pong {
+            nonce: NONCE,
+            version: protocol::VERSION,
+        };
+        assert_eq!(validate_pong(&reply, NONCE), Ok(()));
+    }
+
+    #[test]
+    fn rejects_incompatible_version_even_with_matching_nonce() {
+        let version = protocol::VERSION.wrapping_add(1);
+        let reply = protocol::Reply::Pong {
+            nonce: NONCE,
+            version,
+        };
+        assert_eq!(
+            validate_pong(&reply, NONCE),
+            Err(format!(
+                "プロトコル版が一致しません: host={}, firmware={version}",
+                protocol::VERSION
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_nonce_even_with_matching_version() {
+        let reply = protocol::Reply::Pong {
+            nonce: NONCE + 1,
+            version: protocol::VERSION,
+        };
+        assert_eq!(
+            validate_pong(&reply, NONCE),
+            Err("nonce が一致しません".into())
+        );
+    }
+
+    #[test]
+    fn rejects_non_pong_replies() {
+        for reply in [
+            protocol::Reply::Ack { seq: 0 },
+            protocol::Reply::Rejected { count: 0 },
+        ] {
+            assert_eq!(
+                validate_pong(&reply, NONCE),
+                Err("Ping に対して Pong 以外の応答を受信しました".into())
+            );
         }
     }
 }
