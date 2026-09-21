@@ -11,7 +11,7 @@ use embedded_graphics::{
     prelude::{DrawTarget, OriginDimensions, Pixel, Point, Size},
 };
 use my_stackchan_firmware::{model::Controller, renderer};
-use protocol::{MAX_TEXT_BYTES, Message, Reply, Slot};
+use protocol::{Card, Element, MAX_CARD_TEXT_BYTES, MAX_TEXT_BYTES, Message, Reply, Row, Slot};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
@@ -110,6 +110,8 @@ struct Options {
     bottom: String,
     overlay: String,
     ttl_s: u16,
+    card_title: String,
+    card_ratio: u8,
 }
 
 impl Default for Options {
@@ -120,6 +122,8 @@ impl Default for Options {
             bottom: "BannerBottom OK".into(),
             overlay: "Overlay test".into(),
             ttl_s: 5,
+            card_title: "CPU".into(),
+            card_ratio: 75,
         }
     }
 }
@@ -136,6 +140,12 @@ impl Options {
                 "--top" => options.top = value,
                 "--bottom" => options.bottom = value,
                 "--overlay" => options.overlay = value,
+                "--card-title" => options.card_title = value,
+                "--card-ratio" => {
+                    options.card_ratio = value
+                        .parse()
+                        .map_err(|_| "--card-ratio must be an integer from 0 to 100")?;
+                }
                 "--ttl" => {
                     options.ttl_s = value
                         .parse()
@@ -146,6 +156,14 @@ impl Options {
         }
         if options.ttl_s == 0 {
             return Err("--ttl は 1..65535 の整数にしてください".into());
+        }
+        if options.card_ratio > 100 {
+            return Err("--card-ratio must be an integer from 0 to 100".into());
+        }
+        if options.card_title.len() > MAX_CARD_TEXT_BYTES {
+            return Err(format!(
+                "--card-title must be at most {MAX_CARD_TEXT_BYTES} UTF-8 bytes"
+            ));
         }
         for (name, text) in [
             ("--top", &options.top),
@@ -168,6 +186,40 @@ fn text(slot: Slot, content: &str, ttl_s: u16) -> Message {
         ttl_s,
         text: content.try_into().expect("validated text length"),
     }
+}
+
+fn card(options: &Options) -> Message {
+    let mut card = Card {
+        slot: Slot::BannerTop,
+        ttl_s: 0,
+        rows: Default::default(),
+    };
+    let mut title = Row {
+        elements: Default::default(),
+    };
+    title
+        .elements
+        .push(Element::Text {
+            text: options
+                .card_title
+                .as_str()
+                .try_into()
+                .expect("validated title"),
+        })
+        .expect("title row has capacity");
+    card.rows.push(title).expect("card has capacity");
+    let mut bar = Row {
+        elements: Default::default(),
+    };
+    bar.elements
+        .push(Element::Bar {
+            ratio: options.card_ratio,
+            label: "Usage".try_into().expect("fixed label fits"),
+        })
+        .expect("bar row has capacity");
+    card.rows.push(bar).expect("card has capacity");
+    card.validate().expect("valid card layout");
+    Message::Card(card)
 }
 
 fn apply(controller: &mut Controller, screen: &mut Screen, message: Message) {
@@ -209,6 +261,9 @@ fn generate(options: &Options) -> io::Result<()> {
         .expect("screen is infallible");
     save_bmp(&options.output_dir.join("04-expired.bmp"), &screen)?;
 
+    apply(&mut controller, &mut screen, card(options));
+    save_bmp(&options.output_dir.join("05-card.bmp"), &screen)?;
+
     fs::write(
         options.output_dir.join("index.html"),
         gallery_html(options.ttl_s),
@@ -238,6 +293,7 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="02-banners.bmp" width="320" height="240" alt="上下の帯と顔"><figcaption>2. 上下の帯</figcaption></figure>
 <figure><img src="03-overlay.bmp" width="320" height="240" alt="Overlay 表示"><figcaption>3. Overlay 表示直後</figcaption></figure>
 <figure><img src="04-expired.bmp" width="320" height="240" alt="期限満了後の上下の帯と顔"><figcaption>4. Overlay 期限満了後（{ttl_s} 秒）</figcaption></figure>
+<figure><img src="05-card.bmp" width="320" height="240" alt="Card layout"><figcaption>5. Card layout</figcaption></figure>
 </div>
 </html>
 "#
@@ -248,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "usage: simulate [--out DIR] [--top TEXT] [--bottom TEXT] [--overlay TEXT] [--ttl SECONDS (1..65535)]"
+            "usage: simulate [--out DIR] [--top TEXT] [--bottom TEXT] [--overlay TEXT] [--ttl SECONDS (1..65535)] [--card-title TEXT] [--card-ratio 0..100]"
         );
         return Ok(());
     }
@@ -336,5 +392,18 @@ mod tests {
             Options::parse(["--top", &"日".repeat(171)].into_iter().map(String::from)).is_err()
         );
         assert!(Options::parse(["--top", &"日".repeat(170)].into_iter().map(String::from)).is_ok());
+    }
+
+    #[test]
+    fn options_reject_invalid_card_values() {
+        assert!(Options::parse(["--card-ratio", "101"].into_iter().map(String::from)).is_err());
+        assert!(
+            Options::parse(
+                ["--card-title", &"x".repeat(49)]
+                    .into_iter()
+                    .map(String::from)
+            )
+            .is_err()
+        );
     }
 }

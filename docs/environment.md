@@ -80,23 +80,26 @@ nix を持つ場合は `nix develop` または `direnv allow` で開発シェル
 scripts/container.sh run make simulate
 ```
 
-`.work/simulation/index.html` をブラウザーで開くと、以下の 4 状態を並べて確認できる。
+`.work/simulation/index.html` をブラウザーで開くと、以下の 5 状態を並べて確認できる。
 対応する 320×240 の BMP 画像も同じディレクトリに保存する。
 
 1. 起動確認画面 (`01-startup.bmp`)
 2. 上下の帯と顔 (`02-banners.bmp`)
 3. Overlay 表示直後 (`03-overlay.bmp`)
 4. TTL 満了時に復帰した上下の帯と顔 (`04-expired.bmp`)
+5. Card のタイトルと比率バー (`05-card.bmp`)
 
-文言・TTL・出力先は指定できる。`--ttl` は 1〜65535 秒、文言はそれぞれ UTF-8 で
-512 byte までとし、実機と同じ制約を適用する。各画像の時刻は実際の待機時間ではなく、
+文言・TTL・Card のタイトルと比率・出力先は指定できる。`--ttl` は 1〜65535 秒、
+Text の文言は UTF-8 で 512 byte まで、Card のタイトルは 48 byte まで、比率は 0〜100 とする。
+各画像の時刻は実際の待機時間ではなく、
 単調時計の入力を 0 ms と TTL 境界に設定して再現する。
 
 ```bash
 scripts/container.sh run cargo run --manifest-path firmware/Cargo.toml \
   --example simulate --locked --offline -- \
   --out .work/simulation --top 'USB Text OK' --bottom 'BannerBottom OK' \
-  --overlay 'Overlay test: 30s' --ttl 30
+  --overlay 'Overlay test: 30s' --ttl 30 \
+  --card-title CPU --card-ratio 75
 ```
 
 BMP は描画処理が出力した RGB565 を RGB888 に展開した結果である。
@@ -155,6 +158,30 @@ scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
 
 Slot ごとの期限・上書き・描画失敗・領域外描画・Overlay 解除時の復帰は通常の単体テストでも検証する。
 電源再投入時は表示状態を保持せず、表示確認画面へ戻る。
+
+### Card の実機確認
+
+Card 対応 firmware を書き込んだ後、次の例で上帯にタイトル・比率バーを表示する。
+
+```bash
+scripts/container.sh device target/debug/stackchan card \
+  --slot top --title CPU --detail '75%' --ratio 75 --label Usage
+scripts/container.sh device target/debug/stackchan card \
+  --slot overlay --ttl 5 --title Status --detail 'Card OK' --ratio 50 --space 8
+```
+
+Overlay の期限満了後、上帯の Card が再表示される。表示を消す場合は `clear` を実行する。
+Card は送信前に host で行数・要素数・合計高さ・文字列長・比率を検証し、firmware も
+同じ制約を再検証する。通信用の実機回帰テストは次で実行する。無効な比率の拒否、
+Ack の通し番号、Overlay の TTL、Clear 後の通信を確認する。終了時に Clear する。
+
+```bash
+scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
+  cargo test --locked --offline -p my-stackchan-host \
+  -- --ignored --exact tests::hardware_card_and_invalid_ratio
+```
+
+Ack と単体テストだけでは Card の画面表示と期限満了の目視確認は代替できない。
 
 ### 静的検査・単体テスト
 

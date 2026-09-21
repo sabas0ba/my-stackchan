@@ -1,6 +1,6 @@
 //! PC 側 CLI。
 //!
-//! port の列挙、疎通確認、テキスト表示を提供する。表示内容の組み立て (Card) と
+//! port の列挙、疎通確認、テキストと Card の表示を提供する。
 //! 使用量の取得 (collector) は docs/design.md のフェーズに従って追加する。
 
 use std::io::{Read, Write};
@@ -45,6 +45,25 @@ enum Command {
         #[arg(long)]
         port: Option<String>,
     },
+    /// テキスト、比率バー、余白を 4 行 × 各 2 要素以内で表示する
+    Card {
+        #[arg(long)]
+        port: Option<String>,
+        #[arg(long, value_enum, default_value = "overlay")]
+        slot: TextSlot,
+        #[arg(long, default_value_t = 0)]
+        ttl: u16,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long)]
+        ratio: Option<u8>,
+        #[arg(long, default_value = "Usage")]
+        label: String,
+        #[arg(long)]
+        space: Option<u8>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -76,6 +95,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             text,
         } => send_display(port, &text_message(slot, ttl, &text)?),
         Command::Clear { port } => send_display(port, &protocol::Message::Clear),
+        Command::Card {
+            port,
+            slot,
+            ttl,
+            title,
+            detail,
+            ratio,
+            label,
+            space,
+        } => send_display(
+            port,
+            &card_message(slot, ttl, &title, detail.as_deref(), ratio, &label, space)?,
+        ),
     }
 }
 
@@ -144,6 +176,80 @@ fn text_message(slot: TextSlot, ttl_s: u16, text: &str) -> Result<protocol::Mess
             )
         })?,
     })
+}
+
+fn card_message(
+    slot: TextSlot,
+    ttl_s: u16,
+    title: &str,
+    detail: Option<&str>,
+    ratio: Option<u8>,
+    label: &str,
+    space: Option<u8>,
+) -> Result<protocol::Message, String> {
+    let mut card = protocol::Card {
+        slot: slot.into(),
+        ttl_s,
+        rows: Default::default(),
+    };
+    let mut header = protocol::Row {
+        elements: Default::default(),
+    };
+    header
+        .elements
+        .push(protocol::Element::Text {
+            text: title.try_into().map_err(|_| {
+                format!(
+                    "title は UTF-8 で {} byte 以下にしてください",
+                    protocol::MAX_CARD_TEXT_BYTES
+                )
+            })?,
+        })
+        .map_err(|_| "Card の要素が多すぎます")?;
+    if let Some(detail) = detail {
+        header
+            .elements
+            .push(protocol::Element::Text {
+                text: detail.try_into().map_err(|_| {
+                    format!(
+                        "detail は UTF-8 で {} byte 以下にしてください",
+                        protocol::MAX_CARD_TEXT_BYTES
+                    )
+                })?,
+            })
+            .map_err(|_| "Card の要素が多すぎます")?;
+    }
+    card.rows
+        .push(header)
+        .map_err(|_| "Card の行が多すぎます")?;
+    if let Some(ratio) = ratio {
+        let mut row = protocol::Row {
+            elements: Default::default(),
+        };
+        row.elements
+            .push(protocol::Element::Bar {
+                ratio,
+                label: label.try_into().map_err(|_| {
+                    format!(
+                        "label は UTF-8 で {} byte 以下にしてください",
+                        protocol::MAX_BAR_LABEL_BYTES
+                    )
+                })?,
+            })
+            .map_err(|_| "Card の要素が多すぎます")?;
+        card.rows.push(row).map_err(|_| "Card の行が多すぎます")?;
+    }
+    if let Some(height) = space {
+        let mut row = protocol::Row {
+            elements: Default::default(),
+        };
+        row.elements
+            .push(protocol::Element::Spacer { height })
+            .map_err(|_| "Card の要素が多すぎます")?;
+        card.rows.push(row).map_err(|_| "Card の行が多すぎます")?;
+    }
+    card.validate().map_err(str::to_owned)?;
+    Ok(protocol::Message::Card(card))
 }
 
 fn exchange(
@@ -321,6 +427,45 @@ mod tests {
     }
 
     #[test]
+    fn card_builder_checks_layout_and_old_firmware_version_before_sending() {
+        let message = card_message(
+            TextSlot::Top,
+            2,
+            "CPU",
+            Some("75%"),
+            Some(75),
+            "Usage",
+            None,
+        )
+        .unwrap();
+        let protocol::Message::Card(card) = &message else {
+            panic!("Card を生成できませんでした");
+        };
+        assert_eq!(card.rows.len(), 2);
+        assert_eq!(card.validate(), Ok(()));
+        assert!(card_message(TextSlot::Top, 0, "CPU", None, Some(101), "Usage", None).is_err());
+        assert!(card_message(TextSlot::Top, 0, "CPU", None, Some(50), "Usage", Some(10)).is_err());
+        assert!(
+            card_message(
+                TextSlot::Overlay,
+                0,
+                &"日".repeat(17),
+                None,
+                None,
+                "Usage",
+                None
+            )
+            .is_err()
+        );
+        let mut link = Link::new(&[protocol::Reply::Pong {
+            nonce: NONCE,
+            version: 0,
+        }]);
+        assert!(send_checked(&mut link, &message).is_err());
+        assert_eq!(link.messages(), [protocol::Message::Ping { nonce: NONCE }]);
+    }
+
+    #[test]
     fn accepts_matching_nonce_and_version() {
         let reply = protocol::Reply::Pong {
             nonce: NONCE,
@@ -462,6 +607,67 @@ mod tests {
             seq = next;
         }
         // TTL 処理中も通信が継続し、自発的な Ack を送らないことを確認する。
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(
+            send_checked(&mut port, &protocol::Message::Clear).unwrap(),
+            seq.wrapping_add(1)
+        );
+        assert_eq!(
+            validate_pong(
+                &exchange(&mut port, &protocol::Message::Ping { nonce: NONCE }).unwrap(),
+                NONCE
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    #[ignore = "Card 対応 firmware の実機と STACKCHAN_TEST_PORT が必要"]
+    fn hardware_card_and_invalid_ratio() {
+        let port_name = std::env::var("STACKCHAN_TEST_PORT").expect("STACKCHAN_TEST_PORT が必要");
+        let (_, mut port) = open_port(Some(port_name)).unwrap();
+        let mut seq = send_checked(&mut port, &protocol::Message::Clear).unwrap();
+        let banner = card_message(
+            TextSlot::Top,
+            0,
+            "CPU",
+            Some("75%"),
+            Some(75),
+            "Usage",
+            None,
+        )
+        .unwrap();
+        let next = send_checked(&mut port, &banner).unwrap();
+        assert_eq!(next, seq.wrapping_add(1));
+        seq = next;
+
+        // 型として復号できるが、比率が範囲外の Card は Ack せず拒否する。
+        let mut invalid = banner.clone();
+        let protocol::Message::Card(card) = &mut invalid else {
+            panic!("Card が必要です");
+        };
+        card.rows[1].elements[0] = protocol::Element::Bar {
+            ratio: 101,
+            label: "bad".try_into().unwrap(),
+        };
+        assert!(matches!(
+            exchange(&mut port, &invalid).unwrap(),
+            protocol::Reply::Rejected { .. }
+        ));
+
+        let overlay = card_message(
+            TextSlot::Overlay,
+            1,
+            "Card OK",
+            Some("Overlay"),
+            Some(50),
+            "Usage",
+            Some(8),
+        )
+        .unwrap();
+        let next = send_checked(&mut port, &overlay).unwrap();
+        assert_eq!(next, seq.wrapping_add(1));
+        seq = next;
         std::thread::sleep(Duration::from_millis(1200));
         assert_eq!(
             send_checked(&mut port, &protocol::Message::Clear).unwrap(),
