@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。互換性の無い変更を行った場合に増やす。
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 
 /// 1 メッセージ中のテキストの最大バイト数 (UTF-8)。
 pub const MAX_TEXT_BYTES: usize = 512;
@@ -31,6 +31,7 @@ pub const MAX_BAR_LABEL_BYTES: usize = 12;
 /// 画像は Card あたり 1 枚に限定し、RGB565 の 2 byte/pixel で送る。
 pub const MAX_IMAGE_SIDE: u8 = 16;
 pub const MAX_IMAGE_BYTES: usize = 512;
+pub const MAX_STATUS_DETAIL_BYTES: usize = 20;
 
 /// 表示位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +42,62 @@ pub enum Slot {
     BannerBottom,
     /// 全画面。顔を隠す。
     Overlay,
+}
+
+/// PC が共有する活動状態。取得元は host 側で選ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Activity {
+    Idle,
+    Working,
+    Waiting,
+    Done,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Expression {
+    Happy,
+    Focused,
+    Sleepy,
+    Worried,
+    Surprised,
+    Grin,
+    Calm,
+    Curious,
+    Playful,
+    Wink,
+    Sad,
+    Determined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Gaze {
+    Center,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// 目の開き方。Auto は表情ごとの既定形を使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EyeStyle {
+    Auto,
+    Open,
+    Wide,
+    Closed,
+    HalfLidded,
+}
+
+/// 顔と PC 状態をまとめて更新する。TTL が満了すると既定の顔に戻る。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Presence {
+    pub activity: Option<Activity>,
+    pub detail: heapless::String<MAX_STATUS_DETAIL_BYTES>,
+    pub expression: Expression,
+    pub gaze: Gaze,
+    pub eyes: EyeStyle,
+    pub ttl_s: u16,
 }
 
 /// Column -> Row -> Element の 2 段に限定した表示内容。
@@ -160,6 +217,8 @@ pub enum Message {
     },
     /// 複数行の表示要素を 1 つの Slot に配置する。
     Card(Card),
+    /// 顔の表情・視線と PC の活動状態を同時に更新する。
+    Presence(Presence),
 }
 
 /// firmware から host へ返す応答。
@@ -484,5 +543,25 @@ mod tests {
         assert!(len <= MAX_FRAME_BYTES);
         let mut received = frame;
         assert_eq!(decode::<Message>(&mut received[..len]), Ok(message));
+    }
+
+    #[test]
+    fn presence_roundtrip_preserves_existing_variant_numbers() {
+        let message = Message::Presence(Presence {
+            activity: Some(Activity::Working),
+            detail: "Building".try_into().unwrap(),
+            expression: Expression::Focused,
+            gaze: Gaze::Right,
+            eyes: EyeStyle::HalfLidded,
+            ttl_s: 30,
+        });
+        let mut frame = [0; MAX_FRAME_BYTES];
+        let len = encode(&message, &mut frame).unwrap().len();
+        let mut received = frame;
+        assert_eq!(decode::<Message>(&mut received[..len]), Ok(message));
+        assert_eq!(received[0], 4);
+        assert!(
+            heapless::String::<MAX_STATUS_DETAIL_BYTES>::try_from("x".repeat(21).as_str()).is_err()
+        );
     }
 }

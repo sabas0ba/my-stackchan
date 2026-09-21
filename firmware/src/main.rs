@@ -27,6 +27,10 @@ use mipidsi::{
 
 mod board;
 use my_stackchan_firmware::{model::Controller, power, renderer, transport::Receiver};
+use static_cell::StaticCell;
+
+static RECEIVER: StaticCell<Receiver> = StaticCell::new();
+static CONTROLLER: StaticCell<Controller> = StaticCell::new();
 
 // 壁時計を含めず、同じソースから同じ記述子を生成する。
 esp_bootloader_esp_idf::esp_app_desc!(
@@ -84,8 +88,9 @@ fn main() -> ! {
     esp_println::println!("Phase 1 display ready: face / ASCII / RGB565");
 
     let mut usb = UsbSerialJtag::new(peripherals.USB_DEVICE);
-    let mut receiver = Receiver::default();
-    let mut controller = Controller::default();
+    // Card を含む表示状態と受信バッファは大きいため、main のスタックから分離する。
+    let receiver = RECEIVER.init_with(Receiver::default);
+    let controller = CONTROLLER.init_with(Controller::default);
     let mut tx = [0u8; 32];
     let mut tx_len = 0;
     let mut tx_sent = 0;

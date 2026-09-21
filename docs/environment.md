@@ -209,6 +209,28 @@ scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
   -- --ignored --exact tests::hardware_inline_image_and_invalid_length
 ```
 
+### 表情・視線と PC 状態の実機確認
+
+版 3 の firmware を書き込んでから、次の例で表情・視線と活動状態を送る。
+`status` は PC のジョブやスクリプトから呼び出せる。詳細は ASCII で表示する。
+`status` の既定 TTL は 30 秒、`face` の既定 TTL は無期限である。
+
+```bash
+scripts/container.sh run cargo build --locked --offline -p my-stackchan-host
+scripts/container.sh device target/debug/stackchan status \
+  --activity working --detail BUILD --gaze right --eyes half-lidded --ttl 10
+scripts/container.sh device target/debug/stackchan face \
+  --expression surprised --gaze left --eyes wide --ttl 5
+scripts/container.sh device target/debug/stackchan clear
+```
+
+`status` と `face` は現在の顔を上書きし、帯とは独立する。期限満了後は既定の顔に戻る。
+`clear` は顔と帯をすべて消す。描画例は `.work/simulation/index.html` の
+`07-working.bmp` から `24-eyes-half-lidded.bmp` に含まれる。
+
+この版は画面上の視線のみを制御する。物理的な首振りは駆動機構、接続端子、可動域を
+確認した後に実装する。
+
 ### 静的検査・単体テスト
 
 ```bash

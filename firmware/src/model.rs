@@ -1,7 +1,7 @@
 //! Slot の内容と単調時計に基づく表示期限。描画の成功後に状態を確定する。
 
 use embedded_graphics::{pixelcolor::Rgb565, prelude::DrawTarget};
-use protocol::{Card, MAX_TEXT_BYTES, Message, Reply, Slot};
+use protocol::{Card, MAX_TEXT_BYTES, Message, Presence, Reply, Slot};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 // firmware では動的確保を使わず、固定長の Card を Slot の状態に保持する。
@@ -17,14 +17,25 @@ pub struct Entry {
     deadline_ms: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PresenceEntry {
+    value: Presence,
+    deadline_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayState {
     slots: [Option<Entry>; 3],
+    presence: Option<PresenceEntry>,
 }
 
 impl DisplayState {
     pub fn get(&self, slot: Slot) -> Option<&Entry> {
         self.slots[slot_index(slot)].as_ref()
+    }
+
+    pub fn presence(&self) -> Option<&Presence> {
+        self.presence.as_ref().map(|entry| &entry.value)
     }
 
     fn set(&mut self, slot: Slot, content: Content, ttl_s: u16, now_ms: u64) {
@@ -34,11 +45,23 @@ impl DisplayState {
         });
     }
 
+    fn set_presence(&mut self, value: Presence, now_ms: u64) {
+        self.presence = Some(PresenceEntry {
+            deadline_ms: (value.ttl_s != 0)
+                .then(|| now_ms.saturating_add(u64::from(value.ttl_s) * 1000)),
+            value,
+        });
+    }
+
     fn has_expired(&self, now_ms: u64) -> bool {
         self.slots
             .iter()
             .flatten()
             .any(|entry| entry.deadline_ms.is_some_and(|deadline| now_ms >= deadline))
+            || self
+                .presence
+                .as_ref()
+                .is_some_and(|entry| entry.deadline_ms.is_some_and(|deadline| now_ms >= deadline))
     }
 
     fn expire(&mut self, now_ms: u64) {
@@ -49,6 +72,13 @@ impl DisplayState {
             {
                 *slot = None;
             }
+        }
+        if self
+            .presence
+            .as_ref()
+            .is_some_and(|entry| entry.deadline_ms.is_some_and(|deadline| now_ms >= deadline))
+        {
+            self.presence = None;
         }
     }
 }
@@ -98,6 +128,7 @@ impl Controller {
                 let ttl_s = card.ttl_s;
                 next.set(slot, Content::Card(card), ttl_s, now_ms);
             }
+            Message::Presence(presence) => next.set_presence(presence, now_ms),
         }
         // Overlay の背後の期限切れも、再表示の前に除去する。
         next.expire(now_ms);
@@ -217,6 +248,38 @@ mod tests {
         assert_eq!(display.pixels, pixels);
         assert_eq!(controller.seq, 0);
         assert_eq!(controller.state, DisplayState::default());
+    }
+
+    #[test]
+    fn presence_expires_independently_of_slots_and_overlay() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        controller
+            .handle(text(Slot::BannerBottom, 0, "keep"), 0, &mut display)
+            .unwrap();
+        let presence = Presence {
+            activity: Some(protocol::Activity::Working),
+            detail: "Build".try_into().unwrap(),
+            expression: protocol::Expression::Focused,
+            gaze: protocol::Gaze::Right,
+            eyes: protocol::EyeStyle::Auto,
+            ttl_s: 1,
+        };
+        assert_eq!(
+            controller.handle(Message::Presence(presence.clone()), 100, &mut display),
+            Ok(Reply::Ack { seq: 2 })
+        );
+        assert_eq!(controller.state.presence(), Some(&presence));
+        controller
+            .handle(text(Slot::Overlay, 0, "overlay"), 200, &mut display)
+            .unwrap();
+        controller.tick(1099, &mut display).unwrap();
+        assert!(controller.state.presence().is_some());
+        controller.tick(1100, &mut display).unwrap();
+        assert!(controller.state.presence().is_none());
+        assert!(controller.state.get(Slot::Overlay).is_some());
+        assert!(controller.state.get(Slot::BannerBottom).is_some());
+        assert_eq!(controller.seq, 3);
     }
 
     #[test]
