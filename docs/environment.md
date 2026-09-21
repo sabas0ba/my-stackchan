@@ -71,6 +71,38 @@ nix を持つ場合は `nix develop` または `direnv allow` で開発シェル
 
 ## 検査
 
+### 表示シミュレーション
+
+実機や USB 接続なしで、firmware と同じ `Controller`・`renderer` を PC 上で実行する。
+リポジトリのルートから既存の Nix コンテナを使う。
+
+```bash
+scripts/container.sh run make simulate
+```
+
+`.work/simulation/index.html` をブラウザーで開くと、以下の 4 状態を並べて確認できる。
+対応する 320×240 の BMP 画像も同じディレクトリに保存する。
+
+1. 起動確認画面 (`01-startup.bmp`)
+2. 上下の帯と顔 (`02-banners.bmp`)
+3. Overlay 表示直後 (`03-overlay.bmp`)
+4. TTL 満了時に復帰した上下の帯と顔 (`04-expired.bmp`)
+
+文言・TTL・出力先は指定できる。`--ttl` は 1〜65535 秒、文言はそれぞれ UTF-8 で
+512 byte までとし、実機と同じ制約を適用する。各画像の時刻は実際の待機時間ではなく、
+単調時計の入力を 0 ms と TTL 境界に設定して再現する。
+
+```bash
+scripts/container.sh run cargo run --manifest-path firmware/Cargo.toml \
+  --example simulate --locked --offline -- \
+  --out .work/simulation --top 'USB Text OK' --bottom 'BannerBottom OK' \
+  --overlay 'Overlay test: 30s' --ttl 30
+```
+
+BMP は描画処理が出力した RGB565 を RGB888 に展開した結果である。
+LCD パネル固有の色順・反転・SPI 転送・USB 通信の成否は再現しないため、
+実機の表示・通信確認は従来の手順で行う。
+
 ### Ping/Pong の実機確認
 
 前節の USB 接続と書き込みを済ませてから実行する。書き込みには利用者の許可が必要。
@@ -135,7 +167,7 @@ make audit        # cargo-deny による advisory と license の検査 (ネッ�
 
 CI (`.github/workflows/ci.yml`) はイメージを構築し、`--network none` のコンテナ内で `make check` を実行する。
 
-`make check` は firmware の電源制御と描画処理も host 上でテストする。対象外レジスタビットの保持、I2C エラー伝播、描画範囲、RGB565 の色順、描画エラー伝播を検証する。単独実行は開発シェル内のリポジトリルートから `cargo test --manifest-path firmware/Cargo.toml --lib --locked --offline` を使う。`firmware/` 内から実行すると Xtensa 用の Cargo 設定が適用されるため、host テストではルートから実行する。
+`make check` は firmware の電源制御と描画処理も host 上でテストする。対象外レジスタビットの保持、I2C エラー伝播、描画範囲、RGB565 の色順、描画エラー伝播を検証する。単独実行は開発シェル内のリポジトリルートから `cargo test --manifest-path firmware/Cargo.toml --lib --locked --offline` を使う。シミュレーターの BMP ヘッダー・色・TTL 復帰は `cargo test --manifest-path firmware/Cargo.toml --example simulate --locked --offline` で確認する。`firmware/` 内から実行すると Xtensa 用の Cargo 設定が適用されるため、host テストではルートから実行する。
 
 ## cargo の依存とネットワーク
 
