@@ -4,9 +4,12 @@
 //! 使用量の取得 (collector) は docs/design.md のフェーズに従って追加する。
 
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
+
+mod bmp;
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
 const ESP_USB_SERIAL_JTAG: (u16, u16) = (0x303A, 0x1001);
@@ -45,7 +48,7 @@ enum Command {
         #[arg(long)]
         port: Option<String>,
     },
-    /// テキスト、比率バー、余白を 4 行 × 各 2 要素以内で表示する
+    /// テキスト、比率バー、画像、余白を 4 行 × 各 2 要素以内で表示する
     Card {
         #[arg(long)]
         port: Option<String>,
@@ -63,6 +66,17 @@ enum Command {
         label: String,
         #[arg(long)]
         space: Option<u8>,
+        /// 24-bit BMP から最大 16x16 px を切り出して表示する
+        #[arg(long)]
+        image_bmp: Option<PathBuf>,
+        #[arg(long, requires = "image_bmp")]
+        image_x: Option<u32>,
+        #[arg(long, requires = "image_bmp")]
+        image_y: Option<u32>,
+        #[arg(long, requires = "image_bmp")]
+        image_width: Option<u8>,
+        #[arg(long, requires = "image_bmp")]
+        image_height: Option<u8>,
     },
 }
 
@@ -104,9 +118,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ratio,
             label,
             space,
+            image_bmp,
+            image_x,
+            image_y,
+            image_width,
+            image_height,
         } => send_display(
             port,
-            &card_message(slot, ttl, &title, detail.as_deref(), ratio, &label, space)?,
+            &card_message(
+                slot,
+                ttl,
+                CardContent {
+                    title: &title,
+                    detail: detail.as_deref(),
+                    ratio,
+                    label: &label,
+                    space,
+                    image: image_bmp
+                        .as_deref()
+                        .map(|path| {
+                            bmp::load_icon(
+                                path,
+                                image_x.unwrap_or(0),
+                                image_y.unwrap_or(0),
+                                image_width.unwrap_or(protocol::MAX_IMAGE_SIDE),
+                                image_height.unwrap_or(protocol::MAX_IMAGE_SIDE),
+                            )
+                        })
+                        .transpose()?,
+                },
+            )?,
         ),
     }
 }
@@ -178,19 +219,47 @@ fn text_message(slot: TextSlot, ttl_s: u16, text: &str) -> Result<protocol::Mess
     })
 }
 
+struct CardContent<'a> {
+    title: &'a str,
+    detail: Option<&'a str>,
+    ratio: Option<u8>,
+    label: &'a str,
+    space: Option<u8>,
+    image: Option<protocol::ImageData>,
+}
+
+#[cfg(test)]
+impl<'a> CardContent<'a> {
+    fn new(title: &'a str) -> Self {
+        Self {
+            title,
+            detail: None,
+            ratio: None,
+            label: "Usage",
+            space: None,
+            image: None,
+        }
+    }
+}
+
 fn card_message(
     slot: TextSlot,
     ttl_s: u16,
-    title: &str,
-    detail: Option<&str>,
-    ratio: Option<u8>,
-    label: &str,
-    space: Option<u8>,
+    content: CardContent<'_>,
 ) -> Result<protocol::Message, String> {
+    let CardContent {
+        title,
+        detail,
+        ratio,
+        label,
+        space,
+        image,
+    } = content;
     let mut card = protocol::Card {
         slot: slot.into(),
         ttl_s,
         rows: Default::default(),
+        image,
     };
     let mut header = protocol::Row {
         elements: Default::default(),
@@ -236,6 +305,15 @@ fn card_message(
                     )
                 })?,
             })
+            .map_err(|_| "Card の要素が多すぎます")?;
+        card.rows.push(row).map_err(|_| "Card の行が多すぎます")?;
+    }
+    if card.image.is_some() {
+        let mut row = protocol::Row {
+            elements: Default::default(),
+        };
+        row.elements
+            .push(protocol::Element::Image)
             .map_err(|_| "Card の要素が多すぎます")?;
         card.rows.push(row).map_err(|_| "Card の行が多すぎます")?;
     }
@@ -431,11 +509,11 @@ mod tests {
         let message = card_message(
             TextSlot::Top,
             2,
-            "CPU",
-            Some("75%"),
-            Some(75),
-            "Usage",
-            None,
+            CardContent {
+                detail: Some("75%"),
+                ratio: Some(75),
+                ..CardContent::new("CPU")
+            },
         )
         .unwrap();
         let protocol::Message::Card(card) = &message else {
@@ -443,23 +521,33 @@ mod tests {
         };
         assert_eq!(card.rows.len(), 2);
         assert_eq!(card.validate(), Ok(()));
-        assert!(card_message(TextSlot::Top, 0, "CPU", None, Some(101), "Usage", None).is_err());
-        assert!(card_message(TextSlot::Top, 0, "CPU", None, Some(50), "Usage", Some(10)).is_err());
         assert!(
             card_message(
-                TextSlot::Overlay,
+                TextSlot::Top,
                 0,
-                &"日".repeat(17),
-                None,
-                None,
-                "Usage",
-                None
+                CardContent {
+                    ratio: Some(101),
+                    ..CardContent::new("CPU")
+                }
             )
             .is_err()
         );
+        assert!(
+            card_message(
+                TextSlot::Top,
+                0,
+                CardContent {
+                    ratio: Some(50),
+                    space: Some(10),
+                    ..CardContent::new("CPU")
+                }
+            )
+            .is_err()
+        );
+        assert!(card_message(TextSlot::Overlay, 0, CardContent::new(&"日".repeat(17))).is_err());
         let mut link = Link::new(&[protocol::Reply::Pong {
             nonce: NONCE,
-            version: 0,
+            version: protocol::VERSION - 1,
         }]);
         assert!(send_checked(&mut link, &message).is_err());
         assert_eq!(link.messages(), [protocol::Message::Ping { nonce: NONCE }]);
@@ -630,11 +718,11 @@ mod tests {
         let banner = card_message(
             TextSlot::Top,
             0,
-            "CPU",
-            Some("75%"),
-            Some(75),
-            "Usage",
-            None,
+            CardContent {
+                detail: Some("75%"),
+                ratio: Some(75),
+                ..CardContent::new("CPU")
+            },
         )
         .unwrap();
         let next = send_checked(&mut port, &banner).unwrap();
@@ -658,11 +746,12 @@ mod tests {
         let overlay = card_message(
             TextSlot::Overlay,
             1,
-            "Card OK",
-            Some("Overlay"),
-            Some(50),
-            "Usage",
-            Some(8),
+            CardContent {
+                detail: Some("Overlay"),
+                ratio: Some(50),
+                space: Some(8),
+                ..CardContent::new("Card OK")
+            },
         )
         .unwrap();
         let next = send_checked(&mut port, &overlay).unwrap();
@@ -679,6 +768,89 @@ mod tests {
                 NONCE
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    #[ignore = "画像対応 firmware の実機と STACKCHAN_TEST_PORT が必要"]
+    fn hardware_inline_image_and_invalid_length() {
+        let port_name = std::env::var("STACKCHAN_TEST_PORT").expect("STACKCHAN_TEST_PORT が必要");
+        let (_, mut port) = open_port(Some(port_name)).unwrap();
+        let mut pixels = protocol::ImageData {
+            width: 16,
+            height: 16,
+            pixels: Default::default(),
+        };
+        for _ in 0..16 {
+            for column in 0..16 {
+                let color: u16 = [0xF800, 0x07E0, 0x001F, 0xFFFF][column / 4];
+                pixels
+                    .pixels
+                    .extend_from_slice(&color.to_be_bytes())
+                    .unwrap();
+            }
+        }
+        let image = card_message(
+            TextSlot::Top,
+            0,
+            CardContent {
+                image: Some(pixels),
+                ..CardContent::new("RGB565")
+            },
+        )
+        .unwrap();
+        let seq = send_checked(&mut port, &protocol::Message::Clear).unwrap();
+        assert_eq!(
+            send_checked(&mut port, &image).unwrap(),
+            seq.wrapping_add(1)
+        );
+
+        let mut invalid = image.clone();
+        let protocol::Message::Card(card) = &mut invalid else {
+            panic!("Card が必要です");
+        };
+        card.image.as_mut().unwrap().pixels.pop();
+        assert!(matches!(
+            exchange(&mut port, &invalid).unwrap(),
+            protocol::Reply::Rejected { .. }
+        ));
+
+        // 画像 512 byte と最大長のテキスト 7 個を同時に送る。
+        let mut maximal = image;
+        let protocol::Message::Card(card) = &mut maximal else {
+            panic!("Card が必要です");
+        };
+        card.slot = protocol::Slot::Overlay;
+        card.rows.clear();
+        for row_index in 0..protocol::MAX_CARD_ROWS {
+            let mut row = protocol::Row {
+                elements: Default::default(),
+            };
+            for column_index in 0..protocol::MAX_ROW_ELEMENTS {
+                row.elements
+                    .push(if row_index == 0 && column_index == 0 {
+                        protocol::Element::Image
+                    } else {
+                        protocol::Element::Text {
+                            text: "x"
+                                .repeat(protocol::MAX_CARD_TEXT_BYTES)
+                                .as_str()
+                                .try_into()
+                                .unwrap(),
+                        }
+                    })
+                    .unwrap();
+            }
+            card.rows.push(row).unwrap();
+        }
+        assert_eq!(card.validate(), Ok(()));
+        assert_eq!(
+            send_checked(&mut port, &maximal).unwrap(),
+            seq.wrapping_add(2)
+        );
+        assert_eq!(
+            send_checked(&mut port, &protocol::Message::Clear).unwrap(),
+            seq.wrapping_add(3)
         );
     }
 }

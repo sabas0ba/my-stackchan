@@ -4,7 +4,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 
 ## 版
 
-`protocol::VERSION` (現在 1)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
+`protocol::VERSION` (現在 2)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
 
 ## 物理層
 
@@ -38,7 +38,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 | `Ack { seq }` | 描画に成功した Text / Card / Clear の通し番号 |
 | `Rejected { count }` | 破棄したフレームの累計。診断用 |
 
-画像は後続の Phase 2 作業で追加する。Card の追加で版を 0 から 1 に上げた。既存 variant の番号は維持する。
+Card への画像追加で版を 1 から 2 に上げた。既存 Message variant の番号は維持する。
 
 ### 現在の実装範囲
 
@@ -83,24 +83,31 @@ Overlay が消えると、その時点で有効な帯と顔が再表示される
 
 Card は最大 4 行で、各行には最大 2 要素を左から等幅で配置する。要素は `Text { text }`
 (UTF-8 で最大 48 byte)、`Bar { ratio, label }` (比率 0〜100、ラベル最大 12 byte)、
-`Spacer { height }` (1〜32 px) を使う。Text と Bar の行高は 20 px、Spacer の行高は指定値とし、
+`Spacer { height }` (1〜32 px)、`Image` を使う。Text、Bar、Image の行高は 20 px、Spacer の行高は指定値とし、
 複数要素の行高は最大値を使う。上下 4 px の余白を含む合計が Slot の高さ (帯 48 px、
 Overlay 240 px) を超える Card、空の Card・行は拒否する。Bar はラベルと比率の白いバーを描く。
 Card の文字も既存の 10×20 px ASCII フォントを用い、非 ASCII は `?` で表示する。
+
+Image は Card あたり 1 枚のみとし、Card の `image` フィールドに幅・高さと RGB565 の
+big-endian 画素列を同梱する。縦横とも 1〜16 px、画素列は `width × height × 2` byte
+(最大 512 byte) と一致しなければならない。行には画像データを複製せず `Image` 要素を 1 個置く。
+画像データと要素の片方だけがある場合や、要素が 2 個以上ある場合は拒否する。
+画像は該当セルの左上から 2 px 下へ置き、セルでクリップする。host CLI は無圧縮の 24-bit BMP
+から指定領域を切り出して RGB565 に変換する。Card 全体の COBS フレームは 1024 byte 以下に収める。
 
 Ack は描画完了後に返す。seq は起動時 0、Text / Card / Clear の成功ごとに加算し、最初の Ack は 1。
 `u32::MAX` の次は 0 に戻る。Ping、拒否、TTL 満了では加算せず、TTL 満了の自発的応答も送らない。
 描画エラー時は Slot の状態と seq を確定せず Rejected を返す。ただし途中まで書かれた画素は
 元に戻せないため、表示装置の障害が解消した後に表示命令を再送する。
 
-画像と fuzz 検証を含む Phase 2 全体は未完了。
+decoder の fuzz 検証を含む Phase 2 全体は未完了。
 
 ## 不変条件
 
 - 可変長のフィールドはすべて `heapless` の上限付き型で表す。上限を超える入力は `Deserialize` の時点で失敗し、firmware のメモリに到達しない (`oversized_text_is_rejected` テスト)
 - firmware は `Message` の variant に対応する描画以外の動作を行わない
 - テキストは UTF-8 として妥当であることを `heapless::String` の `Deserialize` が保証する。改行以外の制御文字は描画側で無視する
-- 画像はヘッダで宣言した幅・高さ・オフセットが画面内に収まり、宣言長とデータ長が一致する場合のみ受理する (Phase 2)
+- 画像は縦横の上限と `width × height × 2` byte の長さを検証し、行の位置で決まるセル内に描画する
 
 ## 検証
 

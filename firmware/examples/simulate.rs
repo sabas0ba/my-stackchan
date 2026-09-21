@@ -11,7 +11,9 @@ use embedded_graphics::{
     prelude::{DrawTarget, OriginDimensions, Pixel, Point, Size},
 };
 use my_stackchan_firmware::{model::Controller, renderer};
-use protocol::{Card, Element, MAX_CARD_TEXT_BYTES, MAX_TEXT_BYTES, Message, Reply, Row, Slot};
+use protocol::{
+    Card, Element, ImageData, MAX_CARD_TEXT_BYTES, MAX_TEXT_BYTES, Message, Reply, Row, Slot,
+};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
@@ -193,6 +195,7 @@ fn card(options: &Options) -> Message {
         slot: Slot::BannerTop,
         ttl_s: 0,
         rows: Default::default(),
+        image: None,
     };
     let mut title = Row {
         elements: Default::default(),
@@ -219,6 +222,40 @@ fn card(options: &Options) -> Message {
         .expect("bar row has capacity");
     card.rows.push(bar).expect("card has capacity");
     card.validate().expect("valid card layout");
+    Message::Card(card)
+}
+
+fn image_card() -> Message {
+    let mut pixels = heapless::Vec::new();
+    for _row in 0..16 {
+        for column in 0..16 {
+            let color: u16 = [0xF800, 0x07E0, 0x001F, 0xFFFF][column / 4];
+            pixels
+                .extend_from_slice(&color.to_be_bytes())
+                .expect("16x16 image fits");
+        }
+    }
+    let mut row = Row {
+        elements: Default::default(),
+    };
+    row.elements
+        .push(Element::Text {
+            text: "RGB565".try_into().unwrap(),
+        })
+        .unwrap();
+    row.elements.push(Element::Image).unwrap();
+    let mut card = Card {
+        slot: Slot::BannerTop,
+        ttl_s: 0,
+        rows: Default::default(),
+        image: Some(ImageData {
+            width: 16,
+            height: 16,
+            pixels,
+        }),
+    };
+    card.rows.push(row).unwrap();
+    card.validate().expect("valid image card");
     Message::Card(card)
 }
 
@@ -264,6 +301,9 @@ fn generate(options: &Options) -> io::Result<()> {
     apply(&mut controller, &mut screen, card(options));
     save_bmp(&options.output_dir.join("05-card.bmp"), &screen)?;
 
+    apply(&mut controller, &mut screen, image_card());
+    save_bmp(&options.output_dir.join("06-image.bmp"), &screen)?;
+
     fs::write(
         options.output_dir.join("index.html"),
         gallery_html(options.ttl_s),
@@ -294,6 +334,7 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="03-overlay.bmp" width="320" height="240" alt="Overlay 表示"><figcaption>3. Overlay 表示直後</figcaption></figure>
 <figure><img src="04-expired.bmp" width="320" height="240" alt="期限満了後の上下の帯と顔"><figcaption>4. Overlay 期限満了後（{ttl_s} 秒）</figcaption></figure>
 <figure><img src="05-card.bmp" width="320" height="240" alt="Card layout"><figcaption>5. Card layout</figcaption></figure>
+<figure><img src="06-image.bmp" width="320" height="240" alt="RGB565 image"><figcaption>6. RGB565 image</figcaption></figure>
 </div>
 </html>
 "#

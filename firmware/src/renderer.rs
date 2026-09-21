@@ -156,6 +156,12 @@ fn draw_card<D: DrawTarget<Color = Rgb565>>(
                     .draw(&mut clipped)?;
                 }
                 Element::Spacer { .. } => {}
+                Element::Image => {
+                    if let Some(image) = &card.image {
+                        let raw = ImageRawBE::<Rgb565>::new(&image.pixels, u32::from(image.width));
+                        Image::new(&raw, cell.top_left + Point::new(0, 2)).draw(&mut clipped)?;
+                    }
+                }
             }
         }
         y += i32::from(row.height());
@@ -421,6 +427,7 @@ mod tests {
                     slot: Slot::BannerTop,
                     ttl_s: 0,
                     rows,
+                    image: None,
                 }),
                 0,
                 &mut screen,
@@ -430,5 +437,40 @@ mod tests {
         assert_eq!(screen.0[33 * 320 + 117], Rgb565::WHITE);
         assert_eq!(screen.0[33 * 320 + 260], Rgb565::BLACK);
         assert!(!screen.0[48 * 320..72 * 320].contains(&Rgb565::WHITE));
+    }
+
+    #[test]
+    fn inline_rgb565_image_preserves_pixel_colors_and_row_position() {
+        use crate::model::Controller;
+        use protocol::{ImageData, Message, Row};
+        let mut rows = heapless::Vec::new();
+        rows.push(Row {
+            elements: heapless::Vec::from_slice(&[
+                Element::Text {
+                    text: "RGB".try_into().unwrap(),
+                },
+                Element::Image,
+            ])
+            .unwrap(),
+        })
+        .unwrap();
+        let card = Card {
+            slot: Slot::BannerTop,
+            ttl_s: 0,
+            rows,
+            image: Some(ImageData {
+                width: 2,
+                height: 1,
+                pixels: heapless::Vec::from_slice(&[0xF8, 0x00, 0x07, 0xE0]).unwrap(),
+            }),
+        };
+        let mut controller = Controller::default();
+        let mut screen = Screen(vec![Rgb565::BLACK; 320 * 240]);
+        controller
+            .handle(Message::Card(card), 0, &mut screen)
+            .unwrap();
+        assert_eq!(screen.0[6 * 320 + 160], Rgb565::RED);
+        assert_eq!(screen.0[6 * 320 + 161], Rgb565::GREEN);
+        assert_eq!(screen.0[6 * 320 + 162], Rgb565::BLACK);
     }
 }

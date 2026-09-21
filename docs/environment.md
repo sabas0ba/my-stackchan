@@ -80,7 +80,7 @@ nix を持つ場合は `nix develop` または `direnv allow` で開発シェル
 scripts/container.sh run make simulate
 ```
 
-`.work/simulation/index.html` をブラウザーで開くと、以下の 5 状態を並べて確認できる。
+`.work/simulation/index.html` をブラウザーで開くと、以下の 6 状態を並べて確認できる。
 対応する 320×240 の BMP 画像も同じディレクトリに保存する。
 
 1. 起動確認画面 (`01-startup.bmp`)
@@ -88,6 +88,7 @@ scripts/container.sh run make simulate
 3. Overlay 表示直後 (`03-overlay.bmp`)
 4. TTL 満了時に復帰した上下の帯と顔 (`04-expired.bmp`)
 5. Card のタイトルと比率バー (`05-card.bmp`)
+6. Card 内の 16×16 px RGB565 画像 (`06-image.bmp`)
 
 文言・TTL・Card のタイトルと比率・出力先は指定できる。`--ttl` は 1〜65535 秒、
 Text の文言は UTF-8 で 512 byte まで、Card のタイトルは 48 byte まで、比率は 0〜100 とする。
@@ -182,6 +183,31 @@ scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
 ```
 
 Ack と単体テストだけでは Card の画面表示と期限満了の目視確認は代替できない。
+
+### RGB565 画像の実機確認
+
+`card --image-bmp` は無圧縮 24-bit BMP (40 byte の BITMAPINFOHEADER) の指定範囲を
+RGB565 に変換する。画像は Card あたり 1 枚、縦横とも 1〜16 px。`--image-x` と
+`--image-y` は元 BMP の左上を原点とする。幅・高さの省略値は各 16 px。
+シミュレーターの `06-image.bmp` の上帯からテスト画像を切り出す例:
+
+```bash
+scripts/container.sh run cargo build --locked --offline -p my-stackchan-host
+scripts/container.sh device target/debug/stackchan card \
+  --slot top --title RGB565 --image-bmp .work/simulation/06-image.bmp \
+  --image-x 160 --image-y 6
+```
+
+上帯に RGB565 の文字と赤・緑・青・白の 16×16 px 画像が表示される。
+比率バーと画像を併用する場合は、合計行高が帯の 48 px を超えるため `--slot overlay` を使う。
+画像長の不一致による拒否と、512 byte の画像に最大長のテキスト 7 個を組み合わせた
+フレームの受信を含む実機回帰テストは次で確認する。テストは最後に Clear する。
+
+```bash
+scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
+  cargo test --locked --offline -p my-stackchan-host \
+  -- --ignored --exact tests::hardware_inline_image_and_invalid_length
+```
 
 ### 静的検査・単体テスト
 

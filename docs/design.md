@@ -109,7 +109,7 @@ HTML そのものを firmware で解釈することはしない。要素数、�
 
 - Slot: `BannerTop` / `BannerBottom` (帯) / `Overlay` (全画面)。顔は常駐し、Overlay の間だけ隠れる
 - TTL: 各 Card は秒単位の TTL を持ち、経過後に自動的に消える
-- 要素: 現行版は `Text` (str) / `Bar` (ratio, label) / `Spacer`。`Image` と style / align は後続作業
+- 要素: 現行版は `Text` (str) / `Bar` (ratio, label) / `Spacer` / `Image` (Card あたり 1 枚の inline RGB565)。style / align と画像 ID は後続作業
 - 構造: Column -> Row -> 要素 の 2 段に限定し、要素数に上限を設ける
 - 振分け: 短文なら Banner、長文や画像なら Overlay、といった判断は host 側で行う。firmware は受け取った Card を検証して配置するだけとする
 
@@ -128,13 +128,13 @@ HTML そのものを firmware で解釈することはしない。要素数、�
 
 ## フェーズと受入条件
 
-現在は Phase 2 の Text / Card / Clear、Slot ごとの TTL、USB 経由の描画完了応答まで実装している。
-画像と decoder の fuzz 検証は後続作業とする。操作手順は
+現在は Phase 2 の Text / Card / Clear、16×16 px までの inline RGB565 画像、Slot ごとの TTL、
+USB 経由の描画完了応答まで実装している。decoder の fuzz 検証は後続作業とする。操作手順は
 [environment.md](environment.md#text--clear-の実機確認)、現行の表示仕様は [protocol.md](protocol.md) を参照する。
 
 実機との表示比較には [表示シミュレーション](environment.md#表示シミュレーション)を利用できる。
 `firmware` のモデルと描画器を host 上で直接実行し、起動時・帯表示・Overlay 中・TTL 満了後を
-Card を含めて画像化する。シミュレーター側には表示配置を複製せず、画素を BMP へ保存する描画先だけを置く。
+Card と RGB565 画像を含めて画像化する。シミュレーター側には表示配置を複製せず、画素を BMP へ保存する描画先だけを置く。
 
 | Phase | 内容 | 受入条件 |
 | --- | --- | --- |

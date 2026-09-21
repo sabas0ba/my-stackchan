@@ -4,6 +4,8 @@ use embedded_graphics::{pixelcolor::Rgb565, prelude::DrawTarget};
 use protocol::{Card, MAX_TEXT_BYTES, Message, Reply, Slot};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// firmware では動的確保を使わず、固定長の Card を Slot の状態に保持する。
+#[allow(clippy::large_enum_variant)]
 pub enum Content {
     Text(heapless::String<MAX_TEXT_BYTES>),
     Card(Card),
@@ -175,7 +177,12 @@ mod tests {
             .unwrap(),
         })
         .unwrap();
-        Message::Card(Card { slot, ttl_s, rows })
+        Message::Card(Card {
+            slot,
+            ttl_s,
+            rows,
+            image: None,
+        })
     }
 
     #[test]
