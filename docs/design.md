@@ -129,7 +129,8 @@ HTML そのものを firmware で解釈することはしない。要素数、�
 ## フェーズと受入条件
 
 現在は Phase 2 の Text / Card / Clear、16×16 px までの inline RGB565 画像、Slot ごとの TTL、
-USB 経由の描画完了応答まで実装している。decoder の fuzz 検証は後続作業とする。操作手順は
+USB 経由の描画完了応答まで実装している。decoder は固定 seed の変異入力を `make check` で検査する。
+coverage-guided fuzz は後続作業とする。操作手順は
 [environment.md](environment.md#text--clear-の実機確認)、現行の表示仕様は [protocol.md](protocol.md) を参照する。
 
 実機との表示比較には [表示シミュレーション](environment.md#表示シミュレーション)を利用できる。

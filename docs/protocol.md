@@ -100,7 +100,7 @@ Ack は描画完了後に返す。seq は起動時 0、Text / Card / Clear の�
 描画エラー時は Slot の状態と seq を確定せず Rejected を返す。ただし途中まで書かれた画素は
 元に戻せないため、表示装置の障害が解消した後に表示命令を再送する。
 
-decoder の fuzz 検証を含む Phase 2 全体は未完了。
+decoder の coverage-guided fuzz 検証を含む Phase 2 全体は未完了。
 
 ## 不変条件
 
@@ -112,4 +112,6 @@ decoder の fuzz 検証を含む Phase 2 全体は未完了。
 ## 検証
 
 - 単体テスト: 往復、上限ちょうど、上限超過、不正バイト列
-- fuzz: `cargo fuzz` で `decode` に任意のバイト列を与え、panic しないことを確認する (Phase 2 で追加。fuzz 用の toolchain は別途固定する)
+- 再現可能な変異入力: `decoder_stress` が正常な Message / Reply と最大長 Card を基準に、切り詰め・挿入・上書き・境界長の任意バイト列を生成する。`decode<Message>`、`decode<Reply>` と復号された Card の `validate` が panic しないことを確認する。固定 seed の 20,000 件を `make check` に含め、失敗時は seed とケース番号を出力する
+- 受信器: firmware の単体テストで任意バイト列と次の区切りを処理した後、正常な Ping フレームへ再同期できることを確認する
+- coverage-guided fuzz: `cargo fuzz` 用の toolchain と依存を固定して継続実行する作業は別途実施する。固定 seed の変異検査はその代替とは見なさない
