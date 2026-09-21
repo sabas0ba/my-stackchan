@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。互換性の無い変更を行った場合に増やす。
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 /// 1 メッセージ中のテキストの最大バイト数 (UTF-8)。
 pub const MAX_TEXT_BYTES: usize = 512;
@@ -28,6 +28,9 @@ pub const MAX_CARD_ROWS: usize = 4;
 pub const MAX_ROW_ELEMENTS: usize = 2;
 pub const MAX_CARD_TEXT_BYTES: usize = 48;
 pub const MAX_BAR_LABEL_BYTES: usize = 12;
+/// 画像は Card あたり 1 枚に限定し、RGB565 の 2 byte/pixel で送る。
+pub const MAX_IMAGE_SIDE: u8 = 16;
+pub const MAX_IMAGE_BYTES: usize = 512;
 
 /// 表示位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +49,15 @@ pub struct Card {
     pub slot: Slot,
     pub ttl_s: u16,
     pub rows: heapless::Vec<Row, MAX_CARD_ROWS>,
+    pub image: Option<ImageData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageData {
+    pub width: u8,
+    pub height: u8,
+    /// RGB565 の big-endian byte 列。
+    pub pixels: heapless::Vec<u8, MAX_IMAGE_BYTES>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +70,7 @@ impl Row {
         self.elements
             .iter()
             .map(|element| match element {
-                Element::Text { .. } | Element::Bar { .. } => 20,
+                Element::Text { .. } | Element::Bar { .. } | Element::Image => 20,
                 Element::Spacer { height } => u16::from(*height),
             })
             .max()
@@ -78,6 +90,7 @@ pub enum Element {
     Spacer {
         height: u8,
     },
+    Image,
 }
 
 impl Card {
@@ -87,6 +100,7 @@ impl Card {
             return Err("Card に行がありません");
         }
         let mut used_height = 8u16;
+        let mut image_count = 0;
         for row in &self.rows {
             if row.elements.is_empty() {
                 return Err("Card に空の行があります");
@@ -99,6 +113,7 @@ impl Card {
                     Element::Spacer { height } if !(1..=32).contains(height) => {
                         return Err("余白の高さは 1..32 px にしてください");
                     }
+                    Element::Image => image_count += 1,
                     _ => {}
                 }
             }
@@ -110,6 +125,15 @@ impl Card {
         };
         if used_height > area_height {
             return Err("Card が表示領域の高さを超えます");
+        }
+        match (&self.image, image_count) {
+            (None, 0) => {}
+            (Some(image), 1)
+                if (1..=MAX_IMAGE_SIDE).contains(&image.width)
+                    && (1..=MAX_IMAGE_SIDE).contains(&image.height)
+                    && image.pixels.len()
+                        == usize::from(image.width) * usize::from(image.height) * 2 => {}
+            _ => return Err("Card の画像は 16x16 px 以下を 1 枚、宣言長どおりに指定してください"),
         }
         Ok(())
     }
@@ -293,6 +317,7 @@ mod tests {
             slot,
             ttl_s: 30,
             rows,
+            image: None,
         }
     }
 
@@ -392,5 +417,72 @@ mod tests {
         let mut copy = [0; MAX_FRAME_BYTES];
         copy[..len].copy_from_slice(&frame[..len]);
         assert_eq!(decode::<Message>(&mut copy[..len]), Err(Error::Malformed));
+    }
+
+    #[test]
+    fn inline_image_requires_one_marker_and_exact_rgb565_length() {
+        let mut card = sample_card(Slot::BannerTop);
+        let pixels = heapless::Vec::from_slice(&[0xF8, 0x00, 0x07, 0xE0]).unwrap();
+        card.image = Some(ImageData {
+            width: 2,
+            height: 1,
+            pixels,
+        });
+        assert!(card.validate().is_err());
+        card.rows[1].elements[0] = Element::Image;
+        assert_eq!(card.validate(), Ok(()));
+        card.rows[0].elements[1] = Element::Image;
+        assert!(card.validate().is_err());
+        card.rows[0].elements[1] = Element::Text {
+            text: "Usage".try_into().unwrap(),
+        };
+        card.image.as_mut().unwrap().pixels.pop();
+        assert!(card.validate().is_err());
+        card.image.as_mut().unwrap().width = 17;
+        assert!(card.validate().is_err());
+        card.image = None;
+        assert!(card.validate().is_err());
+    }
+
+    #[test]
+    fn largest_inline_image_and_text_card_fits_in_frame() {
+        let mut card = Card {
+            slot: Slot::Overlay,
+            ttl_s: 0,
+            rows: heapless::Vec::new(),
+            image: Some(ImageData {
+                width: 16,
+                height: 16,
+                pixels: heapless::Vec::from_slice(&[0xFF; MAX_IMAGE_BYTES]).unwrap(),
+            }),
+        };
+        let mut long_text = heapless::String::<MAX_CARD_TEXT_BYTES>::new();
+        for _ in 0..MAX_CARD_TEXT_BYTES {
+            long_text.push('x').unwrap();
+        }
+        for row_index in 0..MAX_CARD_ROWS {
+            let mut row = Row {
+                elements: heapless::Vec::new(),
+            };
+            for column_index in 0..MAX_ROW_ELEMENTS {
+                row.elements
+                    .push(if row_index == 0 && column_index == 0 {
+                        Element::Image
+                    } else {
+                        Element::Text {
+                            text: long_text.clone(),
+                        }
+                    })
+                    .unwrap();
+            }
+            card.rows.push(row).unwrap();
+        }
+        assert_eq!(card.validate(), Ok(()));
+        let message = Message::Card(card);
+        let mut frame = [0; MAX_FRAME_BYTES];
+        let len = encode(&message, &mut frame).unwrap().len();
+        assert!(len <= MAX_FRAME_BYTES);
+        let mut received = frame;
+        assert_eq!(decode::<Message>(&mut received[..len]), Ok(message));
     }
 }
