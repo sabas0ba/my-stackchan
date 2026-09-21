@@ -87,7 +87,9 @@ fn main() -> ! {
     power::set_backlight(&mut i2c, true).expect("display backlight");
     esp_println::println!("Phase 1 display ready: face / ASCII / RGB565");
 
-    let mut touch_enabled = touch::init(&mut i2c).is_ok();
+    let mut touch_enabled = power::prepare_touch(&mut i2c, &mut delay)
+        .and_then(|_| touch::init(&mut i2c))
+        .is_ok();
     if !touch_enabled {
         esp_println::println!("touch initialization failed; USB display remains active");
     }
@@ -106,18 +108,25 @@ fn main() -> ! {
         if controller.tick(now_ms, &mut display).is_err() {
             esp_println::println!("display expiry drawing failed");
         }
-        if touch_enabled && now_ms >= next_touch_poll_ms {
-            next_touch_poll_ms = now_ms.saturating_add(20);
-            match touch::read_pressed(&mut i2c) {
-                Ok(pressed) if tap_detector.sample(pressed) => {
-                    if controller.tap(now_ms, &mut display).is_err() {
-                        esp_println::println!("touch demo drawing failed");
+        if now_ms >= next_touch_poll_ms {
+            next_touch_poll_ms = now_ms.saturating_add(if touch_enabled { 20 } else { 1000 });
+            if !touch_enabled {
+                touch_enabled = power::prepare_touch(&mut i2c, &mut delay)
+                    .and_then(|_| touch::init(&mut i2c))
+                    .is_ok();
+                tap_detector = touch::TapDetector::default();
+            } else {
+                match touch::read_pressed(&mut i2c) {
+                    Ok(pressed) if tap_detector.sample(pressed) => {
+                        if controller.tap(now_ms, &mut display).is_err() {
+                            esp_println::println!("touch demo drawing failed");
+                        }
                     }
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    touch_enabled = false;
-                    esp_println::println!("touch read failed; USB display remains active");
+                    Ok(_) => {}
+                    Err(_) => {
+                        touch_enabled = false;
+                        esp_println::println!("touch read failed; USB display remains active");
+                    }
                 }
             }
         }
