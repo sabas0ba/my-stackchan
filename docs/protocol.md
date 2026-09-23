@@ -117,11 +117,17 @@ CoreS3 AW9523B の BUS_OUT / BOOST 出力ラッチ、両サーボの現在位置
 `HardwareStatus` で返す。未応答や無効なバージョン値は `None` とする。
 `stackchan hardware` で確認できる。
 
+`PitchTrim { raw_steps }` は待機姿勢のピッチ中心を -48..48 step の範囲で補正する。
+1 step は約 0.3125°、負値が下向き。ESP の RAM にのみ保持し、再起動すると 0 に戻る。
+`Clear` は補正値を変更しない。`stackchan pitch-trim --raw-steps -24` で設定し、
+`stackchan hardware` の `pitch_trim_raw_steps` で確認できる。EEPROM と工場校正値は変更しない。
+
 `Emote` は既存の Presence と Slot を保持したまま顔を一時的に上書きし、`duration_ms` の満了後に
 その時点で有効な Presence の顔へ戻る。`gaze=Point { x, y }` は左右・上下それぞれ
 `-100..100` の連続値とし、画面内の目の移動量へ変換する。`eyes=Auto` はまばたきを許可する。
 `intensity` は機構部の目標値に反映し、0 では首振り・発光とも無効にする。
 画面描画への影響はない。視線の指定は眼球位置に加え、首の X/Y 目標角度を変える。
+画面座標では Y の正方向が下、M5 BSP のピッチ角では正方向が上のため、首の上下は符号を反転して対応する。
 機構部の出力は X ±30°、Y 30–60°、LED 各色成分 0–63 に制限する。
 LED は指定強度を上限として、状態が有効な間に 2 秒周期で 70–100% の輝度変化を付ける。
 サーボのゴール位置とトルクだけを揮発性レジスタへ書き込み、ID・校正値・EEPROM は変更しない。

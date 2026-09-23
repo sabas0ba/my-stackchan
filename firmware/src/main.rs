@@ -188,7 +188,7 @@ fn main() -> ! {
         actuator_ready = false;
     }
     let mut last_target =
-        actuators::servo_positions(my_stackchan_firmware::behavior::ActuatorTarget::NEUTRAL);
+        actuators::servo_positions(my_stackchan_firmware::behavior::ActuatorTarget::NEUTRAL, 0);
     let mut last_rgb = [0u8; 3];
     let mut last_servo_write_ms = None;
     let mut servo_position_known = false;
@@ -296,6 +296,7 @@ fn main() -> ! {
                                 servo_y_max_limit,
                                 servo_x_voltage: servo_x_voltage.map(|value| value as u8),
                                 servo_y_voltage: servo_y_voltage.map(|value| value as u8),
+                                pitch_trim_raw_steps: controller.pitch_trim_raw_steps(),
                                 servo_x_torque: servo_x_torque.map(|value| value != 0),
                                 servo_y_torque: servo_y_torque.map(|value| value != 0),
                                 enabled: actuator_ready,
@@ -336,7 +337,7 @@ fn main() -> ! {
         if actuator_ready {
             let actuator_now_ms = Instant::now().duration_since_epoch().as_millis();
             let target = controller.actuator_target();
-            let positions = actuators::servo_positions(target);
+            let positions = actuators::servo_positions(target, controller.pitch_trim_raw_steps());
             let rgb = my_stackchan_firmware::behavior::breathing_rgb(target.rgb, actuator_now_ms);
             if rgb != last_rgb {
                 if actuators::show_rgb(&mut i2c, rgb).is_ok() {
@@ -347,7 +348,8 @@ fn main() -> ! {
             }
             if actuator_ready
                 && !servo_position_known
-                && target != my_stackchan_firmware::behavior::ActuatorTarget::NEUTRAL
+                && (target != my_stackchan_firmware::behavior::ActuatorTarget::NEUTRAL
+                    || controller.pitch_trim_raw_steps() != 0)
                 && actuator_now_ms >= next_position_probe_ms
             {
                 next_position_probe_ms = actuator_now_ms.saturating_add(500);

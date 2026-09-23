@@ -153,6 +153,7 @@ fn slot_index(slot: Slot) -> usize {
 pub struct Controller {
     state: DisplayState,
     seq: u32,
+    pitch_trim_raw_steps: i16,
     demo_index: Option<usize>,
     blink: bool,
     startup: bool,
@@ -163,6 +164,7 @@ impl Default for Controller {
         Self {
             state: DisplayState::default(),
             seq: 0,
+            pitch_trim_raw_steps: 0,
             demo_index: None,
             blink: false,
             startup: true,
@@ -187,6 +189,10 @@ pub enum HandleError<E> {
 }
 
 impl Controller {
+    pub fn pitch_trim_raw_steps(&self) -> i16 {
+        self.pitch_trim_raw_steps
+    }
+
     pub fn actuator_target(&self) -> crate::behavior::ActuatorTarget {
         crate::behavior::target(self.state.presence(), self.state.emote())
     }
@@ -225,6 +231,12 @@ impl Controller {
             Message::Emote(emote) => {
                 emote.validate().map_err(|_| HandleError::InvalidFace)?;
                 next.set_emote(emote, now_ms);
+            }
+            Message::PitchTrim(trim) => {
+                trim.validate().map_err(|_| HandleError::InvalidFace)?;
+                self.pitch_trim_raw_steps = trim.raw_steps;
+                self.seq = self.seq.wrapping_add(1);
+                return Ok(Reply::Ack { seq: self.seq });
             }
             // 実機の I²C bus は main が所有する。誤ってモデルへ渡されても描画しない。
             Message::HardwareProbe => return Err(HandleError::InvalidFace),
@@ -361,6 +373,34 @@ mod tests {
             rows,
             image: None,
         })
+    }
+
+    #[test]
+    fn pitch_trim_is_volatile_and_does_not_redraw_or_clear_with_face() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        assert_eq!(controller.pitch_trim_raw_steps(), 0);
+        assert_eq!(
+            controller.handle(
+                Message::PitchTrim(protocol::PitchTrim { raw_steps: -24 }),
+                0,
+                &mut display,
+            ),
+            Ok(Reply::Ack { seq: 1 })
+        );
+        assert_eq!(display.pixels, 0);
+        assert_eq!(controller.pitch_trim_raw_steps(), -24);
+        controller.handle(Message::Clear, 1, &mut display).unwrap();
+        assert_eq!(controller.pitch_trim_raw_steps(), -24);
+        assert_eq!(
+            controller.handle(
+                Message::PitchTrim(protocol::PitchTrim { raw_steps: -49 }),
+                2,
+                &mut display,
+            ),
+            Err(HandleError::InvalidFace)
+        );
+        assert_eq!(controller.pitch_trim_raw_steps(), -24);
     }
 
     #[test]

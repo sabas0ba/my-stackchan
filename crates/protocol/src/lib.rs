@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。互換性の無い変更を行った場合に増やす。
-pub const VERSION: u8 = 6;
+pub const VERSION: u8 = 7;
 
 /// 1 メッセージ中のテキストの最大バイト数 (UTF-8)。
 pub const MAX_TEXT_BYTES: usize = 512;
@@ -135,6 +135,21 @@ impl Emote {
         }
         if !(100..=10_000).contains(&self.duration_ms) {
             return Err("Emote の継続時間は 100..10000 ms にしてください");
+        }
+        Ok(())
+    }
+}
+
+/// 実機固有のピッチ補正。1 step は約 0.3125 度。ESP の RAM にのみ保持する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PitchTrim {
+    pub raw_steps: i16,
+}
+
+impl PitchTrim {
+    pub fn validate(self) -> Result<(), &'static str> {
+        if !(-48..=48).contains(&self.raw_steps) {
+            return Err("ピッチ補正は -48..48 step にしてください");
         }
         Ok(())
     }
@@ -263,6 +278,8 @@ pub enum Message {
     Emote(Emote),
     /// 本体側の I²C 拡張器の接続状態を読み取る。表示と機構部は変更しない。
     HardwareProbe,
+    /// ピッチの中心位置を RAM 上だけで補正する。
+    PitchTrim(PitchTrim),
 }
 
 /// firmware から host へ返す応答。
@@ -298,6 +315,7 @@ pub enum Reply {
         servo_y_max_limit: Option<u16>,
         servo_x_voltage: Option<u8>,
         servo_y_voltage: Option<u8>,
+        pitch_trim_raw_steps: i16,
         servo_x_torque: Option<bool>,
         servo_y_torque: Option<bool>,
         enabled: bool,
@@ -387,12 +405,25 @@ mod tests {
             servo_y_max_limit: Some(1000),
             servo_x_voltage: Some(73),
             servo_y_voltage: Some(72),
+            pitch_trim_raw_steps: -24,
             servo_x_torque: Some(false),
             servo_y_torque: Some(false),
             enabled: false,
         };
         let encoded = encode(&status, &mut frame).unwrap();
         assert_eq!(decode::<Reply>(&mut encoded.to_vec()), Ok(status));
+    }
+
+    #[test]
+    fn pitch_trim_is_bounded_and_roundtrips() {
+        assert_eq!(PitchTrim { raw_steps: -48 }.validate(), Ok(()));
+        assert_eq!(PitchTrim { raw_steps: 48 }.validate(), Ok(()));
+        assert!(PitchTrim { raw_steps: -49 }.validate().is_err());
+        assert!(PitchTrim { raw_steps: 49 }.validate().is_err());
+        let message = Message::PitchTrim(PitchTrim { raw_steps: -24 });
+        let mut frame = [0; 32];
+        let encoded = encode(&message, &mut frame).unwrap();
+        assert_eq!(decode::<Message>(&mut encoded.to_vec()), Ok(message));
     }
 
     #[test]

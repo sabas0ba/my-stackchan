@@ -28,6 +28,14 @@ enum Command {
         #[arg(long)]
         port: Option<String>,
     },
+    /// サーボのピッチ中心を RAM 上だけで補正する。再起動時は 0 に戻る。
+    PitchTrim {
+        #[arg(long)]
+        port: Option<String>,
+        /// 約 0.3125 度/step。-48..48、負が下向き。
+        #[arg(long, allow_hyphen_values = true)]
+        raw_steps: i16,
+    },
     /// 一時的な表情を、連続値の視線と継続時間で指定する。
     Emote {
         #[arg(long)]
@@ -249,6 +257,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
         Command::Hardware { port } => hardware(port),
+        Command::PitchTrim { port, raw_steps } => {
+            send_display(port, &pitch_trim_message(raw_steps)?)
+        }
         Command::Emote {
             port,
             expression,
@@ -426,6 +437,12 @@ fn hardware(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => Err("機構部の診断応答を受信できませんでした".into()),
     }
+}
+
+fn pitch_trim_message(raw_steps: i16) -> Result<protocol::Message, String> {
+    let trim = protocol::PitchTrim { raw_steps };
+    trim.validate()?;
+    Ok(protocol::Message::PitchTrim(trim))
 }
 
 fn text_message(slot: TextSlot, ttl_s: u16, text: &str) -> Result<protocol::Message, String> {
@@ -884,6 +901,22 @@ mod tests {
         assert!(emote_message(emote.expression, 101, 0, emote.eyes, 75, 800).is_err());
         assert!(emote_message(emote.expression, 0, 0, emote.eyes, 101, 800).is_err());
         assert!(emote_message(emote.expression, 0, 0, emote.eyes, 75, 10).is_err());
+    }
+
+    #[test]
+    fn pitch_trim_cli_rejects_out_of_range_steps() {
+        let cli = Cli::try_parse_from(["stackchan", "pitch-trim", "--raw-steps", "-24"]).unwrap();
+        let Command::PitchTrim { raw_steps, .. } = cli.command else {
+            panic!("pitch-trim expected")
+        };
+        assert_eq!(
+            pitch_trim_message(raw_steps),
+            Ok(protocol::Message::PitchTrim(protocol::PitchTrim {
+                raw_steps: -24
+            }))
+        );
+        assert!(pitch_trim_message(-49).is_err());
+        assert!(pitch_trim_message(49).is_err());
     }
 
     #[test]

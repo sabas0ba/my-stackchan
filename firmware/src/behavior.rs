@@ -38,7 +38,8 @@ pub fn target(presence: Option<&Presence>, emote: Option<&Emote>) -> ActuatorTar
     };
     let strength = i32::from(intensity);
     let x_tenth_deg = (x * 300 * strength / 10_000) as i16;
-    let y_tenth_deg = (450 + y * 150 * strength / 10_000) as u16;
+    // 画面座標の +Y は下だが、M5 BSP のピッチ角は + が上になる。
+    let y_tenth_deg = (450 - y * 150 * strength / 10_000) as u16;
     let palette: [u8; 3] = match expression {
         Expression::Happy | Expression::Grin | Expression::Playful => [255, 120, 12],
         Expression::Focused | Expression::Determined => [25, 90, 255],
@@ -101,6 +102,15 @@ mod tests {
                 assert!(output.rgb.iter().all(|value| *value <= 63));
             }
         }
+    }
+
+    #[test]
+    fn vertical_gaze_matches_the_physical_pitch_direction() {
+        let up = target(None, Some(&emote(Gaze::Up, 100)));
+        let center = target(None, Some(&emote(Gaze::Center, 100)));
+        let down = target(None, Some(&emote(Gaze::Down, 100)));
+        assert!(up.y_tenth_deg > center.y_tenth_deg);
+        assert!(center.y_tenth_deg > down.y_tenth_deg);
     }
 
     #[test]

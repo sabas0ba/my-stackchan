@@ -212,7 +212,7 @@ scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
 
 ### 表情・視線と PC 状態の実機確認
 
-版 5 の firmware を書き込んでから、次の例で表情・視線と活動状態を送る。
+版 7 の firmware を書き込んでから、次の例で表情・視線と活動状態を送る。
 `status` は PC のジョブやスクリプトから呼び出せる。詳細は ASCII で表示する。
 `status` の既定 TTL は 30 秒、`face` の既定 TTL は無期限である。
 
@@ -226,6 +226,7 @@ scripts/container.sh device target/debug/stackchan emote \
   --expression curious --gaze-x -60 --gaze-y 25 --duration-ms 800
 scripts/container.sh device target/debug/stackchan clear
 scripts/container.sh device target/debug/stackchan hardware
+scripts/container.sh device target/debug/stackchan pitch-trim --raw-steps -24
 ```
 
 `status` と `face` は現在の顔を上書きし、帯とは独立する。期限満了後は既定の顔に戻る。
