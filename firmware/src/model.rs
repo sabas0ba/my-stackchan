@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(controller.pitch_trim_raw_steps(), -24);
         assert_eq!(
             controller.handle(
-                Message::PitchTrim(protocol::PitchTrim { raw_steps: -49 }),
+                Message::PitchTrim(protocol::PitchTrim { raw_steps: -65 }),
                 2,
                 &mut display,
             ),
