@@ -119,8 +119,11 @@ CoreS3 AW9523B の BUS_OUT / BOOST 出力ラッチ、両サーボの現在位置
 
 `PitchTrim { raw_steps }` は待機姿勢のピッチ中心を -96..64 step の範囲で補正する。
 1 step は約 0.3125°、負値が下向き。ESP の RAM にのみ保持し、再起動すると 0 に戻る。
-`Clear` は補正値を変更しない。`stackchan pitch-trim --raw-steps -24` で設定し、
-`stackchan hardware` の `pitch_trim_raw_steps` で確認できる。EEPROM と工場校正値は変更しない。
+`Clear` は補正値を変更しない。`stackchan pitch-trim --raw-steps -96 --save` で設定し、
+`stackchan hardware` の `pitch_trim_raw_steps` で確認できる。`--save` は実機への適用後、
+ホストの `.work/pitch-trim.txt` に保存する。以降の表示コマンドは接続ごとに設定を
+再適用する。別の設置場所では `--pitch-trim-file <path>` または
+`STACKCHAN_PITCH_TRIM_FILE` で保存先を切り替える。EEPROM と工場校正値は変更しない。
 負方向の補正を大きくすると下向き視線は機構の安全下限で飽和するため、補正値が決まったら
 その実機で上下の可動範囲を確認する。
 

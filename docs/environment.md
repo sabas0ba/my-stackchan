@@ -226,12 +226,21 @@ scripts/container.sh device target/debug/stackchan emote \
   --expression curious --gaze-x -60 --gaze-y 25 --duration-ms 800
 scripts/container.sh device target/debug/stackchan clear
 scripts/container.sh device target/debug/stackchan hardware
-scripts/container.sh device target/debug/stackchan pitch-trim --raw-steps -24
+scripts/container.sh device target/debug/stackchan pitch-trim --raw-steps -96 --save
 ```
 
 `status` と `face` は現在の顔を上書きし、帯とは独立する。期限満了後は既定の顔に戻る。
 `clear` は顔と帯をすべて消す。描画例は `.work/simulation/index.html` の
 `07-working.bmp` から `26-emote-expired.bmp` に含まれる。
+
+水平補正はホストの `.work/pitch-trim.txt` に整数 1 個として保存する。ここでの `-96` は
+確認した個体と設置状態の値であり、別の環境では実測して変更する。`--save` を指定した
+`pitch-trim` は実機が受理した後に保存する。以降の `emote`、`face`、`status`、`text`、
+`card`、`clear` は送信前にこの値を読み、ファームウェアへ再適用する。再起動直後は
+補正 0 に戻り、最初の表示コマンドを送る時点で補正が復元される。
+設定ファイルは git 管理外である。設置場所ごとのファイルを使う場合は全コマンドに
+`--pitch-trim-file <path>` を付けるか、`STACKCHAN_PITCH_TRIM_FILE` を設定する。
+明示したファイルが存在しない、または値が無効な場合は送信せずエラーにする。
 
 CoreS3 の画面を1回タップするとデモの先頭 `01/12 HAPPY` を表示し、指を離して
 再びタップすると `02/12 FOCUSED` に進む。12番目の後は先頭に戻る。画面下の
