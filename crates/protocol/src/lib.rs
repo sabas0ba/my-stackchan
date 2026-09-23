@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。互換性の無い変更を行った場合に増やす。
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 7;
 
 /// 1 メッセージ中のテキストの最大バイト数 (UTF-8)。
 pub const MAX_TEXT_BYTES: usize = 512;
@@ -77,6 +77,22 @@ pub enum Gaze {
     Right,
     Up,
     Down,
+    /// 画面上の視線を -100..100 の二軸で指定する。
+    Point {
+        x: i8,
+        y: i8,
+    },
+}
+
+impl Gaze {
+    pub fn validate(self) -> Result<(), &'static str> {
+        if let Self::Point { x, y } = self
+            && (!(-100..=100).contains(&x) || !(-100..=100).contains(&y))
+        {
+            return Err("視線の座標は -100..100 にしてください");
+        }
+        Ok(())
+    }
 }
 
 /// 目の開き方。Auto は表情ごとの既定形を使う。
@@ -98,6 +114,45 @@ pub struct Presence {
     pub gaze: Gaze,
     pub eyes: EyeStyle,
     pub ttl_s: u16,
+}
+
+/// 一時的な表情。期限満了後は直前の Presence に戻る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Emote {
+    pub expression: Expression,
+    pub gaze: Gaze,
+    pub eyes: EyeStyle,
+    /// 身振りと発光の強さ。0 は無効、100 は上限。
+    pub intensity: u8,
+    pub duration_ms: u16,
+}
+
+impl Emote {
+    pub fn validate(self) -> Result<(), &'static str> {
+        self.gaze.validate()?;
+        if self.intensity > 100 {
+            return Err("Emote の強度は 0..100 にしてください");
+        }
+        if !(100..=10_000).contains(&self.duration_ms) {
+            return Err("Emote の継続時間は 100..10000 ms にしてください");
+        }
+        Ok(())
+    }
+}
+
+/// 実機固有のピッチ補正。1 step は約 0.3125 度。ESP の RAM にのみ保持する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PitchTrim {
+    pub raw_steps: i16,
+}
+
+impl PitchTrim {
+    pub fn validate(self) -> Result<(), &'static str> {
+        if !(-96..=64).contains(&self.raw_steps) {
+            return Err("ピッチ補正は -96..64 step にしてください");
+        }
+        Ok(())
+    }
 }
 
 /// Column -> Row -> Element の 2 段に限定した表示内容。
@@ -219,6 +274,12 @@ pub enum Message {
     Card(Card),
     /// 顔の表情・視線と PC の活動状態を同時に更新する。
     Presence(Presence),
+    /// 一時的な表情を重ね、期限満了時に Presence へ戻す。
+    Emote(Emote),
+    /// 本体側の I²C 拡張器の接続状態を読み取る。表示と機構部は変更しない。
+    HardwareProbe,
+    /// ピッチの中心位置を RAM 上だけで補正する。
+    PitchTrim(PitchTrim),
 }
 
 /// firmware から host へ返す応答。
@@ -235,6 +296,29 @@ pub enum Reply {
     /// 復号または検証に失敗した回数の累計。診断用。
     Rejected {
         count: u32,
+    },
+    /// 拡張器の実測値。None は未応答または無効なバージョン値を表す。
+    HardwareStatus {
+        version_6f: Option<u8>,
+        version_71: Option<u8>,
+        vm_out: Option<u8>,
+        led_config: Option<u8>,
+        bus_out: Option<u8>,
+        boost_out: Option<u8>,
+        servo_x_position: Option<u16>,
+        servo_y_position: Option<u16>,
+        servo_x_goal: Option<u16>,
+        servo_y_goal: Option<u16>,
+        servo_x_min_limit: Option<u16>,
+        servo_x_max_limit: Option<u16>,
+        servo_y_min_limit: Option<u16>,
+        servo_y_max_limit: Option<u16>,
+        servo_x_voltage: Option<u8>,
+        servo_y_voltage: Option<u8>,
+        pitch_trim_raw_steps: i16,
+        servo_x_torque: Option<bool>,
+        servo_y_torque: Option<bool>,
+        enabled: bool,
     },
 }
 
@@ -294,6 +378,52 @@ mod tests {
         copy[..frame.len()].copy_from_slice(frame);
         let decoded: Message = decode(&mut copy[..frame.len()]).unwrap();
         assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn hardware_probe_and_status_roundtrip() {
+        let mut frame = [0; 64];
+        let encoded = encode(&Message::HardwareProbe, &mut frame).unwrap();
+        assert_eq!(
+            decode::<Message>(&mut encoded.to_vec()),
+            Ok(Message::HardwareProbe)
+        );
+        let status = Reply::HardwareStatus {
+            version_6f: None,
+            version_71: Some(2),
+            vm_out: Some(1),
+            led_config: Some(12),
+            bus_out: Some(2),
+            boost_out: Some(128),
+            servo_x_position: Some(460),
+            servo_y_position: Some(764),
+            servo_x_goal: Some(460),
+            servo_y_goal: Some(764),
+            servo_x_min_limit: Some(0),
+            servo_x_max_limit: Some(1000),
+            servo_y_min_limit: Some(0),
+            servo_y_max_limit: Some(1000),
+            servo_x_voltage: Some(73),
+            servo_y_voltage: Some(72),
+            pitch_trim_raw_steps: -24,
+            servo_x_torque: Some(false),
+            servo_y_torque: Some(false),
+            enabled: false,
+        };
+        let encoded = encode(&status, &mut frame).unwrap();
+        assert_eq!(decode::<Reply>(&mut encoded.to_vec()), Ok(status));
+    }
+
+    #[test]
+    fn pitch_trim_is_bounded_and_roundtrips() {
+        assert_eq!(PitchTrim { raw_steps: -96 }.validate(), Ok(()));
+        assert_eq!(PitchTrim { raw_steps: 64 }.validate(), Ok(()));
+        assert!(PitchTrim { raw_steps: -97 }.validate().is_err());
+        assert!(PitchTrim { raw_steps: 65 }.validate().is_err());
+        let message = Message::PitchTrim(PitchTrim { raw_steps: -24 });
+        let mut frame = [0; 32];
+        let encoded = encode(&message, &mut frame).unwrap();
+        assert_eq!(decode::<Message>(&mut encoded.to_vec()), Ok(message));
     }
 
     #[test]
@@ -562,6 +692,48 @@ mod tests {
         assert_eq!(received[0], 4);
         assert!(
             heapless::String::<MAX_STATUS_DETAIL_BYTES>::try_from("x".repeat(21).as_str()).is_err()
+        );
+    }
+
+    #[test]
+    fn emote_roundtrip_and_parameter_validation() {
+        let emote = Emote {
+            expression: Expression::Curious,
+            gaze: Gaze::Point { x: -65, y: 40 },
+            eyes: EyeStyle::Open,
+            intensity: 75,
+            duration_ms: 750,
+        };
+        let message = Message::Emote(emote);
+        let mut frame = [0; MAX_FRAME_BYTES];
+        let len = encode(&message, &mut frame).unwrap().len();
+        let mut received = frame;
+        assert_eq!(decode::<Message>(&mut received[..len]), Ok(message));
+        assert_eq!(received[0], 5);
+        assert_eq!(emote.validate(), Ok(()));
+        assert!(
+            Emote {
+                duration_ms: 99,
+                ..emote
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Emote {
+                gaze: Gaze::Point { x: 101, y: 0 },
+                ..emote
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Emote {
+                intensity: 101,
+                ..emote
+            }
+            .validate()
+            .is_err()
         );
     }
 }

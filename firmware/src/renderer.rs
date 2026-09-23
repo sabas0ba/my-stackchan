@@ -31,6 +31,13 @@ const fn color_bars() -> [u8; IMAGE_WIDTH * IMAGE_HEIGHT * 2] {
 static COLOR_BARS: [u8; IMAGE_WIDTH * IMAGE_HEIGHT * 2] = color_bars();
 
 pub fn draw<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(), D::Error> {
+    draw_startup_with_blink(display, false)
+}
+
+pub fn draw_startup_with_blink<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    blink: bool,
+) -> Result<(), D::Error> {
     display.clear(Rgb565::BLACK)?;
     Rectangle::new(Point::zero(), Size::new(320, 240))
         .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
@@ -42,7 +49,13 @@ pub fn draw<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(), D::Err
     )
     .draw(display)?;
 
-    draw_face(display, None)?;
+    draw_face(
+        display,
+        Expression::Happy,
+        Gaze::Center,
+        EyeStyle::Auto,
+        blink,
+    )?;
 
     Text::new(
         "ASCII 0123456789 !?",
@@ -63,18 +76,25 @@ pub fn draw<D: DrawTarget<Color = Rgb565>>(display: &mut D) -> Result<(), D::Err
 
 fn draw_face<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
-    presence: Option<&Presence>,
+    expression: Expression,
+    gaze: Gaze,
+    eyes: EyeStyle,
+    blink: bool,
 ) -> Result<(), D::Error> {
-    let expression = presence
-        .map(|value| value.expression)
-        .unwrap_or(Expression::Happy);
-    let eyes = presence.map(|value| value.eyes).unwrap_or(EyeStyle::Auto);
-    let (dx, dy) = match presence.map(|value| value.gaze).unwrap_or(Gaze::Center) {
+    let eyes = match eyes {
+        EyeStyle::Auto if blink => EyeStyle::Closed,
+        value => value,
+    };
+    let (dx, dy) = match gaze {
         Gaze::Center => (0, 0),
         Gaze::Left => (-8, 0),
         Gaze::Right => (8, 0),
         Gaze::Up => (0, -7),
         Gaze::Down => (0, 7),
+        Gaze::Point { x, y } => (
+            i32::from(x.clamp(-100, 100)) * 8 / 100,
+            i32::from(y.clamp(-100, 100)) * 7 / 100,
+        ),
     };
     for (index, x) in [90, 202].into_iter().enumerate() {
         draw_eye(display, x + dx, 72 + dy, index, expression, eyes)?;
@@ -271,6 +291,14 @@ pub fn draw_state<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     state: &DisplayState,
 ) -> Result<(), D::Error> {
+    draw_state_with_blink(display, state, false)
+}
+
+pub fn draw_state_with_blink<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    state: &DisplayState,
+    blink: bool,
+) -> Result<(), D::Error> {
     display.clear(Rgb565::BLACK)?;
     if let Some(entry) = state.get(Slot::Overlay) {
         draw_content(
@@ -279,7 +307,16 @@ pub fn draw_state<D: DrawTarget<Color = Rgb565>>(
             Rectangle::new(Point::zero(), Size::new(320, 240)),
         )?;
     } else {
-        draw_face(display, state.presence())?;
+        let face = state
+            .emote()
+            .map(|emote| (emote.expression, emote.gaze, emote.eyes))
+            .or_else(|| {
+                state
+                    .presence()
+                    .map(|presence| (presence.expression, presence.gaze, presence.eyes))
+            })
+            .unwrap_or((Expression::Happy, Gaze::Center, EyeStyle::Auto));
+        draw_face(display, face.0, face.1, face.2, blink)?;
         if let Some(presence) = state.presence() {
             draw_presence_status(display, presence)?;
         }
@@ -621,6 +658,94 @@ mod tests {
         assert_ne!(screen.0, default_face);
         controller.tick(1000, &mut screen).unwrap();
         assert_eq!(screen.0, default_face);
+    }
+
+    #[test]
+    fn automatic_blink_closes_and_reopens_eyes_without_changing_presence() {
+        use crate::model::Controller;
+        use protocol::Message;
+
+        let mut controller = Controller::default();
+        let mut screen = Screen(vec![Rgb565::BLACK; 320 * 240]);
+        controller.handle(Message::Clear, 0, &mut screen).unwrap();
+        let open_face = screen.0.clone();
+        controller.tick(4_000, &mut screen).unwrap();
+        assert_ne!(screen.0, open_face);
+        controller.tick(4_120, &mut screen).unwrap();
+        assert_eq!(screen.0, open_face);
+
+        controller
+            .handle(
+                Message::Presence(Presence {
+                    activity: None,
+                    detail: Default::default(),
+                    expression: Expression::Happy,
+                    gaze: Gaze::Center,
+                    eyes: EyeStyle::Wide,
+                    ttl_s: 0,
+                }),
+                5_000,
+                &mut screen,
+            )
+            .unwrap();
+        let explicit_eyes = screen.0.clone();
+        controller.tick(9_500, &mut screen).unwrap();
+        assert_eq!(screen.0, explicit_eyes);
+    }
+
+    #[test]
+    fn startup_blink_preserves_diagnostic_screen() {
+        use crate::model::Controller;
+
+        let mut controller = Controller::default();
+        let mut screen = Screen(vec![Rgb565::BLACK; 320 * 240]);
+        draw(&mut screen).unwrap();
+        let startup = screen.0.clone();
+        controller.tick(4_000, &mut screen).unwrap();
+        assert_ne!(screen.0, startup);
+        assert_eq!(screen.0[205 * 320 + 115], startup[205 * 320 + 115]);
+        controller.tick(4_120, &mut screen).unwrap();
+        assert_eq!(screen.0, startup);
+    }
+
+    #[test]
+    fn emote_overrides_face_then_restores_presence_pixels() {
+        use crate::model::Controller;
+        use protocol::{Emote, Message};
+
+        let mut controller = Controller::default();
+        let mut screen = Screen(vec![Rgb565::BLACK; 320 * 240]);
+        controller
+            .handle(
+                Message::Presence(Presence {
+                    activity: None,
+                    detail: Default::default(),
+                    expression: Expression::Calm,
+                    gaze: Gaze::Center,
+                    eyes: EyeStyle::Auto,
+                    ttl_s: 0,
+                }),
+                0,
+                &mut screen,
+            )
+            .unwrap();
+        let calm = screen.0.clone();
+        controller
+            .handle(
+                Message::Emote(Emote {
+                    expression: Expression::Curious,
+                    gaze: Gaze::Point { x: -100, y: 50 },
+                    eyes: EyeStyle::Wide,
+                    intensity: 50,
+                    duration_ms: 500,
+                }),
+                100,
+                &mut screen,
+            )
+            .unwrap();
+        assert_ne!(screen.0, calm);
+        controller.tick(600, &mut screen).unwrap();
+        assert_eq!(screen.0, calm);
     }
 
     #[test]

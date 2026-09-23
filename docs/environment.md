@@ -100,7 +100,8 @@ nix を持つ場合は `nix develop` または `direnv allow` で開発シェル
 scripts/container.sh run make simulate
 ```
 
-`.work/simulation/index.html` をブラウザーで開くと、以下の 6 状態を並べて確認できる。
+`.work/simulation/index.html` をブラウザーで開くと、以下の基本 6 状態に加え、
+表情・視線・Emote とタップデモを並べて確認できる。
 対応する 320×240 の BMP 画像も同じディレクトリに保存する。
 
 1. 起動確認画面 (`01-startup.bmp`)
@@ -231,7 +232,7 @@ scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
 
 ### 表情・視線と PC 状態の実機確認
 
-版 3 の firmware を書き込んでから、次の例で表情・視線と活動状態を送る。
+版 7 の firmware を書き込んでから、次の例で表情・視線と活動状態を送る。
 `status` は PC のジョブやスクリプトから呼び出せる。詳細は ASCII で表示する。
 `status` の既定 TTL は 30 秒、`face` の既定 TTL は無期限である。
 
@@ -241,12 +242,25 @@ scripts/container.sh device target/debug/stackchan status \
   --activity working --detail BUILD --gaze right --eyes half-lidded --ttl 10
 scripts/container.sh device target/debug/stackchan face \
   --expression surprised --gaze left --eyes wide --ttl 5
+scripts/container.sh device target/debug/stackchan emote \
+  --expression curious --gaze-x -60 --gaze-y 25 --duration-ms 800
 scripts/container.sh device target/debug/stackchan clear
+scripts/container.sh device target/debug/stackchan hardware
+scripts/container.sh device target/debug/stackchan pitch-trim --raw-steps -96 --save
 ```
 
 `status` と `face` は現在の顔を上書きし、帯とは独立する。期限満了後は既定の顔に戻る。
 `clear` は顔と帯をすべて消す。描画例は `.work/simulation/index.html` の
-`07-working.bmp` から `24-eyes-half-lidded.bmp` に含まれる。
+`07-working.bmp` から `26-emote-expired.bmp` に含まれる。
+
+水平補正はホストの `.work/pitch-trim.txt` に整数 1 個として保存する。ここでの `-96` は
+確認した個体と設置状態の値であり、別の環境では実測して変更する。`--save` を指定した
+`pitch-trim` は実機が受理した後に保存する。以降の `emote`、`face`、`status`、`text`、
+`card`、`clear` は送信前にこの値を読み、ファームウェアへ再適用する。再起動直後は
+補正 0 に戻り、最初の表示コマンドを送る時点で補正が復元される。
+設定ファイルは git 管理外である。設置場所ごとのファイルを使う場合は全コマンドに
+`--pitch-trim-file <path>` を付けるか、`STACKCHAN_PITCH_TRIM_FILE` を設定する。
+明示したファイルが存在しない、または値が無効な場合は送信せずエラーにする。
 
 CoreS3 の画面を1回タップするとデモの先頭 `01/12 HAPPY` を表示し、指を離して
 再びタップすると `02/12 FOCUSED` に進む。12番目の後は先頭に戻る。画面下の
@@ -254,8 +268,14 @@ CoreS3 の画面を1回タップするとデモの先頭 `01/12 HAPPY` を表示
 `clear` を送るとデモは終了する。タッチデモは USB の Ack 通し番号を増やさない。
 シミュレーションの `demo-01.bmp` から `demo-12.bmp` は同じモデルの順送り描画である。
 
-この版は画面上の視線のみを制御する。物理的な首振りは駆動機構、接続端子、可動域を
-確認した後に実装する。
+この版は画面上の視線に加え、M5 公式 StackChan K151 のサーボ 2 軸と 12 個の LED を駆動する。
+目標値は X ±30°、Y 30–60°、RGB 各成分 0–63 に制限する。サーボの工場既定ゼロ位置は
+X=460、Y=620、UART は GPIO6/7・1 Mbaud、LED 拡張器は I²C 0x6F を使用する。
+これらは [M5 公式 BSP の固定コミット](https://github.com/m5stack/StackChan-BSP/tree/8d4d6fc3b7a6be379c6317c45a02a30bff8c492e) に基づく。
+ボディ側の 5 V は CoreS3 の AW9523B で BOOST_EN (P1_7)、次に BUS_OUT_EN (P0_1) を
+有効化して供給する。この順序は [M5 公式 ESPHome 電源構成](https://docs.m5stack.com/en/homeassistant/devices/stackchan) に従う。
+拡張器が見つからない場合はサーボ・LED を有効にせず、画面と USB 通信は維持する。
+起動直後はサーボを動かさず、最初の Presence / Emote から目標値を送る。
 
 ### 静的検査・単体テスト
 
