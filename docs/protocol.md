@@ -4,7 +4,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 
 ## 版
 
-`protocol::VERSION` (現在 5)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
+`protocol::VERSION` (現在 7)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
 
 ## 物理層
 
@@ -40,7 +40,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 | `Ack { seq }` | 描画に成功した Text / Card / Presence / Emote / Clear の通し番号 |
 | `Rejected { count }` | 破棄したフレームの累計。診断用 |
 
-Card への画像追加で版を 1 から 2 に、Presence の追加で 3、Emote と二軸視線の追加で 4 に上げた。既存 Message variant の番号は維持する。
+版 1 は Card、版 2 は Card への画像追加、版 3 は Presence、版 6 は Emote・二軸視線・HardwareProbe、版 7 は PitchTrim と HardwareStatus の補正値追加に対応する。版 4・5 は使用していない。既存 Message variant の番号は維持する。
 
 ### 現在の実装範囲
 

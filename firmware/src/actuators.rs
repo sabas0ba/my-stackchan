@@ -85,6 +85,19 @@ pub fn disable<I: I2c>(bus: &mut I) -> Result<(), I::Error> {
     show_rgb(bus, [0, 0, 0])
 }
 
+/// 起動前の残留トルクを解除できなければ、VM_EN を遮断する。
+pub fn release_startup_torque<I: I2c>(bus: &mut I, mut send: impl FnMut(&[u8]) -> bool) -> bool {
+    // 片軸の送信失敗後も、もう一方の解除を試みる。
+    let x_off = send(&servo_torque_packet(1, false));
+    let y_off = send(&servo_torque_packet(2, false));
+    if x_off && y_off {
+        true
+    } else {
+        let _ = disable(bus);
+        false
+    }
+}
+
 /// 位置指令のみ。X/Y とも SRAM の 0x2A..0x2F に書き、EEPROM には触れない。
 pub fn servo_packet(id: u8, position: u16) -> [u8; 13] {
     assert!((1..=2).contains(&id));
@@ -304,5 +317,29 @@ mod tests {
         bus.registers[VERSION as usize] = 0xff;
         assert_eq!(prepare(&mut bus), Ok(false));
         assert!(bus.calls.is_empty());
+    }
+
+    #[test]
+    fn startup_torque_release_failure_cuts_vm_even_when_first_servo_fails() {
+        for failed_id in [1, 2] {
+            let mut bus = Bus::new();
+            prepare(&mut bus).unwrap();
+            assert_eq!(bus.registers[GPIO_OUT_LOW as usize] & 1, 1);
+            let mut attempted = Vec::new();
+            assert!(!release_startup_torque(&mut bus, |packet| {
+                attempted.push(packet[2]);
+                packet[2] != failed_id
+            }));
+            assert_eq!(attempted, [1, 2]);
+            assert_eq!(bus.registers[GPIO_OUT_LOW as usize] & 1, 0);
+        }
+    }
+
+    #[test]
+    fn successful_startup_torque_release_keeps_vm_enabled() {
+        let mut bus = Bus::new();
+        prepare(&mut bus).unwrap();
+        assert!(release_startup_torque(&mut bus, |_| true));
+        assert_eq!(bus.registers[GPIO_OUT_LOW as usize] & 1, 1);
     }
 }

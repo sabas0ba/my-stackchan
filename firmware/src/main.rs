@@ -181,11 +181,13 @@ fn main() -> ! {
     .expect("servo UART configuration")
     .with_tx(peripherals.GPIO6)
     .with_rx(peripherals.GPIO7);
-    if actuator_ready
-        && (send_servo(&mut servo_uart, &actuators::servo_torque_packet(1, false)).is_err()
-            || send_servo(&mut servo_uart, &actuators::servo_torque_packet(2, false)).is_err())
-    {
-        actuator_ready = false;
+    if actuator_ready {
+        actuator_ready = actuators::release_startup_torque(&mut i2c, |packet| {
+            send_servo(&mut servo_uart, packet).is_ok()
+        });
+        if !actuator_ready {
+            esp_println::println!("StackChan startup torque release failed; body output disabled");
+        }
     }
     let mut last_target =
         actuators::servo_positions(my_stackchan_firmware::behavior::ActuatorTarget::NEUTRAL, 0);
