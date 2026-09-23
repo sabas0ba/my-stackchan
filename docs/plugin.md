@@ -110,7 +110,7 @@ daemon は記録された commit SHA を `hello` の内容とともにログへ�
 設定は行単位の簡易な形式とし、パーサは `crates/host` に自前で実装する。TOML や JSON の crate を追加しないためである。受け付ける構文は、section 見出しと、`key = "文字列"` / `key = 整数` / `key = true|false` の行、コメントに限る。未知の key と重複 key はエラーとする。
 
 ```
-# 例: stackchan.conf (置き場所は未決事項 1)
+# 例: <設定ディレクトリ>/stackchan.conf
 [plugin ai-usage]
 command = "C:/Users/<user>/stackchan-plugins/ai-usage/ai-usage.exe"
 rev = "<40 桁の commit SHA>"
@@ -123,6 +123,17 @@ access_code = "..."
 ```
 
 `arg.*` は `init` で plugin に渡す値である。path 等の環境依存の値は plugin に既定値を持たせず、利用者設定から与える。
+
+### 設定ディレクトリ
+
+利用者設定と spool は同じ設定ディレクトリに置く。既定値は次のとおりとし、CLI の全サブコマンド共通の `--config-dir <path>` で起動時に変更できる。daemon と、daemon へ要求を送る CLI は同じ設定ディレクトリを指定する必要がある。
+
+| OS | 既定値 |
+| --- | --- |
+| Windows | `%APPDATA%\stackchan` |
+| Linux | `$XDG_CONFIG_HOME/stackchan`。未設定なら `$HOME/.config/stackchan` |
+
+std にはこれらを解決する API が無いため、環境変数から自前で求める。環境変数が無い、または絶対 path でない場合は既定値を持たないものとしてエラーにし、`--config-dir` の指定を求める。
 
 ## plugin プロトコル
 
@@ -217,7 +228,7 @@ firmware はタップの扱いとして `Demo` (現行の表情デモ) と `Forw
 | daemon | mock plugin を用いた結合テスト。異常終了からの再起動、流量超過での停止、許可外 capability の拒否、spool の書きかけファイルの無視 |
 | デバイスプロトコル | 既存の単体テストと `decoder_stress` に新 variant を追加する |
 | 描画 | `firmware/examples/simulate.rs` に Card の巡回、通知の割込み、画像領域の状態を追加し、画像で比較する |
-| 対象 OS | daemon と CLI の単体・結合テストを Linux と Windows の CI で実行する (未決事項 2) |
+| 対象 OS | 単体・結合テストはコンテナ内 (Linux) で実行する。Windows 向けはコンテナ内の cross build が通ることを `make check` で確認し、実行時の動作は Windows 上で手動の確認手順により確かめる |
 | plugin 作者向け | `plugin-sdk` の mock host で、plugin 単体の出力を CI で検査できるようにする |
 
 ## 段階
@@ -246,9 +257,19 @@ Claude / Codex 使用率は P3 の最初の外部 plugin とする。design.md �
 | 形式 | plugin プロトコルは postcard + COBS、利用者設定は自前パーサの簡易形式 | Rust の依存を増やさない |
 | 実行環境 | Windows ネイティブを対象から外さない。local socket の代わりに spool ディレクトリを用いる | std だけで両 OS に対応できる |
 | タップの切替 | CLI で明示的に切り替える。起動時は Demo | 単体での動作確認を保ち、daemon の暗黙の状態変更を避ける |
+| 設定ディレクトリ | OS ごとの既定値を持ち、`--config-dir` で起動時に変更できる | 複数の構成の併用と試験での分離 |
+| Windows 向けの構築 | コンテナ内で `x86_64-pc-windows-gnu` 向けに cross build する | ホストに toolchain を導入しない規約を保つ |
+
+## Windows 向けの cross build
+
+host 側の crate は Espressif fork の toolchain (nix/esp-rust.nix) で構築している。上流の `rust-std-x86_64-pc-windows-gnu` は compiler の commit が異なり、この toolchain では使えない。そのため次の構成を第一案とし、P1 の最初に成立性を確認する。
+
+- 標準ライブラリは同梱の rust-src から `-Z build-std` で構築する (firmware と同じ方式)
+- linker と C runtime は nixpkgs の mingw-w64 cross toolchain を用いる。版は既存の nixpkgs の rev で固定される
+- `serialport` の Windows 実装が用いる `windows-sys` 0.52 系は、すでに `Cargo.lock` に含まれる。ただし Windows 向けの構築で初めてコンパイル対象となるため、調査を `docs/dependencies.md` に追記する。`windows_x86_64_gnu` は構築済みの import library を同梱する crate であり、その点も記録する
+
+成立しない場合は、Windows 向けだけ別の toolchain を nix で固定する案を検討する。
 
 ## 未決事項
 
-1. 利用者設定と spool の置き場所。Windows は `%APPDATA%\stackchan`、Linux は `$XDG_CONFIG_HOME/stackchan` を想定する。std にはこれらを解決する API が無いため、環境変数から自前で求める
-2. Windows 向けの構築と CI。開発はコンテナ内で行う規約のため、Windows 向け実行ファイルの構築方法 (コンテナ内での cross build か、Windows 上の toolchain か) と、GitHub Actions での Windows runner の利用を決める
-3. 実行ファイルと commit SHA の対応を検証する方法 (再現可能な構築、ハッシュの照合)
+1. 実行ファイルと commit SHA の対応を検証する方法 (再現可能な構築、ハッシュの照合)。P3 で扱う
