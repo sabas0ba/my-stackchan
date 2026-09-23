@@ -32,7 +32,7 @@ enum Command {
     PitchTrim {
         #[arg(long)]
         port: Option<String>,
-        /// 約 0.3125 度/step。-64..64、負が下向き。
+        /// 約 0.3125 度/step。-80..64、負が下向き。
         #[arg(long, allow_hyphen_values = true)]
         raw_steps: i16,
     },
@@ -915,7 +915,7 @@ mod tests {
                 raw_steps: -24
             }))
         );
-        assert!(pitch_trim_message(-65).is_err());
+        assert!(pitch_trim_message(-81).is_err());
         assert!(pitch_trim_message(65).is_err());
     }
 
