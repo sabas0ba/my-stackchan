@@ -4,7 +4,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 
 ## 版
 
-`protocol::VERSION` (現在 3)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
+`protocol::VERSION` (現在 5)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
 
 ## 物理層
 
@@ -30,16 +30,17 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 | `Text { slot, ttl_s, text }` | テキストを表示する | `text` は `MAX_TEXT_BYTES` (512) バイト |
 | `Card(Card)` | 行と要素からなる表示内容を 1 Slot に配置する | 最大 4 行、各行最大 2 要素 |
 | `Presence(Presence)` | 活動状態・表情・視線を一括更新する | 詳細は UTF-8 で最大 20 byte |
+| `Emote(Emote)` | 表情と二軸視線を一時的に重ねる | 視線 -100..100、強度 0..100、継続 100..10000 ms |
 
 `protocol::Reply` (firmware -> host):
 
 | variant | 内容 |
 | --- | --- |
 | `Pong { nonce, version }` | `Ping` への応答 |
-| `Ack { seq }` | 描画に成功した Text / Card / Presence / Clear の通し番号 |
+| `Ack { seq }` | 描画に成功した Text / Card / Presence / Emote / Clear の通し番号 |
 | `Rejected { count }` | 破棄したフレームの累計。診断用 |
 
-Card への画像追加で版を 1 から 2 に、Presence の追加で 3 に上げた。既存 Message variant の番号は維持する。
+Card への画像追加で版を 1 から 2 に、Presence の追加で 3、Emote と二軸視線の追加で 4 に上げた。既存 Message variant の番号は維持する。
 
 ### 現在の実装範囲
 
@@ -48,7 +49,7 @@ firmware は USB Serial/JTAG から `Ping` を受信し、同じ nonce と
 両方が一致した場合だけ終了コード 0 を返す。版不一致時は両者の版を含むエラーで終了する。
 
 受信処理は USB パケットの分割・連結に依存しない。空の区切りは同期用として無視する。
-不正・上限超過フレーム、無効な Card、描画に失敗した `Clear` / `Text` / `Card` / `Presence` は `Rejected` を返す。
+不正・上限超過フレーム、無効な Card / Presence / Emote、描画に失敗した `Clear` / `Text` / `Card` / `Presence` / `Emote` は `Rejected` を返す。
 上限超過時は次の区切りまでを 1 フレームとして破棄する。破棄回数は `u32::MAX` で飽和する。
 応答 1 件分だけを保持し、USB FIFO に渡すまで次の要求の読み出しを待つ。
 USB の送受信は非ブロッキング API を使用する。
@@ -107,13 +108,44 @@ HalfLidded を指定する。Auto は表情ごとの目の形を使う。視線�
 画面中央下部に活動状態とともに表示する。表示フォントの制約から非 ASCII 文字は `?` になる。
 `ttl_s` は受信からの秒数で、0 は期限なし。期限満了時は活動状態と詳細を消し、既定の顔に戻る。
 Overlay 中も期限は進み、Overlay が消えると有効な Presence だけを再表示する。
-`Clear` は Presence と Slot をすべて消す。
+`Clear` は Presence、Emote、Slot をすべて消す。
+
+`HardwareProbe` は表示や出力を変更せず、PY32 I²C アドレス `0x6F` と `0x71` の
+バージョン応答、選択した拡張器の VM 出力ラッチと LED 設定、
+CoreS3 AW9523B の BUS_OUT / BOOST 出力ラッチ、両サーボの現在位置・目標位置・
+角度制限・電圧の生値・トルク状態、出力有効状態を
+`HardwareStatus` で返す。未応答や無効なバージョン値は `None` とする。
+`stackchan hardware` で確認できる。
+
+`Emote` は既存の Presence と Slot を保持したまま顔を一時的に上書きし、`duration_ms` の満了後に
+その時点で有効な Presence の顔へ戻る。`gaze=Point { x, y }` は左右・上下それぞれ
+`-100..100` の連続値とし、画面内の目の移動量へ変換する。`eyes=Auto` はまばたきを許可する。
+`intensity` は機構部の目標値に反映し、0 では首振り・発光とも無効にする。
+画面描画への影響はない。視線の指定は眼球位置に加え、首の X/Y 目標角度を変える。
+機構部の出力は X ±30°、Y 30–60°、LED 各色成分 0–63 に制限する。
+LED は指定強度を上限として、状態が有効な間に 2 秒周期で 70–100% の輝度変化を付ける。
+サーボのゴール位置とトルクだけを揮発性レジスタへ書き込み、ID・校正値・EEPROM は変更しない。
+初回の動作前に両軸の現在位置を読み、読めない場合は動かさない。古いゴールへの急な移動を避けるため、
+現在位置をゴールに設定してからトルクを有効にする。移動量は 100 ms ごとに最大 8 ステップ
+（約 2.5°）に制限し、目標到達の約 800 ms 後にトルクを解除する。次の移動前には位置を読み直す。
+ESP 側だけ再起動した場合にもトルクを残さないよう、起動時と待機中にも解除指令を送る。
+期限満了時は有効な Presence の目標値へ戻り、Presence がなければ正面・消灯へ戻る。
+通信方式と工場既定のゼロ位置は [M5 公式 BSP の固定コミット](https://github.com/m5stack/StackChan-BSP/tree/8d4d6fc3b7a6be379c6317c45a02a30bff8c492e) に合わせる。
+Emote を続けて送ると、最新の Emote が前の Emote を置き換えて期限を更新する。
+`Clear` と本体画面のタップは Emote も消す。
+
+host CLI では `stackchan emote --expression curious --gaze-x -60 --gaze-y 25 --intensity 75 --duration-ms 800`
+のように指定する。視線座標と継続時間は送信前にも検査する。
 
 host CLI の `face` は表情・視線・目の開き方を明示し、`status` は活動状態から表情を選ぶ
 (Idle/Done: Happy、Working: Focused、Waiting: Sleepy、Error: Worried)。
 `status` の既定 TTL は 30 秒で、PC 側の更新が停止した状態を残さない。
 
-Ack は描画完了後に返す。seq は起動時 0、Text / Card / Presence / Clear の成功ごとに加算し、最初の Ack は 1。
+firmware は `eyes=Auto` の顔を時刻に応じて短くまばたきさせる。明示した目の形と
+Overlay は自動まばたきで変更しない。まばたきは Presence の TTL と Ack 番号を変更しない。
+
+Ack は描画完了後に返す。USB 送信が詰まった場合、firmware は 2 秒後に未送信の応答を破棄して次の受信を再開する。
+host は描画応答を最大 5 秒待つ。seq は起動時 0、Text / Card / Presence / Emote / Clear の成功ごとに加算し、最初の Ack は 1。
 `u32::MAX` の次は 0 に戻る。Ping、拒否、TTL 満了では加算せず、TTL 満了の自発的応答も送らない。
 描画エラー時は Slot の状態と seq を確定せず Rejected を返す。ただし途中まで書かれた画素は
 元に戻せないため、表示装置の障害が解消した後に表示命令を再送する。

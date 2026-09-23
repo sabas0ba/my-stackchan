@@ -12,7 +12,7 @@ use embedded_graphics::{
 };
 use my_stackchan_firmware::{model::Controller, renderer};
 use protocol::{
-    Activity, Card, Element, Expression, EyeStyle, Gaze, ImageData, MAX_CARD_TEXT_BYTES,
+    Activity, Card, Element, Emote, Expression, EyeStyle, Gaze, ImageData, MAX_CARD_TEXT_BYTES,
     MAX_TEXT_BYTES, Message, Presence, Reply, Row, Slot,
 };
 
@@ -411,6 +411,22 @@ fn generate(options: &Options) -> io::Result<()> {
         );
         save_bmp(&options.output_dir.join(name), &screen)?;
     }
+    apply(
+        &mut controller,
+        &mut screen,
+        Message::Emote(Emote {
+            expression: Expression::Curious,
+            gaze: Gaze::Point { x: -60, y: 25 },
+            eyes: EyeStyle::Wide,
+            intensity: 75,
+            duration_ms: 800,
+        }),
+    );
+    save_bmp(&options.output_dir.join("25-emote.bmp"), &screen)?;
+    controller
+        .tick(800, &mut screen)
+        .expect("screen is infallible");
+    save_bmp(&options.output_dir.join("26-emote-expired.bmp"), &screen)?;
     for index in 0..my_stackchan_firmware::model::DEMO_FACE_COUNT {
         controller
             .tap(index as u64, &mut screen)
@@ -472,6 +488,8 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="22-eyes-wide.bmp" width="320" height="240" alt="目を見開く"><figcaption>22. Eyes wide</figcaption></figure>
 <figure><img src="23-eyes-closed.bmp" width="320" height="240" alt="目を閉じる"><figcaption>23. Eyes closed</figcaption></figure>
 <figure><img src="24-eyes-half-lidded.bmp" width="320" height="240" alt="ジト目"><figcaption>24. Half-lidded eyes</figcaption></figure>
+<figure><img src="25-emote.bmp" width="320" height="240" alt="一時的な表情と二軸視線"><figcaption>25. Emote / Point</figcaption></figure>
+<figure><img src="26-emote-expired.bmp" width="320" height="240" alt="期限後の表情"><figcaption>26. Emote expired</figcaption></figure>
 "#
     );
     for index in 1..=my_stackchan_firmware::model::DEMO_FACE_COUNT {

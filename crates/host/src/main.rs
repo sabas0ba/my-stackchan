@@ -23,6 +23,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// M5 StackChan 本体の I²C 拡張器と出力の状態を読み取る。
+    Hardware {
+        #[arg(long)]
+        port: Option<String>,
+    },
+    /// 一時的な表情を、連続値の視線と継続時間で指定する。
+    Emote {
+        #[arg(long)]
+        port: Option<String>,
+        #[arg(long, value_enum)]
+        expression: FaceExpression,
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        gaze_x: i16,
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        gaze_y: i16,
+        #[arg(long, value_enum, default_value = "auto")]
+        eyes: HostEyeStyle,
+        #[arg(long, default_value_t = 50)]
+        intensity: u8,
+        #[arg(long, default_value_t = 1000)]
+        duration_ms: u16,
+    },
     /// 表情と視線を表示する。
     Face {
         #[arg(long)]
@@ -226,6 +248,26 @@ impl From<TextSlot> for protocol::Slot {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Hardware { port } => hardware(port),
+        Command::Emote {
+            port,
+            expression,
+            gaze_x,
+            gaze_y,
+            eyes,
+            intensity,
+            duration_ms,
+        } => send_display(
+            port,
+            &emote_message(
+                expression.into(),
+                gaze_x,
+                gaze_y,
+                eyes.into(),
+                intensity,
+                duration_ms,
+            )?,
+        ),
         Command::Face {
             port,
             expression,
@@ -354,7 +396,7 @@ fn open_port(
         None => detect_port()?,
     };
     let port = serialport::new(&port_name, 115_200)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(5))
         .open()?;
     // 書き込み直後に残る bootloader のログを今回の応答に混入させない。
     port.clear(serialport::ClearBuffer::Input)?;
@@ -367,6 +409,23 @@ fn ping(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let reply = exchange(&mut port, &protocol::Message::Ping { nonce })?;
     println!("{port_name}: {reply:?}");
     validate_pong(&reply, nonce).map_err(Into::into)
+}
+
+fn hardware(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let (port_name, mut port) = open_port(port)?;
+    let nonce = 0x5A5A_1234;
+    validate_pong(
+        &exchange(&mut port, &protocol::Message::Ping { nonce })?,
+        nonce,
+    )?;
+    let reply = exchange(&mut port, &protocol::Message::HardwareProbe)?;
+    match reply {
+        protocol::Reply::HardwareStatus { .. } => {
+            println!("{port_name}: {reply:?}");
+            Ok(())
+        }
+        _ => Err("機構部の診断応答を受信できませんでした".into()),
+    }
 }
 
 fn text_message(slot: TextSlot, ttl_s: u16, text: &str) -> Result<protocol::Message, String> {
@@ -404,6 +463,31 @@ fn presence_message(
         eyes,
         ttl_s,
     }))
+}
+
+fn emote_message(
+    expression: protocol::Expression,
+    gaze_x: i16,
+    gaze_y: i16,
+    eyes: protocol::EyeStyle,
+    intensity: u8,
+    duration_ms: u16,
+) -> Result<protocol::Message, String> {
+    if !(-100..=100).contains(&gaze_x) || !(-100..=100).contains(&gaze_y) {
+        return Err("視線の座標は -100..100 にしてください".into());
+    }
+    let emote = protocol::Emote {
+        expression,
+        gaze: protocol::Gaze::Point {
+            x: gaze_x as i8,
+            y: gaze_y as i8,
+        },
+        eyes,
+        intensity,
+        duration_ms,
+    };
+    emote.validate().map_err(str::to_owned)?;
+    Ok(protocol::Message::Emote(emote))
 }
 
 struct CardContent<'a> {
@@ -540,7 +624,9 @@ fn send_checked(
         protocol::Reply::Rejected { count } => {
             Err(format!("表示更新が拒否されました: rejected={count}").into())
         }
-        protocol::Reply::Pong { .. } => Err("表示更新に対して Ack 以外の応答を受信しました".into()),
+        protocol::Reply::Pong { .. } | protocol::Reply::HardwareStatus { .. } => {
+            Err("表示更新に対して Ack 以外の応答を受信しました".into())
+        }
     }
 }
 
@@ -558,7 +644,7 @@ fn read_reply(reader: &mut impl Read) -> Result<protocol::Reply, Box<dyn std::er
     let mut rx = [0u8; protocol::MAX_FRAME_BYTES];
     let mut len = 0;
     let mut discarding = false;
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     // 起動ログや空の区切りを読み飛ばしても、連続入力で永久に待たない。
     while Instant::now() < deadline {
         let mut byte = [0];
@@ -749,6 +835,55 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["stackchan", "status", "--activity", "unknown"]).is_err());
+    }
+
+    #[test]
+    fn emote_cli_encodes_continuous_gaze_and_rejects_invalid_parameters() {
+        let cli = Cli::try_parse_from([
+            "stackchan",
+            "emote",
+            "--expression",
+            "curious",
+            "--gaze-x",
+            "-60",
+            "--gaze-y",
+            "25",
+            "--intensity",
+            "75",
+            "--duration-ms",
+            "800",
+        ])
+        .unwrap();
+        let Command::Emote {
+            expression,
+            gaze_x,
+            gaze_y,
+            eyes,
+            intensity,
+            duration_ms,
+            ..
+        } = cli.command
+        else {
+            panic!("emote expected")
+        };
+        let message = emote_message(
+            expression.into(),
+            gaze_x,
+            gaze_y,
+            eyes.into(),
+            intensity,
+            duration_ms,
+        )
+        .unwrap();
+        let protocol::Message::Emote(emote) = message else {
+            panic!("emote message expected")
+        };
+        assert_eq!(emote.gaze, protocol::Gaze::Point { x: -60, y: 25 });
+        assert_eq!(emote.intensity, 75);
+        assert_eq!(emote.duration_ms, 800);
+        assert!(emote_message(emote.expression, 101, 0, emote.eyes, 75, 800).is_err());
+        assert!(emote_message(emote.expression, 0, 0, emote.eyes, 101, 800).is_err());
+        assert!(emote_message(emote.expression, 0, 0, emote.eyes, 75, 10).is_err());
     }
 
     #[test]

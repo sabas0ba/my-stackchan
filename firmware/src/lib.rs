@@ -5,6 +5,8 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod actuators;
+pub mod behavior;
 pub mod model;
 pub mod power;
 pub mod renderer;
