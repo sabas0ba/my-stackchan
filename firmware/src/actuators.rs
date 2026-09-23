@@ -165,7 +165,7 @@ pub fn servo_read_value(id: u8, length: u8, bytes: &[u8]) -> Option<u16> {
 
 /// 工場既定の校正値を基準に、目標を安全な生位置へ写像する。
 pub fn servo_positions(target: ActuatorTarget, pitch_trim_raw_steps: i16) -> (u16, u16) {
-    assert!((-80..=64).contains(&pitch_trim_raw_steps));
+    assert!((-96..=64).contains(&pitch_trim_raw_steps));
     let yaw = 460 + i32::from(target.x_tenth_deg) * 16 / 50;
     let pitch = 620 + i32::from(target.y_tenth_deg) * 16 / 50 + i32::from(pitch_trim_raw_steps);
     // 補正込みでも Y は約 15..80 度に収め、機構の 5..85 度の推奨域に余裕を残す。
@@ -231,9 +231,10 @@ mod tests {
         assert_eq!(servo_positions(ActuatorTarget::NEUTRAL, 0), (460, 764));
         assert_eq!(servo_positions(ActuatorTarget::NEUTRAL, -24), (460, 740));
         assert_eq!(servo_positions(ActuatorTarget::NEUTRAL, -80), (460, 684));
+        assert_eq!(servo_positions(ActuatorTarget::NEUTRAL, -96), (460, 668));
         for x in [-300, 0, 300] {
             for y in [300, 450, 600] {
-                for trim in [-80, 0, 64] {
+                for trim in [-96, 0, 64] {
                     let (yaw, pitch) = servo_positions(
                         ActuatorTarget {
                             x_tenth_deg: x,

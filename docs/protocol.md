@@ -117,10 +117,12 @@ CoreS3 AW9523B の BUS_OUT / BOOST 出力ラッチ、両サーボの現在位置
 `HardwareStatus` で返す。未応答や無効なバージョン値は `None` とする。
 `stackchan hardware` で確認できる。
 
-`PitchTrim { raw_steps }` は待機姿勢のピッチ中心を -80..64 step の範囲で補正する。
+`PitchTrim { raw_steps }` は待機姿勢のピッチ中心を -96..64 step の範囲で補正する。
 1 step は約 0.3125°、負値が下向き。ESP の RAM にのみ保持し、再起動すると 0 に戻る。
 `Clear` は補正値を変更しない。`stackchan pitch-trim --raw-steps -24` で設定し、
 `stackchan hardware` の `pitch_trim_raw_steps` で確認できる。EEPROM と工場校正値は変更しない。
+負方向の補正を大きくすると下向き視線は機構の安全下限で飽和するため、補正値が決まったら
+その実機で上下の可動範囲を確認する。
 
 `Emote` は既存の Presence と Slot を保持したまま顔を一時的に上書きし、`duration_ms` の満了後に
 その時点で有効な Presence の顔へ戻る。`gaze=Point { x, y }` は左右・上下それぞれ

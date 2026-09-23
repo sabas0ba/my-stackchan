@@ -148,8 +148,8 @@ pub struct PitchTrim {
 
 impl PitchTrim {
     pub fn validate(self) -> Result<(), &'static str> {
-        if !(-80..=64).contains(&self.raw_steps) {
-            return Err("ピッチ補正は -80..64 step にしてください");
+        if !(-96..=64).contains(&self.raw_steps) {
+            return Err("ピッチ補正は -96..64 step にしてください");
         }
         Ok(())
     }
@@ -416,9 +416,9 @@ mod tests {
 
     #[test]
     fn pitch_trim_is_bounded_and_roundtrips() {
-        assert_eq!(PitchTrim { raw_steps: -80 }.validate(), Ok(()));
+        assert_eq!(PitchTrim { raw_steps: -96 }.validate(), Ok(()));
         assert_eq!(PitchTrim { raw_steps: 64 }.validate(), Ok(()));
-        assert!(PitchTrim { raw_steps: -81 }.validate().is_err());
+        assert!(PitchTrim { raw_steps: -97 }.validate().is_err());
         assert!(PitchTrim { raw_steps: 65 }.validate().is_err());
         let message = Message::PitchTrim(PitchTrim { raw_steps: -24 });
         let mut frame = [0; 32];
