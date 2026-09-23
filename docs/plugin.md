@@ -65,15 +65,16 @@ stackchan CLI ---> spool dir -> | 受付 (通知、手動の表示命令)     | 
 - pitch trim は現行 CLI と同じ保存先 (`--pitch-trim-file`、`STACKCHAN_PITCH_TRIM_FILE`、既定は `.work/pitch-trim.txt`) から読み、接続時と、firmware の再起動を検出した時 (Ack の seq が巻き戻った時、または再接続時) に再適用する
 - `HardwareProbe` と `PitchTrim` は保守用の命令であり、plugin には開放しない
 
-### crate 構成 (案)
+### crate 構成
 
 | crate | 役割 |
 | --- | --- |
 | `crates/protocol` | 既存。デバイスプロトコル |
-| `crates/plugin-api` | plugin プロトコルの型、版、上限値、encode/decode |
-| `crates/plugin-sdk` | Rust で plugin を書くための補助 (ハンドシェイク、メッセージループ) と、試験用の mock host |
-| `crates/host` | 既存 CLI に daemon (`stackchan daemon`) と利用者設定の読込みを追加する |
+| `crates/plugin-api` | plugin プロトコルの型、版、上限値、フレームの読み書き。`client` module は Rust で plugin を書くための接続補助 |
+| `crates/host` | 既存 CLI に daemon (`stackchan daemon`)、利用者設定の読込み (`stackchan config`) を追加する |
 | `plugins/clock` | 本リポジトリ内の参照実装。API の検証に用いる |
+
+plugin を書くための補助は crate を分けず `plugin-api` に含める。crate 数を抑え、型と補助の版を一致させるためである。plugin の試験には、pipe で接続した daemon 側を模擬する方法を用いる (`crates/plugin-api/src/client.rs` と `crates/host/src/daemon/tests.rs` の試験を参照)。
 
 非同期ランタイムは導入せず、plugin ごとの読み書きは std のスレッドとチャネルで扱う。依存を増やさないためである。想定する plugin 数 (10 未満) ではスレッド数が問題にならない。
 
@@ -111,22 +112,29 @@ daemon は記録された commit SHA を `hello` の内容とともにログへ�
 
 ### 利用者設定
 
-設定は行単位の簡易な形式とし、パーサは `crates/host` に自前で実装する。TOML や JSON の crate を追加しないためである。受け付ける構文は、section 見出しと、`key = "文字列"` / `key = 整数` / `key = true|false` の行、コメントに限る。未知の key と重複 key はエラーとする。
+設定は行単位の簡易な形式とし、パーサは `crates/host/src/config.rs` に自前で実装する。TOML や JSON の crate を追加しないためである。受け付ける構文は、section 見出し、`key = 値` の行、`#` で始まるコメント行に限る。値は `"文字列"` (エスケープは `\"` と `\` のみ)、整数、`true` / `false`、`["文字列", ...]` のいずれかとする。未知の key、重複した key と section は誤りとし、ファイル名と行番号を示す。
 
 ```
 # 例: <設定ディレクトリ>/stackchan.conf
-[plugin ai-usage]
-command = "C:/Users/<user>/stackchan-plugins/ai-usage/ai-usage.exe"
-rev = "<40 桁の commit SHA>"
-allow_cards = 2
-allow_notify = false
-arg.claude_logs = "C:/Users/<user>/.claude/projects"
+[daemon]
+port = "COM7"        # 省略時は VID:PID から自動検出する
+rotate_s = 10        # 帯の巡回と送り直しの間隔 (1..3600 秒)
 
-[secret bambu]
-access_code = "..."
+[plugin clock]
+command = ["C:/Users/<user>/stackchan-plugins/stackchan-clock.exe"]
+rev = "<40 桁の commit SHA>"
+cards = 1            # 同時に持てる Card の数 (0..8)
+notify = false
+presence = false
+motion = false
+param.utc_offset_minutes = "540"
 ```
 
-`arg.*` は `init` で plugin に渡す値である。path 等の環境依存の値は plugin に既定値を持たせず、利用者設定から与える。
+- `command` は argv である。Linux では隔離コマンドを前置きできる (例: `["podman", "run", "--rm", "-i", ...]`)
+- `cards` / `notify` / `presence` / `motion` は許可の上限であり、plugin が `Hello` で要求したものとの共通部分を `Init` で通知する。省略時はすべて不許可とする
+- `param.*` は `Init` で plugin に渡す値である。path 等の環境依存の値は plugin に既定値を持たせず、利用者設定から与える
+
+secret は同じディレクトリの `secrets.conf` に、同じ構文の `[plugin <id>]` と `param.*` だけで書く。`stackchan.conf` を共有・版管理しても secret が混入しないようにするためである。`secrets.conf` から plugin や権限を追加することはできない。`stackchan config` は設定を検証して要約を表示し、`param` は名前だけを表示する。
 
 ### 設定ディレクトリ
 
@@ -157,20 +165,23 @@ plugin-api の型は host 側でのみ使うため、`String` / `Vec` を用い�
 | `Notify` | 短文、優先度、TTL。capability `notify` が必要 |
 | `Presence` | 表情・活動状態の要求。capability `presence` が必要。採否は daemon が決める |
 | `Emote` | 一時的な表情と視線の要求。capability `presence` が必要。機構部の駆動には加えて `motion` が必要 |
-| `ImageFrame` | 画像領域への 1 フレーム。幅・高さと RGB565 画素列。capability `image` が必要 |
 | `Log` | 診断用の文字列 |
 
 ### daemon -> plugin
 
 | type | 内容 |
 | --- | --- |
-| `Init` | 許可された capability、利用者設定の `arg.*` と secret、表示可能な領域の寸法と上限値 |
+| `Init` | 許可された capability、利用者設定の `param.*` (secret を含む)、表示可能な行数と文字列長の上限 |
 | `Visibility` | 論理 Card が表示中か否か。カメラ等は表示中だけ取得することで負荷を下げる |
 | `Action` | 論理 Card ID と action ID。タップの結果 |
 | `Rejected` | 検証に失敗したメッセージと理由 |
 | `Shutdown` | 終了要求。一定時間内に終了しなければ停止する |
 
-Card の内容はデバイスプロトコルの Card と同じ要素 (Text / Bar / Spacer / Image) で表す。画像は RGB565 で受け取る。daemon に画像 codec を持たせないため、デコードと縮小は plugin 側で行う。
+Card の識別子は plugin ごとに 0..7 とする。Card の内容はデバイスプロトコルの Card と同じ要素 (Text / Bar / Spacer) で表し、帯は 2 行、Overlay は 4 行までとする。Overlay の Card は TTL を必須とする。期限の無い Overlay は顔を隠し続けるためである。
+
+画像 (`ImageFrame`) は P4 で variant の末尾に追加する。画像は RGB565 で受け取り、daemon に画像 codec を持たせないため、デコードと縮小は plugin 側で行う。
+
+`plugin-api` の検証は大きさの一般的な上限 (文字列 256 byte、8 行 × 4 要素) だけを扱い、デバイスに収まるかは daemon が変換時に検証する。plugin API の版をデバイスの上限値の変更から切り離すためである。
 
 ### 通知と手動命令の受付
 
@@ -180,6 +191,8 @@ hook やスクリプトからの単発の通知は `stackchan notify` で送る�
 - CLI は一時ファイルに書いてから rename し、daemon が書きかけのファイルを読まないようにする
 - 取込み時にファイルの大きさを制限し、処理後に削除する。受付からの通知は `push` という組込み plugin からの `Notify` として扱い、同じ検証と流量制限を適用する
 - 既存の `text` / `card` / `face` / `status` / `clear` も、daemon の動作中は同じ経路で送る
+
+受付は P3 で実装する。それまでは daemon が port を占有するため、daemon の動作中に CLI の表示命令を実行すると port を開けずに失敗する。
 
 ## 画面と入力の配分
 
@@ -195,6 +208,11 @@ firmware の slot (BannerTop / BannerBottom / Overlay) はそのまま使い、d
 | presence / emote | 顔と機構部 | 手動の `status` / `face` / `emote` が最優先。plugin からの要求は許可されたものだけを短い TTL で採用する。Emote は連続送信で上書きされるため、plugin ごとに最短間隔を設ける |
 
 firmware 内の表示期限 (TTL) は保険として残し、daemon は表示を切り替えるたびに Card を送り直す。daemon が停止しても古い表示が残らないようにするためである。
+
+- 帯の Card は 2 枚ずつ上下に置き、`rotate_s` ごとに次の組へ進める。優先度の高い順、同順位は設定順と Card 識別子の順に並べる
+- 高優先度以外の通知がある間は、下の帯を通知に、上の帯を Card 1 枚ずつの巡回に使う。高優先度の通知は Overlay に置く
+- firmware 側の TTL は「表示内容の残り時間 (切上げ)」と「`rotate_s` + 5 秒」の短い方とし、`rotate_s` ごとに送り直す
+- 表示を消す場合、現行のデバイスプロトコルには slot 単位の消去が無いため、空の Text を TTL 1 秒で送る。1 秒以内に firmware 側の期限で消える表示には送らない。slot 単位の消去は版 8 で追加を検討する
 
 ### 入力
 
@@ -235,7 +253,7 @@ firmware はタップの扱いとして `Demo` (現行の表情デモ) と `Forw
 | デバイスプロトコル | 既存の単体テストと `decoder_stress` に新 variant を追加する |
 | 描画 | `firmware/examples/simulate.rs` に Card の巡回、通知の割込み、画像領域の状態を追加し、画像で比較する |
 | 対象 OS | 単体・結合テストはコンテナ内 (Linux) で実行する。Windows 向けはコンテナ内の cross build が通ることを `make check` で確認し、実行時の動作は Windows 上で手動の確認手順により確かめる |
-| plugin 作者向け | `plugin-sdk` の mock host で、plugin 単体の出力を CI で検査できるようにする |
+| plugin 作者向け | pipe で接続した daemon 側の模擬で、plugin 単体の出力を CI で検査できるようにする |
 
 ## 段階
 

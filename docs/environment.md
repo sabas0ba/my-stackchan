@@ -72,6 +72,31 @@ Windows 上で CoreS3 に接続する場合は、usbipd で WSL 側に attach �
 
 Windows 上の実行時の動作は CI では検査しない。`make check` は Windows 向けの clippy と build が通ることだけを確認する。
 
+### daemon と plugin
+
+`stackchan daemon` は port を占有し、利用者設定に書いた plugin を起動して表示を調停する。設計と設定の書式は [plugin.md](plugin.md) を参照する。参照実装の時計 plugin (`plugins/clock`) を Windows で動かす例:
+
+```bash
+scripts/container.sh run make build-host-windows
+# 成果物: target/x86_64-pc-windows-gnu-build-std/x86_64-pc-windows-gnu/release/{stackchan,stackchan-clock}.exe
+```
+
+`%APPDATA%\stackchan\stackchan.conf` (または `--config-dir` で指定したディレクトリ) に次を置く。
+
+```
+[plugin clock]
+command = ["C:/path/to/stackchan-clock.exe"]
+cards = 1
+param.utc_offset_minutes = "540"
+```
+
+```powershell
+.\stackchan.exe config    # 設定を検証し、要約を表示する
+.\stackchan.exe daemon    # Ctrl+C で終了する
+```
+
+daemon のログは stderr に出る。daemon を終了すると、表示は最長で `rotate_s` + 5 秒後に firmware 側の期限で消える。daemon の動作中は他の CLI の表示命令は port を開けずに失敗する。
+
 ## Linux ホストからの使い方
 
 nix を持つ場合は `nix develop` または `direnv allow` で開発シェルに入り、`make help` で操作を一覧する。コンテナを使う場合は `make docker-build` / `make docker-shell` / `make docker-check`。

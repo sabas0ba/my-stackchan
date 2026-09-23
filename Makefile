@@ -59,8 +59,8 @@ check-rust: ## Rust の検査 (fmt --check, clippy, test, firmware の build)
 	cargo test --workspace --locked --offline
 	cargo run --locked --offline -p protocol --example decoder_stress -- --cases 20000
 	cargo run --locked --offline -p plugin-api --example frame_stress -- --cases 5000
-	cargo clippy -p my-stackchan-host --all-targets --locked --offline $(WINDOWS_CARGO_FLAGS) -- -D warnings
-	cargo build -p my-stackchan-host --locked --offline --release $(WINDOWS_CARGO_FLAGS)
+	cargo clippy -p my-stackchan-host -p stackchan-clock --all-targets --locked --offline $(WINDOWS_CARGO_FLAGS) -- -D warnings
+	cargo build -p my-stackchan-host -p stackchan-clock --locked --offline --release $(WINDOWS_CARGO_FLAGS)
 	# ルートから実行し、firmware/.cargo の Xtensa/build-std 設定を適用しない。
 	cargo clippy --manifest-path $(FIRMWARE_DIR)/Cargo.toml --lib --locked --offline -- -D warnings
 	cargo test --manifest-path $(FIRMWARE_DIR)/Cargo.toml --lib --locked --offline
@@ -109,8 +109,8 @@ build-host: ## host CLI と protocol を build する
 	cargo build --workspace --locked --release
 
 .PHONY: build-host-windows
-build-host-windows: ## host CLI を Windows 向けに cross build する (target/x86_64-pc-windows-gnu-build-std/)
-	cargo build -p my-stackchan-host --locked --offline --release $(WINDOWS_CARGO_FLAGS)
+build-host-windows: ## host CLI と clock plugin を Windows 向けに cross build する (target/x86_64-pc-windows-gnu-build-std/)
+	cargo build -p my-stackchan-host -p stackchan-clock --locked --offline --release $(WINDOWS_CARGO_FLAGS)
 
 .PHONY: build-firmware
 build-firmware: ## firmware を build する
