@@ -7,6 +7,7 @@
 resolver = "2"
 members = [
   "crates/protocol",
+  "crates/plugin-api",
   "crates/host",
   "crates/fontgen",
 ]

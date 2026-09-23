@@ -58,6 +58,7 @@ check-rust: ## Rust の検査 (fmt --check, clippy, test, firmware の build)
 	cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 	cargo test --workspace --locked --offline
 	cargo run --locked --offline -p protocol --example decoder_stress -- --cases 20000
+	cargo run --locked --offline -p plugin-api --example frame_stress -- --cases 5000
 	cargo clippy -p my-stackchan-host --all-targets --locked --offline $(WINDOWS_CARGO_FLAGS) -- -D warnings
 	cargo build -p my-stackchan-host --locked --offline --release $(WINDOWS_CARGO_FLAGS)
 	# ルートから実行し、firmware/.cargo の Xtensa/build-std 設定を適用しない。
