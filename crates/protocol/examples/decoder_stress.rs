@@ -1,9 +1,9 @@
 //! 固定 seed から COBS フレームを変異させ、decoder の panic を検出する。
 
 use protocol::{
-    Activity, Card, Element, Expression, EyeStyle, Gaze, ImageData, MAX_CARD_ROWS,
-    MAX_CARD_TEXT_BYTES, MAX_FRAME_BYTES, MAX_IMAGE_BYTES, MAX_ROW_ELEMENTS, Message, Presence,
-    Reply, Row, Slot,
+    Activity, Card, Element, Event, Expression, EyeStyle, Gaze, ImageData, InputMode,
+    MAX_CARD_ROWS, MAX_CARD_TEXT_BYTES, MAX_FRAME_BYTES, MAX_IMAGE_BYTES, MAX_ROW_ELEMENTS,
+    Message, Presence, Reply, Row, Slot,
 };
 use serde::Serialize;
 
@@ -47,12 +47,14 @@ fn largest_card() -> Message {
     let mut card = Card {
         slot: Slot::Overlay,
         ttl_s: 65535,
+        id: u16::MAX,
         rows: heapless::Vec::new(),
         image: Some(pixels),
     };
     for row_index in 0..MAX_CARD_ROWS {
         let mut row = Row {
             elements: heapless::Vec::new(),
+            action: Some(u8::MAX),
         };
         for column_index in 0..MAX_ROW_ELEMENTS {
             let element = if row_index == 0 && column_index == 0 {
@@ -92,6 +94,13 @@ fn corpus() -> Vec<Vec<u8>> {
         }),
         wire(&Reply::Ack { seq: u32::MAX }),
         wire(&Reply::Rejected { count: u32::MAX }),
+        wire(&Message::ClearSlot(Slot::BannerBottom)),
+        wire(&Message::InputMode(InputMode::Forward)),
+        wire(&Reply::Event(Event::Tap {
+            slot: Some(Slot::Overlay),
+            card: Some(u16::MAX),
+            action: Some(u8::MAX),
+        })),
         vec![],
         vec![0],
         vec![0xFF, 0],

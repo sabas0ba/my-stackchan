@@ -212,11 +212,11 @@ firmware 内の表示期限 (TTL) は保険として残し、daemon は表示を
 - 帯の Card は 2 枚ずつ上下に置き、`rotate_s` ごとに次の組へ進める。優先度の高い順、同順位は設定順と Card 識別子の順に並べる
 - 高優先度以外の通知がある間は、下の帯を通知に、上の帯を Card 1 枚ずつの巡回に使う。高優先度の通知は Overlay に置く
 - firmware 側の TTL は「表示内容の残り時間 (切上げ)」と「`rotate_s` + 5 秒」の短い方とし、`rotate_s` ごとに送り直す
-- 表示を消す場合、現行のデバイスプロトコルには slot 単位の消去が無いため、空の Text を TTL 1 秒で送る。1 秒以内に firmware 側の期限で消える表示には送らない。slot 単位の消去は版 8 で追加を検討する
+- 表示を消す場合は `ClearSlot` を送る。1 秒以内に firmware 側の期限で消える表示には送らない
 
 ### 入力
 
-- Card の各行は任意で action ID を持つ。firmware はタップ位置を表示中の行と照合し、`Event::Tap { card_id, action }` を返す。行外のタップは `card_id` と `action` を持たない Tap とし、daemon の scheduler が巡回の送り等に使う
+- Card の各行は任意で action ID を持つ。firmware はタップ位置を表示中の Slot と行に照合し、`Event::Tap { slot, card, action }` を返す。行外や Text のタップは `card` / `action` を持たない Tap とし、daemon の scheduler が巡回の送りに使う
 - 座標をそのまま plugin に渡さない。表示位置が変わっても plugin の実装が影響を受けないようにするためである
 
 ### タップの扱いの切替
@@ -227,21 +227,26 @@ firmware はタップの扱いとして `Demo` (現行の表情デモ) と `Forw
 - 状態は RAM 上にのみ保持し、再起動で `Demo` に戻る。firmware に設定の永続化を持たせない方針 ([design.md](design.md#目標と制約)) に従う
 - `Forward` の間は、タップによる firmware 内の動作 (表情デモの進行、Emote の解除) を行わず、Event の送信だけを行う。タップへの反応は daemon と plugin が決める
 - `Forward` の間も Event の送信先が無ければ破棄するだけで、表示には影響しない
+- P3 の受付 (spool) を実装するまでは、daemon の動作中に `stackchan input` を実行できない。daemon の起動前に `forward` へ切り替える。firmware が再起動した場合は `Demo` に戻るため、daemon を止めて切り替え直す
 
 ## デバイスプロトコルの拡張
 
-版を 7 から 8 に上げる。既存 variant の番号は維持する。
+版 8 で次を追加した (P2)。詳細は [protocol.md](protocol.md#タップの通知-版-8) を参照する。
 
-| 追加 | 内容 | 上限の考え方 |
-| --- | --- | --- |
-| `Card.card_id: u16` と `Row.action: Option<u8>` | Card の識別と行単位の操作領域 | 既存の Card 検証を拡張する |
-| `Message::InputMode(Demo \| Forward)` | タップの扱いの切替 | 揮発。Ack を返す |
-| `Message::ImageBegin { id, x, y, w, h }` | 画像領域の開始。領域は Overlay 内 | 最大 320×240 |
-| `Message::ImageRows { id, y, rows }` | RGB565 の行の組。1 フレーム 1024 byte 以内に収まる行数 | 320 px なら 1 フレーム 1 行 |
-| `Message::ImageEnd { id }` | 画像の完了 | - |
-| `Reply::Event(Event)` | タップ等の入力。host の要求とは非同期に送る | Event 用の送信待ちは 1 件とし、あふれた場合は古いものを捨てて破棄数を数える |
+| 追加 | 内容 |
+| --- | --- |
+| `Card.id: u16` と `Row.action: Option<u8>` | Card の識別と行単位の操作領域。daemon は (plugin, Card 識別子) を 1 以上の値に符号化する。0 は識別なし (CLI) |
+| `Message::ClearSlot(Slot)` | 1 つの Slot だけを消す。P1 で用いた「空の Text を TTL 1 秒で送る」方法を置き換えた |
+| `Message::InputMode(Demo \| Forward)` | タップの扱いの切替。揮発。Ack を返す |
+| `Reply::Event(Event::Tap { slot, card, action })` | タップの通知。host の要求とは非同期に送る。送信待ちは 1 件 |
 
-画像はフレームバッファを持たず、受信した行をそのまま LCD の対応位置へ書く。動的確保を行わない方針を維持するためである。フレーム間で画面が部分的に更新されることは許容する (低い更新頻度を前提とする)。160×120 px の画像は約 38 KB であり、1 fps 以下の更新を想定する。
+daemon はタップを次のように振り分ける。
+
+- 行に action を持つ Card のタップは、発生元の plugin へ `Action { card, action }` として返す。表示中でない Card への Action は送らない
+- 帯のそれ以外の位置のタップは、帯の巡回を次の組へ送る
+- 顔の領域と、Overlay の action の無い位置では何もしない
+
+画像領域の分割転送 (`ImageBegin` / `ImageRows` / `ImageEnd`) は P4 で追加する。画像はフレームバッファを持たず、受信した行をそのまま LCD の対応位置へ書く。動的確保を行わない方針を維持するためである。フレーム間で画面が部分的に更新されることは許容する (低い更新頻度を前提とする)。160×120 px の画像は約 38 KB であり、1 fps 以下の更新を想定する。
 
 ## 検証
 

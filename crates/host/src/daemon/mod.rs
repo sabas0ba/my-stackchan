@@ -199,6 +199,9 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
     }
 
     fn tick(&mut self, now: Instant) {
+        for event in self.device.poll() {
+            self.on_device_event(event, now);
+        }
         for index in 0..self.plugins.len() {
             self.plugins[index].start_if_due(index, now, &mut self.spawner, &self.sender);
             if self.plugins[index].check_timeout(now) {
@@ -208,6 +211,31 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
         let plan = self.scheduler.plan(now);
         self.sync_slots(&plan, now);
         self.sync_visibility(&plan);
+    }
+
+    /// タップを振り分ける。行に action がある Card は発生元の plugin へ返し、帯のそれ以外の
+    /// 位置は巡回を次へ送る。顔の領域と Overlay のそれ以外の位置では何もしない。
+    fn on_device_event(&mut self, event: protocol::Event, now: Instant) {
+        let protocol::Event::Tap { slot, card, action } = event;
+        let key = card.and_then(CardKey::from_device_id);
+        match (key, action) {
+            (Some(key), Some(action))
+                if key.plugin < self.plugins.len() && self.visible.contains(&key) =>
+            {
+                self.plugins[key.plugin].send(&HostMessage::Action {
+                    card: key.card,
+                    action,
+                });
+            }
+            _ if matches!(
+                slot,
+                Some(protocol::Slot::BannerTop | protocol::Slot::BannerBottom)
+            ) =>
+            {
+                self.scheduler.advance(now);
+            }
+            _ => {}
+        }
     }
 
     fn sync_slots(&mut self, plan: &Plan, now: Instant) {
@@ -235,16 +263,11 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                     let Some(sent) = previous else {
                         continue;
                     };
-                    // 1 秒以内に firmware 側の期限で消える表示は、空の表示で上書きしない。
-                    if sent.expires > now + Duration::from_secs(1) {
-                        let clear = protocol::Message::Text {
-                            slot,
-                            ttl_s: 1,
-                            text: heapless::String::new(),
-                        };
-                        if !self.send_device(&clear, now) {
-                            continue;
-                        }
+                    // 1 秒以内に firmware 側の期限で消える表示には、消去を送らない。
+                    if sent.expires > now + Duration::from_secs(1)
+                        && !self.send_device(&protocol::Message::ClearSlot(slot), now)
+                    {
+                        continue;
                     }
                     self.sent[index] = None;
                 }
@@ -288,8 +311,12 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
 }
 
 fn slot_message(slot: protocol::Slot, ttl_s: u16, shown: &Shown) -> protocol::Message {
+    let id = match shown.source {
+        Source::Card { key, .. } => key.device_id(),
+        Source::Notice { .. } => 0,
+    };
     match &shown.content {
-        Content::Card(rows) => protocol::Message::Card(convert::device_card(slot, ttl_s, rows)),
+        Content::Card(rows) => protocol::Message::Card(convert::device_card(slot, ttl_s, id, rows)),
         Content::Text(text) => protocol::Message::Text {
             slot,
             ttl_s,

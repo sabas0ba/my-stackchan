@@ -44,21 +44,25 @@ pub fn card_rows(card: &api::CardPut) -> Result<Rows, &'static str> {
                 .push(element)
                 .map_err(|_| "行の要素数が上限を超えます")?;
         }
-        rows.push(protocol::Row { elements })
-            .map_err(|_| "Card の行数が上限を超えます")?;
+        rows.push(protocol::Row {
+            elements,
+            action: row.action,
+        })
+        .map_err(|_| "Card の行数が上限を超えます")?;
     }
     let slot = match card.placement {
         api::Placement::Banner => BANNER_FOR_VALIDATION,
         api::Placement::Overlay => protocol::Slot::Overlay,
     };
-    device_card(slot, 0, &rows).validate()?;
+    device_card(slot, 0, 0, &rows).validate()?;
     Ok(rows)
 }
 
-pub fn device_card(slot: protocol::Slot, ttl_s: u16, rows: &Rows) -> protocol::Card {
+pub fn device_card(slot: protocol::Slot, ttl_s: u16, id: u16, rows: &Rows) -> protocol::Card {
     protocol::Card {
         slot,
         ttl_s,
+        id,
         rows: rows.clone(),
         image: None,
     }

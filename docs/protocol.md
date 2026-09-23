@@ -4,7 +4,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 
 ## 版
 
-`protocol::VERSION` (現在 7)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
+`protocol::VERSION` (現在 8)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
 
 ## 物理層
 
@@ -31,6 +31,10 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 | `Card(Card)` | 行と要素からなる表示内容を 1 Slot に配置する | 最大 4 行、各行最大 2 要素 |
 | `Presence(Presence)` | 活動状態・表情・視線を一括更新する | 詳細は UTF-8 で最大 20 byte |
 | `Emote(Emote)` | 表情と二軸視線を一時的に重ねる | 視線 -100..100、強度 0..100、継続 100..10000 ms |
+| `HardwareProbe` | 機構部の状態を読む | - |
+| `PitchTrim(PitchTrim)` | ピッチ中心の補正 | -96..64 step |
+| `ClearSlot(Slot)` | 1 つの Slot だけを消す | - |
+| `InputMode(InputMode)` | タップの扱いを `Demo` / `Forward` に切り替える | - |
 
 `protocol::Reply` (firmware -> host):
 
@@ -39,8 +43,10 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 | `Pong { nonce, version }` | `Ping` への応答 |
 | `Ack { seq }` | 描画に成功した Text / Card / Presence / Emote / Clear の通し番号 |
 | `Rejected { count }` | 破棄したフレームの累計。診断用 |
+| `HardwareStatus { .. }` | `HardwareProbe` への応答 |
+| `Event(Event)` | 要求と独立に送る入力。現在は `Tap { slot, card, action }` のみ |
 
-版 1 は Card、版 2 は Card への画像追加、版 3 は Presence、版 6 は Emote・二軸視線・HardwareProbe、版 7 は PitchTrim と HardwareStatus の補正値追加に対応する。版 4・5 は使用していない。既存 Message variant の番号は維持する。
+版 1 は Card、版 2 は Card への画像追加、版 3 は Presence、版 6 は Emote・二軸視線・HardwareProbe、版 7 は PitchTrim と HardwareStatus の補正値追加、版 8 は Card の識別子・行の action・ClearSlot・InputMode・Event に対応する。版 4・5 は使用していない。既存 Message variant の番号は維持する。
 
 ### 現在の実装範囲
 
@@ -163,6 +169,19 @@ host は描画応答を最大 5 秒待つ。seq は起動時 0、Text / Card / P
 元に戻せないため、表示装置の障害が解消した後に表示命令を再送する。
 
 decoder の coverage-guided fuzz 検証は別途実施する。
+
+### タップの通知 (版 8)
+
+版 8 は、画面のタップを host 側の plugin で扱うために追加した。設計は [plugin.md](plugin.md) を参照する。
+
+- `Card.id` は host が付ける識別子で、0 は識別なしを表す。CLI の `card` は 0 を送る。`Row.action` はタップ時に返す値で、None の行は行を区別しない
+- `InputMode` は RAM にのみ保持し、起動時と再起動後は `Demo` である。`Demo` では従来どおり表情デモを進め、`Forward` では firmware 内で反応せずに `Event::Tap` を送る。表示を変えないため描画せず、Ack の通し番号だけを進める
+- `Event::Tap` はタップの立ち上がりで 1 回送る。`slot` はタップ位置に表示中の Slot で、Overlay の表示中は画面全体が Overlay である。帯の領域 (上端から 48 px、下端から 48 px) に表示が無い位置と顔の領域では `slot` を None とする。`card` は表示中の Card の識別子 (0 の場合と Text の場合は None)、`action` は位置を含む行の値である。行は領域の上端 4 px から行高の順に並ぶ (描画と同じ配置)。横方向の位置は照合に使わない
+- 送信待ちの Event は 1 件だけ保持し、新しいタップで置き換える。要求への応答を優先し、応答の送信が無い時に送る。host の port が開かれていない間は、応答と同じく 2 秒後に破棄する
+- host は応答を待つ間に `Event` を受信し得る。CLI は Event を読み飛ばし、daemon は保持して待機中にも読み出す
+- `ClearSlot` は指定した Slot の内容と期限だけを消し、他の Slot と Presence は保持する
+
+タッチの座標は FT6336U の P1_XH/XL/YH/YL (0x03..0x06) を接触点数 (0x02) と同じ転送で読み、画面の範囲に丸める。
 
 ## 不変条件
 

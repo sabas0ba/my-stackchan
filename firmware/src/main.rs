@@ -158,6 +158,8 @@ fn main() -> ! {
     }
     let mut tap_detector = touch::TapDetector::default();
     let mut next_touch_poll_ms = 0u64;
+    // host へ送る入力は最新の 1 件だけを保持する。応答の送信を優先し、空いた時に送る。
+    let mut pending_event: Option<protocol::Event> = None;
 
     let mut actuator_ready = false;
     if power::prepare_body_power(&mut i2c, &mut delay).is_ok() {
@@ -224,10 +226,18 @@ fn main() -> ! {
                     .is_ok();
                 tap_detector = touch::TapDetector::default();
             } else {
-                match touch::read_pressed(&mut i2c) {
-                    Ok(pressed) if tap_detector.sample(pressed) => {
-                        if controller.tap(now_ms, &mut display).is_err() {
-                            esp_println::println!("touch demo drawing failed");
+                match touch::read_point(&mut i2c) {
+                    Ok(point) if tap_detector.sample(point.is_some()) => {
+                        let (_, y) = point.unwrap_or_default();
+                        match controller.input_mode() {
+                            protocol::InputMode::Demo => {
+                                if controller.tap(now_ms, &mut display).is_err() {
+                                    esp_println::println!("touch demo drawing failed");
+                                }
+                            }
+                            protocol::InputMode::Forward => {
+                                pending_event = Some(controller.hit(y));
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -321,6 +331,15 @@ fn main() -> ! {
                     break;
                 }
             }
+        }
+        if tx_len == 0
+            && let Some(event) = pending_event.take()
+        {
+            tx[0] = 0;
+            tx_len = 1 + protocol::encode(&protocol::Reply::Event(event), &mut tx[1..])
+                .expect("event buffer capacity")
+                .len();
+            tx_started_ms = Instant::now().duration_since_epoch().as_millis();
         }
         while tx_sent < tx_len {
             if usb.write_byte_nb(tx[tx_sent]).is_err() {

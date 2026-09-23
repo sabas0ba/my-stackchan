@@ -91,9 +91,12 @@ param.utc_offset_minutes = "540"
 ```
 
 ```powershell
-.\stackchan.exe config    # 設定を検証し、要約を表示する
-.\stackchan.exe daemon    # Ctrl+C で終了する
+.\stackchan.exe config          # 設定を検証し、要約を表示する
+.\stackchan.exe input forward   # タップを host へ送る (任意。再起動で demo に戻る)
+.\stackchan.exe daemon          # Ctrl+C で終了する
 ```
+
+`input forward` の間、帯の Card の行をタップすると、その行に action を持つ plugin へ通知される。帯のそれ以外の位置をタップすると帯の巡回が次の組へ進む。`input demo` で従来の表情デモに戻す。daemon の動作中は port を占有するため、切替は daemon の起動前に行う。
 
 daemon のログは stderr に出る。daemon を終了すると、表示は最長で `rotate_s` + 5 秒後に firmware 側の期限で消える。daemon の動作中は他の CLI の表示命令は port を開けずに失敗する。
 

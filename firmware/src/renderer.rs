@@ -824,6 +824,7 @@ mod tests {
                 },
             ])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         rows.push(Row {
@@ -832,6 +833,7 @@ mod tests {
                 label: "Usage".try_into().unwrap(),
             }])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         let mut controller = Controller::default();
@@ -841,6 +843,7 @@ mod tests {
                 Message::Card(Card {
                     slot: Slot::BannerTop,
                     ttl_s: 0,
+                    id: 0,
                     rows,
                     image: None,
                 }),
@@ -867,11 +870,13 @@ mod tests {
                 Element::Image,
             ])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         let card = Card {
             slot: Slot::BannerTop,
             ttl_s: 0,
+            id: 0,
             rows,
             image: Some(ImageData {
                 width: 2,

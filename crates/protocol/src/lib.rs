@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。互換性の無い変更を行った場合に増やす。
-pub const VERSION: u8 = 7;
+pub const VERSION: u8 = 8;
 
 /// 1 メッセージ中のテキストの最大バイト数 (UTF-8)。
 pub const MAX_TEXT_BYTES: usize = 512;
@@ -160,6 +160,8 @@ impl PitchTrim {
 pub struct Card {
     pub slot: Slot,
     pub ttl_s: u16,
+    /// host が付ける識別子。タップの通知 (`Event::Tap`) で返す。0 は識別なしを表す。
+    pub id: u16,
     pub rows: heapless::Vec<Row, MAX_CARD_ROWS>,
     pub image: Option<ImageData>,
 }
@@ -175,6 +177,8 @@ pub struct ImageData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
     pub elements: heapless::Vec<Element, MAX_ROW_ELEMENTS>,
+    /// タップ時に `Event::Tap` で返す値。None の行は行を区別せずに通知する。
+    pub action: Option<u8>,
 }
 
 impl Row {
@@ -251,6 +255,27 @@ impl Card {
     }
 }
 
+/// 画面のタップの扱い。firmware の RAM にのみ保持し、再起動すると `Demo` に戻る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputMode {
+    /// firmware 内の表情デモを進める。host が無くても単体で動作を確認できる。
+    Demo,
+    /// firmware 内では反応せず、`Event::Tap` を host へ送る。
+    Forward,
+}
+
+/// firmware が host の要求と独立に送る入力。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Event {
+    /// タップした位置の slot と、そこに表示中の Card と行。顔の領域では slot が None。
+    /// Card の識別子が 0 (識別なし) または Text の場合、card は None。
+    Tap {
+        slot: Option<Slot>,
+        card: Option<u16>,
+        action: Option<u8>,
+    },
+}
+
 /// host から firmware へ送るメッセージ。
 ///
 /// firmware は本 enum の variant に対応する描画以外の動作を行わない。
@@ -280,6 +305,10 @@ pub enum Message {
     HardwareProbe,
     /// ピッチの中心位置を RAM 上だけで補正する。
     PitchTrim(PitchTrim),
+    /// 1 つの Slot だけを消す。
+    ClearSlot(Slot),
+    /// タップの扱いを切り替える。
+    InputMode(InputMode),
 }
 
 /// firmware から host へ返す応答。
@@ -320,6 +349,8 @@ pub enum Reply {
         servo_y_torque: Option<bool>,
         enabled: bool,
     },
+    /// 要求への応答とは独立に送る入力。host は応答を待つ間に受信しても取り違えないこと。
+    Event(Event),
 }
 
 /// encode/decode の失敗。
@@ -492,6 +523,7 @@ mod tests {
                 },
             ])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         rows.push(Row {
@@ -500,11 +532,13 @@ mod tests {
                 label: "75%".try_into().unwrap(),
             }])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         Card {
             slot,
             ttl_s: 30,
+            id: 1,
             rows,
             image: None,
         }
@@ -567,6 +601,7 @@ mod tests {
         struct ForgedCard {
             slot: Slot,
             ttl_s: u16,
+            id: u16,
             rows: heapless::Vec<Row, 5>,
         }
         #[derive(Serialize)]
@@ -591,6 +626,7 @@ mod tests {
                 text: "x".try_into().unwrap(),
             }])
             .unwrap(),
+            action: None,
         };
         let mut rows = heapless::Vec::<Row, 5>::new();
         for _ in 0..5 {
@@ -599,6 +635,7 @@ mod tests {
         let forged = ForgedMessage::Card(ForgedCard {
             slot: Slot::Overlay,
             ttl_s: 0,
+            id: 0,
             rows,
         });
         let mut frame = [0; MAX_FRAME_BYTES];
@@ -638,6 +675,7 @@ mod tests {
         let mut card = Card {
             slot: Slot::Overlay,
             ttl_s: 0,
+            id: u16::MAX,
             rows: heapless::Vec::new(),
             image: Some(ImageData {
                 width: 16,
@@ -652,6 +690,7 @@ mod tests {
         for row_index in 0..MAX_CARD_ROWS {
             let mut row = Row {
                 elements: heapless::Vec::new(),
+                action: Some(u8::MAX),
             };
             for column_index in 0..MAX_ROW_ELEMENTS {
                 row.elements
@@ -735,5 +774,28 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn version_8_variants_roundtrip_after_existing_numbers() {
+        let mut frame = [0; MAX_FRAME_BYTES];
+        for (message, variant) in [
+            (Message::ClearSlot(Slot::BannerBottom), 8),
+            (Message::InputMode(InputMode::Forward), 9),
+        ] {
+            let len = encode(&message, &mut frame).unwrap().len();
+            let mut received = frame;
+            assert_eq!(decode::<Message>(&mut received[..len]), Ok(message));
+            assert_eq!(received[0], variant);
+        }
+        let event = Reply::Event(Event::Tap {
+            slot: Some(Slot::BannerTop),
+            card: Some(u16::MAX),
+            action: Some(3),
+        });
+        let len = encode(&event, &mut frame).unwrap().len();
+        let mut received = frame;
+        assert_eq!(decode::<Reply>(&mut received[..len]), Ok(event));
+        assert_eq!(received[0], 4);
     }
 }

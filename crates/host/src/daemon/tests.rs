@@ -18,6 +18,7 @@ use crate::config::PluginConfig;
 #[derive(Clone, Default)]
 struct FakeDevice {
     sent: Arc<Mutex<Vec<protocol::Message>>>,
+    events: Arc<Mutex<Vec<protocol::Event>>>,
 }
 
 impl FakeDevice {
@@ -30,6 +31,10 @@ impl Device for FakeDevice {
     fn send(&mut self, message: &protocol::Message, _now: Instant) -> Result<Delivery, String> {
         self.sent.lock().unwrap().push(message.clone());
         Ok(Delivery::Delivered)
+    }
+
+    fn poll(&mut self) -> Vec<protocol::Event> {
+        std::mem::take(&mut *self.events.lock().unwrap())
     }
 }
 
@@ -303,7 +308,10 @@ fn exited_plugin_is_cleared_and_restarted_with_backoff() {
     plugin.join().unwrap();
     harness.run_until("帯の消去", |sent| {
         sent.iter().any(|message| {
-            matches!(message, protocol::Message::Text { slot: protocol::Slot::BannerTop, ttl_s: 1, text } if text.is_empty())
+            matches!(
+                message,
+                protocol::Message::ClearSlot(protocol::Slot::BannerTop)
+            )
         })
     });
     assert_eq!(harness.spawned.load(Ordering::SeqCst), 1);
@@ -338,4 +346,62 @@ fn protocol_violation_stops_the_plugin() {
             .iter()
             .all(|message| card_text(message).is_none())
     );
+}
+
+#[test]
+fn tap_on_card_row_is_returned_to_the_plugin_as_action() {
+    let mut harness = Harness::new(
+        "cards = 1
+",
+    );
+    let plugin = harness.start_plugin(|reader, writer| {
+        let capabilities = api::Capabilities {
+            cards: 1,
+            ..api::Capabilities::default()
+        };
+        let mut connection = client::connect(reader, writer, hello(capabilities)).unwrap();
+        let api::PluginMessage::CardPut(mut card) = banner(3, "tap me") else {
+            unreachable!()
+        };
+        card.rows[0].action = Some(5);
+        connection.send(&api::PluginMessage::CardPut(card)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Ok(Some(HostMessage::Action { card, action })) =
+                connection.recv_timeout(Duration::from_millis(50))
+            {
+                return Some((card, action));
+            }
+        }
+        None
+    });
+    harness.run_until("Card の送信", |sent| {
+        sent.iter().any(|message| card_text(message).is_some())
+    });
+    let sent = harness.device.messages();
+    let card = sent
+        .iter()
+        .find_map(|message| match message {
+            protocol::Message::Card(card) => Some(card.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(card.id, 0, "daemon の Card には識別子が付く");
+    assert_eq!(card.rows[0].action, Some(5));
+    harness
+        .device
+        .events
+        .lock()
+        .unwrap()
+        .push(protocol::Event::Tap {
+            slot: Some(protocol::Slot::BannerTop),
+            card: Some(card.id),
+            action: Some(5),
+        });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !plugin.is_finished() {
+        assert!(Instant::now() < deadline, "Action が plugin に届きません");
+        harness.daemon.step(Duration::from_millis(20));
+    }
+    assert_eq!(plugin.join().unwrap(), Some((3, 5)));
 }

@@ -25,6 +25,24 @@ pub struct CardKey {
     pub card: u8,
 }
 
+impl CardKey {
+    /// デバイスの Card 識別子。0 は識別なしに予約されているため 1 から始める。
+    /// plugin は設定の上限 (16) まで、Card は plugin API の上限 (8) までで u16 に収まる。
+    pub fn device_id(self) -> u16 {
+        let index = self.plugin * usize::from(plugin_api::MAX_CARDS) + usize::from(self.card);
+        u16::try_from(index + 1).expect("plugin 数と Card 数の上限で u16 に収まる")
+    }
+
+    pub fn from_device_id(id: u16) -> Option<Self> {
+        let index = usize::from(id.checked_sub(1)?);
+        let cards = usize::from(plugin_api::MAX_CARDS);
+        Some(Self {
+            plugin: index / cards,
+            card: (index % cards) as u8,
+        })
+    }
+}
+
 /// 表示内容の出所と版。同じ値なら同じ内容であり、送り直す必要が無い。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -210,6 +228,12 @@ impl Scheduler {
         }
     }
 
+    /// 帯の巡回を次へ送る。利用者が帯の空いた所をタップした場合に使う。
+    pub fn advance(&mut self, now: Instant) {
+        self.page = self.page.wrapping_add(1);
+        self.next_rotation = Some(now + self.rotate);
+    }
+
     /// 現在の割当てを求める。巡回の位置もここで進める。
     pub fn plan(&mut self, now: Instant) -> Plan {
         self.expire(now);
@@ -290,7 +314,11 @@ mod tests {
                 text: text.try_into().unwrap(),
             })
             .unwrap();
-        rows.push(protocol::Row { elements }).unwrap();
+        rows.push(protocol::Row {
+            elements,
+            action: None,
+        })
+        .unwrap();
         rows
     }
 
@@ -447,6 +475,31 @@ mod tests {
 
         let plan = scheduler.plan(now + Duration::from_secs(13));
         assert!(plan.overlay.is_none());
+    }
+
+    #[test]
+    fn device_ids_roundtrip_and_reserve_zero() {
+        assert_eq!(CardKey::from_device_id(0), None);
+        for key in [key(0, 0), key(0, 7), key(15, 7), key(3, 2)] {
+            assert_ne!(key.device_id(), 0);
+            assert_eq!(CardKey::from_device_id(key.device_id()), Some(key));
+        }
+    }
+
+    #[test]
+    fn advance_moves_to_next_page_and_restarts_interval() {
+        let now = Instant::now();
+        let mut scheduler = Scheduler::new(Duration::from_secs(10));
+        for card in 0..4 {
+            put(&mut scheduler, key(0, card), Priority::Normal, now);
+        }
+        assert_eq!(card_key(&scheduler.plan(now).top), Some(key(0, 0)));
+        scheduler.advance(now + Duration::from_secs(5));
+        let plan = scheduler.plan(now + Duration::from_secs(5));
+        assert_eq!(card_key(&plan.top), Some(key(0, 2)));
+        // 送った時点から間隔を数え直す。
+        let plan = scheduler.plan(now + Duration::from_secs(14));
+        assert_eq!(card_key(&plan.top), Some(key(0, 2)));
     }
 
     #[test]
