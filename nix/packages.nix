@@ -51,6 +51,13 @@ with pkgs;
   (callPackage ./esp-rust.nix { })
   (callPackage ./xtensa-gcc.nix { })
 
+  # --- Windows 向け host CLI の linker ------------------------------------
+  # host 側の crate を x86_64-pc-windows-gnu 向けに cross build する (docs/plugin.md)。
+  # 上流の rust-std は Espressif fork の compiler と組み合わせられないため、std は
+  # build-std で構築し、linker と C runtime だけを nixpkgs の mingw-w64 から取る。
+  # winpthreads の所在は nix/devshell.nix が環境変数で cargo に渡す。
+  pkgsCross.mingwW64.stdenv.cc
+
   # --- 書込ツール ---------------------------------------------------------
   espflash
 

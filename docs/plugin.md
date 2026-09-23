@@ -262,13 +262,13 @@ Claude / Codex 使用率は P3 の最初の外部 plugin とする。design.md �
 
 ## Windows 向けの cross build
 
-host 側の crate は Espressif fork の toolchain (nix/esp-rust.nix) で構築している。上流の `rust-std-x86_64-pc-windows-gnu` は compiler の commit が異なり、この toolchain では使えない。そのため次の構成を第一案とし、P1 の最初に成立性を確認する。
+host 側の crate は Espressif fork の toolchain (nix/esp-rust.nix) で構築している。上流の `rust-std-x86_64-pc-windows-gnu` は compiler の commit が異なり、この toolchain では使えない。そのため次の構成とした (2026-09-23 に既存 CLI で成立を確認)。
 
 - 標準ライブラリは同梱の rust-src から `-Z build-std` で構築する (firmware と同じ方式)
 - linker と C runtime は nixpkgs の mingw-w64 cross toolchain を用いる。版は既存の nixpkgs の rev で固定される
-- `serialport` の Windows 実装が用いる `windows-sys` 0.52 系は、すでに `Cargo.lock` に含まれる。ただし Windows 向けの構築で初めてコンパイル対象となるため、調査を `docs/dependencies.md` に追記する。`windows_x86_64_gnu` は構築済みの import library を同梱する crate であり、その点も記録する
+- Windows 向けで新たにコンパイル対象となる crate (`windows-sys` 等) の調査は [dependencies.md](dependencies.md#windows-向け-host-cli-の追加調査-2026-09-23) に記録した
 
-成立しない場合は、Windows 向けだけ別の toolchain を nix で固定する案を検討する。
+手順は [environment.md](environment.md#windows-ネイティブの-host-cli) を参照する。
 
 ## 未決事項
 

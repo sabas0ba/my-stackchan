@@ -52,6 +52,26 @@ scripts/container.sh device stackchan ping
 
 取り外す場合は `usbipd detach --busid <BUSID>`。
 
+### Windows ネイティブの host CLI
+
+host CLI はコンテナ内で Windows 向けに cross build できる。Windows 上で直接実行するため、toolchain をホストに導入する必要はない。
+
+```bash
+scripts/container.sh run make build-host-windows
+# 成果物: target/x86_64-pc-windows-gnu-build-std/x86_64-pc-windows-gnu/release/stackchan.exe
+```
+
+Espressif fork の toolchain には windows-gnu の std が無いため、同梱の rust-src から build-std で構築する。linker と winpthreads は nixpkgs の mingw-w64 を用い、winpthreads は静的にリンクされる。exe が参照する DLL は Windows に標準で含まれるもののみである。
+
+Windows 上で CoreS3 に接続する場合は、usbipd で WSL 側に attach していないこと (`usbipd list` で `Not shared` または `Shared`) を確認する。
+
+```powershell
+.\stackchan.exe list-ports   # CoreS3 は 303a:1001 の COMx として現れる
+.\stackchan.exe ping
+```
+
+Windows 上の実行時の動作は CI では検査しない。`make check` は Windows 向けの clippy と build が通ることだけを確認する。
+
 ## Linux ホストからの使い方
 
 nix を持つ場合は `nix develop` または `direnv allow` で開発シェルに入り、`make help` で操作を一覧する。コンテナを使う場合は `make docker-build` / `make docker-shell` / `make docker-check`。
@@ -240,7 +260,7 @@ CoreS3 の画面を1回タップするとデモの先頭 `01/12 HAPPY` を表示
 ### 静的検査・単体テスト
 
 ```bash
-make check        # nix flake check + 環境 + Rust の fmt/clippy/test
+make check        # nix flake check + 環境 + Rust の fmt/clippy/test + Windows 向け clippy/build
 make lint         # 静的解析のみ
 make fmt          # 整形
 make audit        # cargo-deny による advisory と license の検査 (ネットワークを使用)

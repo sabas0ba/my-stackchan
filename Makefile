@@ -13,6 +13,13 @@ IMAGE ?= my-stackchan-dev
 # firmware は host とは別の workspace (target と build-std が異なるため)。
 FIRMWARE_DIR := firmware
 
+# Windows 向けの host CLI。Espressif fork の toolchain には windows-gnu の std が無いため
+# build-std で構築する (docs/plugin.md)。linker の設定は開発シェルの環境変数にある。
+# target dir を分けるのは、build-std の有無で std の成果物が衝突しないようにするため。
+WINDOWS_TARGET := x86_64-pc-windows-gnu
+WINDOWS_CARGO_FLAGS := --target $(WINDOWS_TARGET) -Z build-std=std,panic_abort \
+	--target-dir target/$(WINDOWS_TARGET)-build-std
+
 .PHONY: help
 help: ## 本ヘルプを表示する
 	@printf '使用方法: make <target>\n\n'
@@ -51,6 +58,8 @@ check-rust: ## Rust の検査 (fmt --check, clippy, test, firmware の build)
 	cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 	cargo test --workspace --locked --offline
 	cargo run --locked --offline -p protocol --example decoder_stress -- --cases 20000
+	cargo clippy -p my-stackchan-host --all-targets --locked --offline $(WINDOWS_CARGO_FLAGS) -- -D warnings
+	cargo build -p my-stackchan-host --locked --offline --release $(WINDOWS_CARGO_FLAGS)
 	# ルートから実行し、firmware/.cargo の Xtensa/build-std 設定を適用しない。
 	cargo clippy --manifest-path $(FIRMWARE_DIR)/Cargo.toml --lib --locked --offline -- -D warnings
 	cargo test --manifest-path $(FIRMWARE_DIR)/Cargo.toml --lib --locked --offline
@@ -97,6 +106,10 @@ build: build-host build-firmware ## host と firmware を build する
 .PHONY: build-host
 build-host: ## host CLI と protocol を build する
 	cargo build --workspace --locked --release
+
+.PHONY: build-host-windows
+build-host-windows: ## host CLI を Windows 向けに cross build する (target/x86_64-pc-windows-gnu-build-std/)
+	cargo build -p my-stackchan-host --locked --offline --release $(WINDOWS_CARGO_FLAGS)
 
 .PHONY: build-firmware
 build-firmware: ## firmware を build する
