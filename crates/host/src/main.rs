@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 mod bmp;
 mod config;
+mod daemon;
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
 const ESP_USB_SERIAL_JTAG: (u16, u16) = (0x303A, 0x1001);
@@ -34,6 +35,8 @@ struct Cli {
 enum Command {
     /// 利用者設定を検証し、要約を表示する。secret の値は表示しない。
     Config,
+    /// port を占有し、設定した plugin を起動して表示を調停する。
+    Daemon,
     /// M5 StackChan 本体の I²C 拡張器と出力の状態を読み取る。
     Hardware {
         #[arg(long)]
@@ -272,6 +275,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let trim_file = pitch_trim_file(cli.pitch_trim_file);
     match cli.command {
         Command::Config => show_config(cli.config_dir),
+        Command::Daemon => {
+            let dir = config::resolve_dir(cli.config_dir)?;
+            daemon::run(config::load(&dir)?, trim_file)
+        }
         Command::Hardware { port } => hardware(port),
         Command::PitchTrim {
             port,
