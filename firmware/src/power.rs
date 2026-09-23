@@ -8,6 +8,8 @@ const LCD_RESET: u8 = 1 << 1;
 const TOUCH_RESET: u8 = 1 << 0;
 const P0_PUSH_PULL: u8 = 1 << 4;
 const BACKLIGHT_ENABLE: u8 = 1 << 7;
+const BUS_OUT_ENABLE: u8 = 1 << 1;
+const BOOST_ENABLE: u8 = 1 << 7;
 
 fn update<I: I2c>(
     bus: &mut I,
@@ -56,6 +58,30 @@ pub fn set_backlight<I: I2c>(bus: &mut I, enabled: bool) -> Result<(), I::Error>
         BACKLIGHT_ENABLE,
         if enabled { BACKLIGHT_ENABLE } else { 0 },
     )
+}
+
+/// StackChan ボディの 5 V を供給する。BOOST を先に有効化する。
+/// AW9523B の未使用 bit と USB_OTG_EN は変更しない。
+pub fn prepare_body_power<I: I2c>(bus: &mut I, delay: &mut impl DelayNs) -> Result<(), I::Error> {
+    // P1_7: BOOST_EN。出力モードにしてから出力ラッチを High にする。
+    update(bus, AW9523, 0x13, BOOST_ENABLE, BOOST_ENABLE)?;
+    update(bus, AW9523, 0x05, BOOST_ENABLE, 0)?;
+    update(bus, AW9523, 0x03, BOOST_ENABLE, BOOST_ENABLE)?;
+    delay.delay_ms(20);
+    // P0_1: BUS_OUT_EN。BOOST が立ち上がった後に有効化する。
+    update(bus, AW9523, 0x12, BUS_OUT_ENABLE, BUS_OUT_ENABLE)?;
+    update(bus, AW9523, 0x04, BUS_OUT_ENABLE, 0)?;
+    update(bus, AW9523, 0x02, BUS_OUT_ENABLE, BUS_OUT_ENABLE)?;
+    delay.delay_ms(20);
+    Ok(())
+}
+
+pub fn body_power_latches<I: I2c>(bus: &mut I) -> Result<(u8, u8), I::Error> {
+    let mut bus_out = [0];
+    let mut boost_out = [0];
+    bus.write_read(AW9523, &[0x02], &mut bus_out)?;
+    bus.write_read(AW9523, &[0x03], &mut boost_out)?;
+    Ok((bus_out[0], boost_out[0]))
 }
 
 #[cfg(test)]
@@ -139,6 +165,22 @@ mod tests {
             prepare_display(&mut bus, &mut delay).unwrap();
             assert_eq!(bus.registers, expected);
             assert_eq!(delay.0, [20_000_000, 120_000_000]);
+        }
+    }
+
+    #[test]
+    fn body_power_enables_boost_before_bus_without_touching_other_bits() {
+        for initial in [0x00, 0x55, 0xaa, 0xff] {
+            let mut bus = Bus::new(initial);
+            let mut delay = Delay::default();
+            prepare_body_power(&mut bus, &mut delay).unwrap();
+            assert_eq!(bus.registers[1][0x13], initial | BOOST_ENABLE);
+            assert_eq!(bus.registers[1][0x05], initial & !BOOST_ENABLE);
+            assert_eq!(bus.registers[1][0x03], initial | BOOST_ENABLE);
+            assert_eq!(bus.registers[1][0x12], initial | BUS_OUT_ENABLE);
+            assert_eq!(bus.registers[1][0x04], initial & !BUS_OUT_ENABLE);
+            assert_eq!(bus.registers[1][0x02], initial | BUS_OUT_ENABLE);
+            assert_eq!(delay.0, [20_000_000, 20_000_000]);
         }
     }
 

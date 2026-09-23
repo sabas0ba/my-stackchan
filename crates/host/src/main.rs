@@ -13,16 +13,53 @@ mod bmp;
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
 const ESP_USB_SERIAL_JTAG: (u16, u16) = (0x303A, 0x1001);
+const DEFAULT_PITCH_TRIM_FILE: &str = ".work/pitch-trim.txt";
 
 #[derive(Parser)]
 #[command(name = "stackchan", version, about = "my-stackchan host CLI")]
 struct Cli {
+    /// 設置場所ごとのピッチ補正ファイル。既定は .work/pitch-trim.txt。
+    #[arg(long, global = true)]
+    pitch_trim_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// M5 StackChan 本体の I²C 拡張器と出力の状態を読み取る。
+    Hardware {
+        #[arg(long)]
+        port: Option<String>,
+    },
+    /// サーボのピッチ中心を RAM 上だけで補正する。再起動時は 0 に戻る。
+    PitchTrim {
+        #[arg(long)]
+        port: Option<String>,
+        /// 約 0.3125 度/step。-96..64、負が下向き。
+        #[arg(long, allow_hyphen_values = true)]
+        raw_steps: i16,
+        /// 実機での受理後、ホスト側の補正ファイルにも保存する。
+        #[arg(long)]
+        save: bool,
+    },
+    /// 一時的な表情を、連続値の視線と継続時間で指定する。
+    Emote {
+        #[arg(long)]
+        port: Option<String>,
+        #[arg(long, value_enum)]
+        expression: FaceExpression,
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        gaze_x: i16,
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        gaze_y: i16,
+        #[arg(long, value_enum, default_value = "auto")]
+        eyes: HostEyeStyle,
+        #[arg(long, default_value_t = 50)]
+        intensity: u8,
+        #[arg(long, default_value_t = 1000)]
+        duration_ms: u16,
+    },
     /// 表情と視線を表示する。
     Face {
         #[arg(long)]
@@ -225,7 +262,40 @@ impl From<TextSlot> for protocol::Slot {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let trim_file = pitch_trim_file(cli.pitch_trim_file);
     match cli.command {
+        Command::Hardware { port } => hardware(port),
+        Command::PitchTrim {
+            port,
+            raw_steps,
+            save,
+        } => {
+            send_display(port, &pitch_trim_message(raw_steps)?, None)?;
+            if save {
+                save_pitch_trim(&trim_file, raw_steps)?;
+            }
+            Ok(())
+        }
+        Command::Emote {
+            port,
+            expression,
+            gaze_x,
+            gaze_y,
+            eyes,
+            intensity,
+            duration_ms,
+        } => send_display(
+            port,
+            &emote_message(
+                expression.into(),
+                gaze_x,
+                gaze_y,
+                eyes.into(),
+                intensity,
+                duration_ms,
+            )?,
+            Some(&trim_file),
+        ),
         Command::Face {
             port,
             expression,
@@ -235,6 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => send_display(
             port,
             &presence_message(None, "", expression.into(), gaze.into(), eyes.into(), ttl)?,
+            Some(&trim_file),
         ),
         Command::Status {
             port,
@@ -261,6 +332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eyes.into(),
                     ttl,
                 )?,
+                Some(&trim_file),
             )
         }
         Command::ListPorts => list_ports(),
@@ -270,8 +342,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             slot,
             ttl,
             text,
-        } => send_display(port, &text_message(slot, ttl, &text)?),
-        Command::Clear { port } => send_display(port, &protocol::Message::Clear),
+        } => send_display(port, &text_message(slot, ttl, &text)?, Some(&trim_file)),
+        Command::Clear { port } => send_display(port, &protocol::Message::Clear, Some(&trim_file)),
         Command::Card {
             port,
             slot,
@@ -311,6 +383,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .transpose()?,
                 },
             )?,
+            Some(&trim_file),
         ),
     }
 }
@@ -354,7 +427,7 @@ fn open_port(
         None => detect_port()?,
     };
     let port = serialport::new(&port_name, 115_200)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(5))
         .open()?;
     // 書き込み直後に残る bootloader のログを今回の応答に混入させない。
     port.clear(serialport::ClearBuffer::Input)?;
@@ -367,6 +440,90 @@ fn ping(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let reply = exchange(&mut port, &protocol::Message::Ping { nonce })?;
     println!("{port_name}: {reply:?}");
     validate_pong(&reply, nonce).map_err(Into::into)
+}
+
+fn hardware(port: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let (port_name, mut port) = open_port(port)?;
+    let nonce = 0x5A5A_1234;
+    validate_pong(
+        &exchange(&mut port, &protocol::Message::Ping { nonce })?,
+        nonce,
+    )?;
+    let reply = exchange(&mut port, &protocol::Message::HardwareProbe)?;
+    match reply {
+        protocol::Reply::HardwareStatus { .. } => {
+            println!("{port_name}: {reply:?}");
+            Ok(())
+        }
+        _ => Err("機構部の診断応答を受信できませんでした".into()),
+    }
+}
+
+fn pitch_trim_message(raw_steps: i16) -> Result<protocol::Message, String> {
+    let trim = protocol::PitchTrim { raw_steps };
+    trim.validate()?;
+    Ok(protocol::Message::PitchTrim(trim))
+}
+
+struct PitchTrimFile {
+    path: PathBuf,
+    required: bool,
+}
+
+fn pitch_trim_file(explicit: Option<PathBuf>) -> PitchTrimFile {
+    if let Some(path) = explicit {
+        return PitchTrimFile {
+            path,
+            required: true,
+        };
+    }
+    if let Some(path) = std::env::var_os("STACKCHAN_PITCH_TRIM_FILE") {
+        return PitchTrimFile {
+            path: PathBuf::from(path),
+            required: true,
+        };
+    }
+    PitchTrimFile {
+        path: PathBuf::from(DEFAULT_PITCH_TRIM_FILE),
+        required: false,
+    }
+}
+
+fn parse_pitch_trim(contents: &str) -> Result<protocol::PitchTrim, String> {
+    let raw_steps = contents
+        .trim()
+        .parse::<i16>()
+        .map_err(|_| "ピッチ補正ファイルには整数 1 個だけを記載してください")?;
+    let trim = protocol::PitchTrim { raw_steps };
+    trim.validate()?;
+    Ok(trim)
+}
+
+fn load_pitch_trim(
+    config: &PitchTrimFile,
+) -> Result<Option<protocol::PitchTrim>, Box<dyn std::error::Error>> {
+    match std::fs::read_to_string(&config.path) {
+        Ok(contents) => Ok(Some(parse_pitch_trim(&contents)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !config.required => Ok(None),
+        Err(error) => Err(format!("{}: {error}", config.path.display()).into()),
+    }
+}
+
+fn save_pitch_trim(
+    config: &PitchTrimFile,
+    raw_steps: i16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let trim = protocol::PitchTrim { raw_steps };
+    trim.validate()?;
+    if let Some(parent) = config
+        .path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&config.path, format!("{raw_steps}\n"))?;
+    Ok(())
 }
 
 fn text_message(slot: TextSlot, ttl_s: u16, text: &str) -> Result<protocol::Message, String> {
@@ -404,6 +561,31 @@ fn presence_message(
         eyes,
         ttl_s,
     }))
+}
+
+fn emote_message(
+    expression: protocol::Expression,
+    gaze_x: i16,
+    gaze_y: i16,
+    eyes: protocol::EyeStyle,
+    intensity: u8,
+    duration_ms: u16,
+) -> Result<protocol::Message, String> {
+    if !(-100..=100).contains(&gaze_x) || !(-100..=100).contains(&gaze_y) {
+        return Err("視線の座標は -100..100 にしてください".into());
+    }
+    let emote = protocol::Emote {
+        expression,
+        gaze: protocol::Gaze::Point {
+            x: gaze_x as i8,
+            y: gaze_y as i8,
+        },
+        eyes,
+        intensity,
+        duration_ms,
+    };
+    emote.validate().map_err(str::to_owned)?;
+    Ok(protocol::Message::Emote(emote))
 }
 
 struct CardContent<'a> {
@@ -540,25 +722,40 @@ fn send_checked(
         protocol::Reply::Rejected { count } => {
             Err(format!("表示更新が拒否されました: rejected={count}").into())
         }
-        protocol::Reply::Pong { .. } => Err("表示更新に対して Ack 以外の応答を受信しました".into()),
+        protocol::Reply::Pong { .. } | protocol::Reply::HardwareStatus { .. } => {
+            Err("表示更新に対して Ack 以外の応答を受信しました".into())
+        }
     }
 }
 
 fn send_display(
     port: Option<String>,
     message: &protocol::Message,
+    trim_file: Option<&PitchTrimFile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let trim = trim_file.map(load_pitch_trim).transpose()?.flatten();
     let (port_name, mut port) = open_port(port)?;
-    let seq = send_checked(&mut port, message)?;
+    let seq = send_with_trim(&mut port, message, trim)?;
     println!("{port_name}: Ack {{ seq: {seq} }}");
     Ok(())
+}
+
+fn send_with_trim(
+    port: &mut (impl Read + Write),
+    message: &protocol::Message,
+    trim: Option<protocol::PitchTrim>,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    if let Some(trim) = trim {
+        send_checked(port, &protocol::Message::PitchTrim(trim))?;
+    }
+    send_checked(port, message)
 }
 
 fn read_reply(reader: &mut impl Read) -> Result<protocol::Reply, Box<dyn std::error::Error>> {
     let mut rx = [0u8; protocol::MAX_FRAME_BYTES];
     let mut len = 0;
     let mut discarding = false;
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     // 起動ログや空の区切りを読み飛ばしても、連続入力で永久に待たない。
     while Instant::now() < deadline {
         let mut byte = [0];
@@ -665,6 +862,42 @@ mod tests {
     }
 
     #[test]
+    fn configured_pitch_trim_is_applied_before_display_command() {
+        let pong = protocol::Reply::Pong {
+            nonce: NONCE,
+            version: protocol::VERSION,
+        };
+        let mut link = Link::new(&[
+            pong,
+            protocol::Reply::Ack { seq: 1 },
+            pong,
+            protocol::Reply::Ack { seq: 2 },
+        ]);
+        let trim = protocol::PitchTrim { raw_steps: -96 };
+        assert_eq!(
+            send_with_trim(&mut link, &protocol::Message::Clear, Some(trim)).unwrap(),
+            2
+        );
+        assert_eq!(
+            link.messages(),
+            [
+                protocol::Message::Ping { nonce: NONCE },
+                protocol::Message::PitchTrim(trim),
+                protocol::Message::Ping { nonce: NONCE },
+                protocol::Message::Clear,
+            ]
+        );
+    }
+
+    #[test]
+    fn pitch_trim_file_requires_one_valid_step_value() {
+        assert_eq!(parse_pitch_trim(" -96\n").unwrap().raw_steps, -96);
+        for invalid in ["", "-97", "65", "-96 0", "abc"] {
+            assert!(parse_pitch_trim(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
     fn text_requires_ack_after_successful_handshake() {
         let message = text_message(TextSlot::Bottom, 7, "Hello").unwrap();
         let pong = protocol::Reply::Pong {
@@ -749,6 +982,71 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["stackchan", "status", "--activity", "unknown"]).is_err());
+    }
+
+    #[test]
+    fn emote_cli_encodes_continuous_gaze_and_rejects_invalid_parameters() {
+        let cli = Cli::try_parse_from([
+            "stackchan",
+            "emote",
+            "--expression",
+            "curious",
+            "--gaze-x",
+            "-60",
+            "--gaze-y",
+            "25",
+            "--intensity",
+            "75",
+            "--duration-ms",
+            "800",
+        ])
+        .unwrap();
+        let Command::Emote {
+            expression,
+            gaze_x,
+            gaze_y,
+            eyes,
+            intensity,
+            duration_ms,
+            ..
+        } = cli.command
+        else {
+            panic!("emote expected")
+        };
+        let message = emote_message(
+            expression.into(),
+            gaze_x,
+            gaze_y,
+            eyes.into(),
+            intensity,
+            duration_ms,
+        )
+        .unwrap();
+        let protocol::Message::Emote(emote) = message else {
+            panic!("emote message expected")
+        };
+        assert_eq!(emote.gaze, protocol::Gaze::Point { x: -60, y: 25 });
+        assert_eq!(emote.intensity, 75);
+        assert_eq!(emote.duration_ms, 800);
+        assert!(emote_message(emote.expression, 101, 0, emote.eyes, 75, 800).is_err());
+        assert!(emote_message(emote.expression, 0, 0, emote.eyes, 101, 800).is_err());
+        assert!(emote_message(emote.expression, 0, 0, emote.eyes, 75, 10).is_err());
+    }
+
+    #[test]
+    fn pitch_trim_cli_rejects_out_of_range_steps() {
+        let cli = Cli::try_parse_from(["stackchan", "pitch-trim", "--raw-steps", "-24"]).unwrap();
+        let Command::PitchTrim { raw_steps, .. } = cli.command else {
+            panic!("pitch-trim expected")
+        };
+        assert_eq!(
+            pitch_trim_message(raw_steps),
+            Ok(protocol::Message::PitchTrim(protocol::PitchTrim {
+                raw_steps: -24
+            }))
+        );
+        assert!(pitch_trim_message(-97).is_err());
+        assert!(pitch_trim_message(65).is_err());
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! Slot の内容と単調時計に基づく表示期限。描画の成功後に状態を確定する。
 
 use embedded_graphics::{pixelcolor::Rgb565, prelude::DrawTarget};
-use protocol::{Card, Expression, EyeStyle, Gaze, MAX_TEXT_BYTES, Message, Presence, Reply, Slot};
+use protocol::{
+    Card, Emote, Expression, EyeStyle, Gaze, MAX_TEXT_BYTES, Message, Presence, Reply, Slot,
+};
 
 const DEMO_FACES: [(Expression, &str); 12] = [
     (Expression::Happy, "01/12 HAPPY"),
@@ -40,19 +42,41 @@ struct PresenceEntry {
     deadline_ms: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EmoteEntry {
+    value: Emote,
+    deadline_ms: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayState {
     slots: [Option<Entry>; 3],
     presence: Option<PresenceEntry>,
+    emote: Option<EmoteEntry>,
 }
 
 impl DisplayState {
+    fn can_blink(&self) -> bool {
+        self.get(Slot::Overlay).is_none() && self.active_eyes() == EyeStyle::Auto
+    }
+
     pub fn get(&self, slot: Slot) -> Option<&Entry> {
         self.slots[slot_index(slot)].as_ref()
     }
 
     pub fn presence(&self) -> Option<&Presence> {
         self.presence.as_ref().map(|entry| &entry.value)
+    }
+
+    pub fn emote(&self) -> Option<&Emote> {
+        self.emote.as_ref().map(|entry| &entry.value)
+    }
+
+    fn active_eyes(&self) -> EyeStyle {
+        self.emote()
+            .map(|emote| emote.eyes)
+            .or_else(|| self.presence().map(|presence| presence.eyes))
+            .unwrap_or(EyeStyle::Auto)
     }
 
     fn set(&mut self, slot: Slot, content: Content, ttl_s: u16, now_ms: u64) {
@@ -70,6 +94,13 @@ impl DisplayState {
         });
     }
 
+    fn set_emote(&mut self, value: Emote, now_ms: u64) {
+        self.emote = Some(EmoteEntry {
+            deadline_ms: now_ms.saturating_add(u64::from(value.duration_ms)),
+            value,
+        });
+    }
+
     fn has_expired(&self, now_ms: u64) -> bool {
         self.slots
             .iter()
@@ -79,6 +110,10 @@ impl DisplayState {
                 .presence
                 .as_ref()
                 .is_some_and(|entry| entry.deadline_ms.is_some_and(|deadline| now_ms >= deadline))
+            || self
+                .emote
+                .as_ref()
+                .is_some_and(|entry| now_ms >= entry.deadline_ms)
     }
 
     fn expire(&mut self, now_ms: u64) {
@@ -97,6 +132,13 @@ impl DisplayState {
         {
             self.presence = None;
         }
+        if self
+            .emote
+            .as_ref()
+            .is_some_and(|entry| now_ms >= entry.deadline_ms)
+        {
+            self.emote = None;
+        }
     }
 }
 
@@ -108,20 +150,53 @@ fn slot_index(slot: Slot) -> usize {
     }
 }
 
-#[derive(Default)]
 pub struct Controller {
     state: DisplayState,
     seq: u32,
+    pitch_trim_raw_steps: i16,
     demo_index: Option<usize>,
+    blink: bool,
+    startup: bool,
+}
+
+impl Default for Controller {
+    fn default() -> Self {
+        Self {
+            state: DisplayState::default(),
+            seq: 0,
+            pitch_trim_raw_steps: 0,
+            demo_index: None,
+            blink: false,
+            startup: true,
+        }
+    }
+}
+
+// 固定周期内の間隔を変え、通信が途絶えても顔が静止し続けないようにする。
+fn blink_at(now_ms: u64) -> bool {
+    let phase = now_ms % 15_700;
+    (4_000..4_120).contains(&phase)
+        || (9_500..9_620).contains(&phase)
+        || (9_790..9_910).contains(&phase)
+        || (14_000..14_120).contains(&phase)
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HandleError<E> {
     InvalidCard,
+    InvalidFace,
     Draw(E),
 }
 
 impl Controller {
+    pub fn pitch_trim_raw_steps(&self) -> i16 {
+        self.pitch_trim_raw_steps
+    }
+
+    pub fn actuator_target(&self) -> crate::behavior::ActuatorTarget {
+        crate::behavior::target(self.state.presence(), self.state.emote())
+    }
+
     pub fn handle<D: DrawTarget<Color = Rgb565>>(
         &mut self,
         message: Message,
@@ -153,11 +228,30 @@ impl Controller {
                 next.set(slot, Content::Card(card), ttl_s, now_ms);
             }
             Message::Presence(presence) => next.set_presence(presence, now_ms),
+            Message::Emote(emote) => {
+                emote.validate().map_err(|_| HandleError::InvalidFace)?;
+                next.set_emote(emote, now_ms);
+            }
+            Message::PitchTrim(trim) => {
+                trim.validate().map_err(|_| HandleError::InvalidFace)?;
+                self.pitch_trim_raw_steps = trim.raw_steps;
+                self.seq = self.seq.wrapping_add(1);
+                return Ok(Reply::Ack { seq: self.seq });
+            }
+            // 実機の I²C bus は main が所有する。誤ってモデルへ渡されても描画しない。
+            Message::HardwareProbe => return Err(HandleError::InvalidFace),
         }
+        next.presence()
+            .map(|presence| presence.gaze.validate())
+            .transpose()
+            .map_err(|_| HandleError::InvalidFace)?;
         // Overlay の背後の期限切れも、再表示の前に除去する。
         next.expire(now_ms);
-        crate::renderer::draw_state(display, &next).map_err(HandleError::Draw)?;
+        let blink = blink_at(now_ms);
+        crate::renderer::draw_state_with_blink(display, &next, blink).map_err(HandleError::Draw)?;
         self.state = next;
+        self.blink = blink;
+        self.startup = false;
         self.seq = self.seq.wrapping_add(1);
         self.demo_index = None;
         Ok(Reply::Ack { seq: self.seq })
@@ -175,6 +269,7 @@ impl Controller {
         let mut next = self.state.clone();
         // 全画面 Overlay 中でも、タップした表情をその場で見られるようにする。
         next.slots[slot_index(Slot::Overlay)] = None;
+        next.emote = None;
         next.set_presence(
             Presence {
                 activity: None,
@@ -187,8 +282,11 @@ impl Controller {
             now_ms,
         );
         next.expire(now_ms);
-        crate::renderer::draw_state(display, &next)?;
+        let blink = blink_at(now_ms);
+        crate::renderer::draw_state_with_blink(display, &next, blink)?;
         self.state = next;
+        self.blink = blink;
+        self.startup = false;
         self.demo_index = Some(index);
         Ok(())
     }
@@ -198,11 +296,17 @@ impl Controller {
         now_ms: u64,
         display: &mut D,
     ) -> Result<(), D::Error> {
-        if self.state.has_expired(now_ms) {
+        let blink = blink_at(now_ms);
+        if self.state.has_expired(now_ms) || (self.state.can_blink() && blink != self.blink) {
             let mut next = self.state.clone();
             next.expire(now_ms);
-            crate::renderer::draw_state(display, &next)?;
+            if self.startup {
+                crate::renderer::draw_startup_with_blink(display, blink)?;
+            } else {
+                crate::renderer::draw_state_with_blink(display, &next, blink)?;
+            }
             self.state = next;
+            self.blink = blink;
         }
         Ok(())
     }
@@ -272,6 +376,34 @@ mod tests {
     }
 
     #[test]
+    fn pitch_trim_is_volatile_and_does_not_redraw_or_clear_with_face() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        assert_eq!(controller.pitch_trim_raw_steps(), 0);
+        assert_eq!(
+            controller.handle(
+                Message::PitchTrim(protocol::PitchTrim { raw_steps: -24 }),
+                0,
+                &mut display,
+            ),
+            Ok(Reply::Ack { seq: 1 })
+        );
+        assert_eq!(display.pixels, 0);
+        assert_eq!(controller.pitch_trim_raw_steps(), -24);
+        controller.handle(Message::Clear, 1, &mut display).unwrap();
+        assert_eq!(controller.pitch_trim_raw_steps(), -24);
+        assert_eq!(
+            controller.handle(
+                Message::PitchTrim(protocol::PitchTrim { raw_steps: -97 }),
+                2,
+                &mut display,
+            ),
+            Err(HandleError::InvalidFace)
+        );
+        assert_eq!(controller.pitch_trim_raw_steps(), -24);
+    }
+
+    #[test]
     fn card_replaces_slot_and_expires_without_affecting_other_slots() {
         let mut controller = Controller::default();
         let mut display = Display::default();
@@ -335,6 +467,59 @@ mod tests {
         assert!(controller.state.get(Slot::Overlay).is_some());
         assert!(controller.state.get(Slot::BannerBottom).is_some());
         assert_eq!(controller.seq, 3);
+    }
+
+    #[test]
+    fn emote_expires_to_previous_presence_and_invalid_values_are_rejected() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        let presence = Presence {
+            activity: None,
+            detail: Default::default(),
+            expression: Expression::Calm,
+            gaze: Gaze::Center,
+            eyes: EyeStyle::Auto,
+            ttl_s: 0,
+        };
+        controller
+            .handle(Message::Presence(presence.clone()), 0, &mut display)
+            .unwrap();
+        let emote = Emote {
+            expression: Expression::Curious,
+            gaze: Gaze::Point { x: 50, y: -50 },
+            eyes: EyeStyle::Wide,
+            intensity: 50,
+            duration_ms: 500,
+        };
+        assert_eq!(
+            controller.handle(Message::Emote(emote), 100, &mut display),
+            Ok(Reply::Ack { seq: 2 })
+        );
+        assert_eq!(controller.state.emote(), Some(&emote));
+        assert_eq!(controller.state.presence(), Some(&presence));
+        assert_eq!(controller.actuator_target().x_tenth_deg, 75);
+        controller.tick(599, &mut display).unwrap();
+        assert_eq!(controller.state.emote(), Some(&emote));
+        controller.tick(600, &mut display).unwrap();
+        assert_eq!(controller.state.emote(), None);
+        assert_eq!(controller.state.presence(), Some(&presence));
+        assert_eq!(controller.actuator_target().x_tenth_deg, 0);
+        assert_eq!(controller.seq, 2);
+
+        let pixels = display.pixels;
+        assert_eq!(
+            controller.handle(
+                Message::Emote(Emote {
+                    duration_ms: 0,
+                    ..emote
+                }),
+                700,
+                &mut display,
+            ),
+            Err(HandleError::InvalidFace)
+        );
+        assert_eq!(display.pixels, pixels);
+        assert_eq!(controller.state.presence(), Some(&presence));
     }
 
     #[test]
