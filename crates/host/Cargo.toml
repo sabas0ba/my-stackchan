@@ -15,5 +15,6 @@ path = "src/main.rs"
 
 [dependencies]
 protocol = { path = "../protocol", features = ["std"] }
+plugin-api = { path = "../plugin-api" }
 clap = { workspace = true }
 serialport = { workspace = true }

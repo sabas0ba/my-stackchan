@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod bmp;
+mod config;
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
 const ESP_USB_SERIAL_JTAG: (u16, u16) = (0x303A, 0x1001);
@@ -21,12 +22,18 @@ struct Cli {
     /// 設置場所ごとのピッチ補正ファイル。既定は .work/pitch-trim.txt。
     #[arg(long, global = true)]
     pitch_trim_file: Option<PathBuf>,
+    /// 利用者設定のディレクトリ。既定は %APPDATA%\stackchan または
+    /// $XDG_CONFIG_HOME/stackchan ($HOME/.config/stackchan)。
+    #[arg(long, global = true)]
+    config_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// 利用者設定を検証し、要約を表示する。secret の値は表示しない。
+    Config,
     /// M5 StackChan 本体の I²C 拡張器と出力の状態を読み取る。
     Hardware {
         #[arg(long)]
@@ -264,6 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let trim_file = pitch_trim_file(cli.pitch_trim_file);
     match cli.command {
+        Command::Config => show_config(cli.config_dir),
         Command::Hardware { port } => hardware(port),
         Command::PitchTrim {
             port,
@@ -386,6 +394,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&trim_file),
         ),
     }
+}
+
+fn show_config(explicit: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = config::resolve_dir(explicit)?;
+    let config = config::load(&dir)?;
+    println!("config dir: {}", dir.display());
+    println!(
+        "daemon: port={}, rotate_s={}",
+        config.daemon.port.as_deref().unwrap_or("(auto)"),
+        config.daemon.rotate_s
+    );
+    for plugin in &config.plugins {
+        let allowed = plugin.allowed;
+        println!(
+            "plugin {}: command={:?}, rev={}, cards={}, notify={}, presence={}, motion={}",
+            plugin.id,
+            plugin.command,
+            plugin.rev.as_deref().unwrap_or("-"),
+            allowed.cards,
+            allowed.notify,
+            allowed.presence,
+            allowed.motion
+        );
+        // 値には secret が含まれ得るため、名前だけを表示する。
+        let names: Vec<&str> = plugin
+            .params
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        println!("  params: {names:?}");
+    }
+    Ok(())
 }
 
 fn list_ports() -> Result<(), Box<dyn std::error::Error>> {
