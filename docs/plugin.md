@@ -61,6 +61,9 @@ stackchan CLI ---> spool dir -> | 受付 (通知、手動の表示命令)     | 
 - plugin プロトコルとデバイスプロトコルは分離し、daemon が変換する。firmware 側の変更 (版の更新、上限値の変更) を plugin へ波及させないためである
 - daemon は plugin から受けた内容を `protocol` crate の検証に通してから送る。不正な内容は plugin 側へエラーとして返し、デバイスには送らない
 - daemon は USB の読取りを 1 スレッドに集約し、要求への応答 (Pong / Ack / Rejected) と非同期の `Event` を振り分ける
+- daemon は接続を保持し続けるため、`Ping` の nonce を送信ごとに変え、再接続前の古い応答と区別する。現行 CLI の nonce は固定値であり、1 回の送信で終了する用途に限って成り立つ
+- pitch trim は現行 CLI と同じ保存先 (`--pitch-trim-file`、`STACKCHAN_PITCH_TRIM_FILE`、既定は `.work/pitch-trim.txt`) から読み、接続時と、firmware の再起動を検出した時 (Ack の seq が巻き戻った時、または再接続時) に再適用する
+- `HardwareProbe` と `PitchTrim` は保守用の命令であり、plugin には開放しない
 
 ### crate 構成 (案)
 
@@ -82,7 +85,8 @@ daemon が強制する範囲:
 
 | 対象 | 方法 |
 | --- | --- |
-| 表示 | plugin が `hello` で宣言し、利用者設定で許可した capability (Card 数、通知、表情、画像) 以外のメッセージを拒否する |
+| 表示 | plugin が `hello` で宣言し、利用者設定で許可した capability (Card 数、通知、表情、画像、機構部) 以外のメッセージを拒否する |
+| 機構部 | `Emote` の `intensity` はサーボと LED を駆動する。capability `motion` を許可していない plugin の Emote は、daemon が `intensity` を 0 に置き換えて送る (画面上の表情だけが変わる) |
 | 内容 | 上限値と `protocol` の検証。違反は `Rejected` として plugin へ返す |
 | 流量 | 1 メッセージの長さ (64 KiB) と秒間件数の上限。超過した plugin は停止する |
 | 異常終了 | 指数的な待ち時間で再起動し、連続して失敗したものは無効化する |
@@ -152,6 +156,7 @@ plugin-api の型は host 側でのみ使うため、`String` / `Vec` を用い�
 | `CardRemove` | 論理 Card ID |
 | `Notify` | 短文、優先度、TTL。capability `notify` が必要 |
 | `Presence` | 表情・活動状態の要求。capability `presence` が必要。採否は daemon が決める |
+| `Emote` | 一時的な表情と視線の要求。capability `presence` が必要。機構部の駆動には加えて `motion` が必要 |
 | `ImageFrame` | 画像領域への 1 フレーム。幅・高さと RGB565 画素列。capability `image` が必要 |
 | `Log` | 診断用の文字列 |
 
@@ -187,7 +192,7 @@ firmware の slot (BannerTop / BannerBottom / Overlay) はそのまま使い、d
 | 常設 Card (時計、使用率) | 帯 | 帯ごとに候補を一定間隔で巡回する。利用者設定で固定表示も可能 |
 | 通知 | 帯または Overlay | 優先度が高いものは巡回に割り込む。TTL 満了または既読化で巡回に戻る |
 | 画像 (カメラ) | 画像領域 (Overlay 内) | 利用者の操作で開始し、操作または一定時間で終了する |
-| presence | 顔 | 手動の `status` / `face` が最優先。plugin からの要求は許可されたものだけを短い TTL で採用する |
+| presence / emote | 顔と機構部 | 手動の `status` / `face` / `emote` が最優先。plugin からの要求は許可されたものだけを短い TTL で採用する。Emote は連続送信で上書きされるため、plugin ごとに最短間隔を設ける |
 
 firmware 内の表示期限 (TTL) は保険として残し、daemon は表示を切り替えるたびに Card を送り直す。daemon が停止しても古い表示が残らないようにするためである。
 
@@ -202,11 +207,12 @@ firmware はタップの扱いとして `Demo` (現行の表情デモ) と `Forw
 
 - 起動時は `Demo` とする。host が接続されていなくても単体で動作を確認できる現行の挙動を保つためである
 - 状態は RAM 上にのみ保持し、再起動で `Demo` に戻る。firmware に設定の永続化を持たせない方針 ([design.md](design.md#目標と制約)) に従う
+- `Forward` の間は、タップによる firmware 内の動作 (表情デモの進行、Emote の解除) を行わず、Event の送信だけを行う。タップへの反応は daemon と plugin が決める
 - `Forward` の間も Event の送信先が無ければ破棄するだけで、表示には影響しない
 
 ## デバイスプロトコルの拡張
 
-版を 3 から 4 に上げる。既存 variant の番号は維持する。
+版を 7 から 8 に上げる。既存 variant の番号は維持する。
 
 | 追加 | 内容 | 上限の考え方 |
 | --- | --- | --- |
@@ -237,7 +243,7 @@ firmware はタップの扱いとして `Demo` (現行の表情デモ) と `Forw
 | --- | --- | --- |
 | P0 | 本書の確定 | 未決事項の決定 |
 | P1 | `plugin-api`、daemon、利用者設定、`plugins/clock` | 時計が帯に表示され続け、plugin の異常終了から復帰する。Windows と Linux で動作する |
-| P2 | デバイスプロトコル版 4 (card_id、InputMode、Event)、scheduler、入力の振分け | タップが発生元の plugin に届く。複数 Card が巡回する |
+| P2 | デバイスプロトコル版 8 (card_id、InputMode、Event)、scheduler、入力の振分け | タップが発生元の plugin に届く。複数 Card が巡回する |
 | P3 | spool による通知の受付、別リポジトリの plugin の導入手順 | commit SHA で固定した外部 plugin が許可した capability の範囲で動作する |
 | P4 | 画像領域 | 外部 plugin からの画像が Overlay に表示される |
 
