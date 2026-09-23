@@ -2,6 +2,9 @@
 //!
 //! std はタイムゾーンを扱わないため、UTC からのずれ (分) を利用者設定の
 //! `param.utc_offset_minutes` で受け取る。夏時間の切替えは扱わない。
+//!
+//! 時刻の行をタップすると (daemon の `input forward` 時)、現地時刻と UTC の表示を
+//! 切り替える。行の action と `HostMessage::Action` の使い方の例を兼ねる。
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,6 +15,8 @@ use plugin_api::{
 };
 
 const CARD: u8 = 0;
+/// 時刻の行のタップで返される値。
+const TOGGLE_UTC: u8 = 0;
 /// UTC からのずれの範囲。実在するタイムゾーンは -12:00..+14:00 に収まる。
 const OFFSET_RANGE_MINUTES: std::ops::RangeInclusive<i64> = -12 * 60..=14 * 60;
 
@@ -58,6 +63,7 @@ fn format_local(unix_seconds: i64, offset_minutes: i64) -> (String, String) {
 }
 
 fn card(time: String, date: String) -> PluginMessage {
+    // 帯の 1 行は 30 文字で、2 要素を等幅に置くため 1 要素 15 文字に収まる形式とする。
     PluginMessage::CardPut(CardPut {
         card: CARD,
         placement: Placement::Banner,
@@ -65,7 +71,7 @@ fn card(time: String, date: String) -> PluginMessage {
         ttl_s: 0,
         rows: vec![Row {
             elements: vec![Element::Text { text: time }, Element::Text { text: date }],
-            action: None,
+            action: Some(TOGGLE_UTC),
         }],
     })
 }
@@ -110,11 +116,16 @@ fn run() -> Result<(), ClientError> {
         })?;
     }
 
+    let mut show_utc = false;
     loop {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
-        let (time, date) = format_local(now.as_secs() as i64, offset);
+        let (mut time, date) =
+            format_local(now.as_secs() as i64, if show_utc { 0 } else { offset });
+        if show_utc {
+            time.push_str(" UTC");
+        }
         connection.send(&card(time, date))?;
         // 次の分の境界まで待つ。待機中も Shutdown と接続の終了には応じる。
         let mut wait = Duration::from_secs(60 - now.as_secs() % 60)
@@ -124,6 +135,18 @@ fn run() -> Result<(), ClientError> {
             match connection.recv_timeout(wait)? {
                 Some(HostMessage::Shutdown) => return Ok(()),
                 Some(HostMessage::Rejected { reason }) => eprintln!("rejected: {reason}"),
+                Some(HostMessage::Action {
+                    card: CARD,
+                    action: TOGGLE_UTC,
+                }) => {
+                    show_utc = !show_utc;
+                    connection.send(&PluginMessage::Log {
+                        level: LogLevel::Info,
+                        text: format!("表示を切り替えました: utc={show_utc}"),
+                    })?;
+                    // 待ち時間を打ち切り、切り替えた表示をすぐに送る。
+                    break;
+                }
                 _ if connection.is_closed() => return Ok(()),
                 _ => {}
             }
@@ -195,5 +218,9 @@ mod tests {
             // 帯の 1 行は 30 文字で、2 要素を等幅に置くため 1 要素 15 文字に収める。
             assert!(text.len() <= 15, "{text}");
         }
+        assert_eq!(card.rows[0].action, Some(TOGGLE_UTC));
+        let mut utc = format_local(0, 0).0;
+        utc.push_str(" UTC");
+        assert!(utc.len() <= 15, "{utc}");
     }
 }

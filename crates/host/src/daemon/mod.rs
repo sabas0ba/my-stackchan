@@ -217,6 +217,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
     /// 位置は巡回を次へ送る。顔の領域と Overlay のそれ以外の位置では何もしない。
     fn on_device_event(&mut self, event: protocol::Event, now: Instant) {
         let protocol::Event::Tap { slot, card, action } = event;
+        eprintln!("[daemon] tap: slot={slot:?}, card={card:?}, action={action:?}");
         let key = card.and_then(CardKey::from_device_id);
         match (key, action) {
             (Some(key), Some(action))
