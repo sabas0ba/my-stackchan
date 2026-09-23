@@ -299,6 +299,17 @@ host 側の crate は Espressif fork の toolchain (nix/esp-rust.nix) で構築�
 
 手順は [environment.md](environment.md#windows-ネイティブの-host-cli) を参照する。
 
+## 既知の不具合 (2026-09-23 時点)
+
+Forward 状態でタップした後、daemon が次の Card を送ると firmware が停止する。実機で再現し、調査途中である。
+
+- 停止は `renderer::draw_card` の除算で起きる `IntegerDivideByZero` 例外による panic である (panic 出力を USB 側で受信し、ELF で位置を特定した)。除数になり得るのは行の要素数だけだが、描画の前に `Card::validate` が空の行を拒否しているため、描画時に状態が壊れている可能性がある
+- タップ自体は無関係だった。firmware に一時的に疑似タップを入れた試験で、Event が daemon を経て plugin へ Action として届くまでは正常に動作し、その後の Card で停止した
+- 同じバイト列の Card でも送り方で結果が変わる。CLI (`stackchan card`) では正常に処理され、.NET の SerialPort から送ると毎回 panic した。Text と Clear はどちらの経路でも正常である。DTR の状態は関係しなかった
+- daemon の書込みタイムアウトの誤り (待機中の読取りの 1 ms が書込みに残る) を修正したが、この停止は解消しなかった
+
+次の調査では、描画の直前に Card の内容を検査して不整合を検出する診断用 build を用い、状態が壊れる時点を特定する。
+
 ## 未決事項
 
 1. 実行ファイルと commit SHA の対応を検証する方法 (再現可能な構築、ハッシュの照合)。P3 で扱う

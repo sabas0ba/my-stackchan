@@ -17,6 +17,12 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// 待機中の読取り 1 回の待ち時間。daemon のイベントループを止めないよう短くする。
 const POLL_TIMEOUT: Duration = Duration::from_millis(1);
+/// 要求の書込みの待ち時間。serialport は読取りと書込みで同じ待ち時間を用いるため、
+/// 書込みの前に必ず設定し直す。待機中の読取りの値が残ると、1 USB パケットを超える
+/// フレームの書込みが途中で打ち切られる (Windows で観測した)。
+const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+/// 応答の読取り 1 回の待ち時間。
+const READ_TIMEOUT: Duration = Duration::from_millis(100);
 /// 保持する Event の上限。daemon が取り出さない間に溢れた分は古いものから捨てる。
 const MAX_PENDING_EVENTS: usize = 16;
 
@@ -106,10 +112,10 @@ impl SerialDevice {
         let (name, port) = self.port.as_mut().ok_or("未接続です")?;
         let mut buffer = [0; protocol::MAX_FRAME_BYTES];
         let frame = protocol::encode(message, &mut buffer).map_err(|e| e.to_string())?;
-        port.write_all(frame)
-            .and_then(|()| port.flush())
-            .map_err(|e| format!("{name}: {e}"))?;
-        port.set_timeout(Duration::from_millis(100))
+        port.set_timeout(WRITE_TIMEOUT)
+            .and_then(|()| port.write_all(frame).map_err(Into::into))
+            .and_then(|()| port.flush().map_err(Into::into))
+            .and_then(|()| port.set_timeout(READ_TIMEOUT))
             .map_err(|e| format!("{name}: {e}"))?;
         let deadline = Instant::now() + REPLY_TIMEOUT;
         let mut chunk = [0; 256];
