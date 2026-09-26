@@ -27,6 +27,10 @@ const TICK: Duration = Duration::from_millis(200);
 /// 送り直しの間隔に加える firmware 側の TTL の余裕。daemon が停止した場合、
 /// 表示は最長でこの時間だけ残る。
 const DEVICE_TTL_MARGIN_S: u16 = 5;
+/// 新しい画像をデバイスへ送る最短の間隔。1 枚 (約 40 KB) の転送中はイベントループが
+/// 止まるため、他の plugin の表示と入力の処理が遅れ続けないようにする。間隔内に届いた
+/// 画像は scheduler が最新の 1 枚だけを保持し、間隔の経過後に送る。
+const MIN_IMAGE_INTERVAL: Duration = Duration::from_millis(500);
 
 pub fn run(
     config: Config,
@@ -71,6 +75,8 @@ pub struct Daemon<D, S> {
     events: Receiver<Event>,
     sender: Sender<Event>,
     sent: [Option<Sent>; 3],
+    /// 画像をデバイスへ最後に送った時刻。
+    image_sent: Option<Instant>,
     visible: Vec<CardKey>,
     refresh: Duration,
     device_error: Option<String>,
@@ -98,6 +104,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             events,
             sender,
             sent: [None; 3],
+            image_sent: None,
             visible: Vec::new(),
             refresh,
             device_error: None,
@@ -288,6 +295,15 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                 self.send_device(&protocol::Message::Emote(emote), now);
                 Ok(())
             }
+            Request::Image(frame) => {
+                let image = scheduler::Image {
+                    width: frame.width,
+                    height: frame.height,
+                    pixels: frame.pixels,
+                };
+                self.scheduler.image(plugin, image, frame.ttl_s, now);
+                Ok(())
+            }
         };
         if let Err(reason) = result {
             self.reject(plugin, reason, now);
@@ -376,8 +392,22 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                     if unchanged {
                         continue;
                     }
+                    let image = matches!(shown.content, Content::Image(_));
+                    if image
+                        && self
+                            .image_sent
+                            .is_some_and(|at| now.duration_since(at) < MIN_IMAGE_INTERVAL)
+                    {
+                        continue;
+                    }
                     let ttl_s = self.device_ttl(shown);
-                    if self.send_device(&slot_message(slot, ttl_s, shown), now) {
+                    let delivered = slot_messages(slot, ttl_s, shown)
+                        .iter()
+                        .all(|message| self.send_device(message, now));
+                    if delivered && image {
+                        self.image_sent = Some(now);
+                    }
+                    if delivered {
                         self.sent[index] = Some(Sent {
                             source: shown.source,
                             at: now,
@@ -434,19 +464,28 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
     }
 }
 
-fn slot_message(slot: protocol::Slot, ttl_s: u16, shown: &Shown) -> protocol::Message {
+/// slot の表示内容をデバイスへのメッセージにする。画像は複数のメッセージになる。
+fn slot_messages(slot: protocol::Slot, ttl_s: u16, shown: &Shown) -> Vec<protocol::Message> {
     let id = match shown.source {
         Source::Card { key, .. } => key.device_id(),
+        // デバイスは受信中の画像との照合にだけ使うため、下位 16 bit で足りる。
+        Source::Image { id, .. } => id as u16,
         Source::Notice { .. } => 0,
     };
     match &shown.content {
-        Content::Card(rows) => protocol::Message::Card(convert::device_card(slot, ttl_s, id, rows)),
-        Content::Text(text) => protocol::Message::Text {
+        Content::Card(rows) => vec![protocol::Message::Card(convert::device_card(
+            slot, ttl_s, id, rows,
+        ))],
+        Content::Text(text) => vec![protocol::Message::Text {
             slot,
             ttl_s,
             // Scheduler に入る前に長さを検証済みである。
             text: text.as_str().try_into().unwrap_or_default(),
-        },
+        }],
+        // 画像は Overlay にだけ割り当てられる (Scheduler)。
+        Content::Image(image) => {
+            convert::image_messages(id, ttl_s, image.width, image.height, &image.pixels)
+        }
     }
 }
 

@@ -10,6 +10,7 @@ members = [
   "crates/protocol",
   "crates/plugin-api",
   "plugins/clock",
+  "plugins/image-demo",
   "crates/host",
   "crates/fontgen",
 ]

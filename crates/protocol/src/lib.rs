@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。互換性の無い変更を行った場合に増やす。
-pub const VERSION: u8 = 8;
+pub const VERSION: u8 = 9;
 
 /// 1 メッセージ中のテキストの最大バイト数 (UTF-8)。
 pub const MAX_TEXT_BYTES: usize = 512;
@@ -32,6 +32,19 @@ pub const MAX_BAR_LABEL_BYTES: usize = 12;
 pub const MAX_IMAGE_SIDE: u8 = 16;
 pub const MAX_IMAGE_BYTES: usize = 512;
 pub const MAX_STATUS_DETAIL_BYTES: usize = 20;
+
+/// 画面の大きさ。画像領域はこの中に収める。
+pub const SCREEN_WIDTH: u16 = 320;
+pub const SCREEN_HEIGHT: u16 = 240;
+/// 画像領域 (Overlay 内) の最大の大きさ。firmware は 1 枚分の画素 (38,400 byte) を
+/// static に持つため、フレームバッファ (150 KB) と合わせてスタックを残せる大きさとする。
+pub const MAX_IMAGE_REGION_WIDTH: u16 = 160;
+pub const MAX_IMAGE_REGION_HEIGHT: u16 = 120;
+pub const MAX_IMAGE_REGION_BYTES: usize =
+    MAX_IMAGE_REGION_WIDTH as usize * MAX_IMAGE_REGION_HEIGHT as usize * 2;
+/// `ImageRows` 1 件の画素の最大バイト数。幅 160 px の 3 行分で、COBS の付加を含めて
+/// フレーム (`MAX_FRAME_BYTES`) に収まる。
+pub const MAX_IMAGE_ROWS_BYTES: usize = 960;
 
 /// 表示位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +289,54 @@ pub enum Event {
     },
 }
 
+/// Overlay 内の画像領域の開始。画素は続く `ImageRows` で送り、`ImageEnd` で表示する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageBegin {
+    pub id: u16,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    /// 表示を保つ秒数。0 は Clear または上書きまで保つ。
+    pub ttl_s: u16,
+}
+
+impl ImageBegin {
+    pub fn validate(self) -> Result<(), &'static str> {
+        if !(1..=MAX_IMAGE_REGION_WIDTH).contains(&self.width)
+            || !(1..=MAX_IMAGE_REGION_HEIGHT).contains(&self.height)
+        {
+            return Err("画像領域は 160x120 px 以下にしてください");
+        }
+        if u32::from(self.x) + u32::from(self.width) > u32::from(SCREEN_WIDTH)
+            || u32::from(self.y) + u32::from(self.height) > u32::from(SCREEN_HEIGHT)
+        {
+            return Err("画像領域が画面の外にはみ出します");
+        }
+        Ok(())
+    }
+}
+
+/// 画像領域の行の組。`row` は領域の上端からの行番号で、行は上から順に送る。
+/// 画素は RGB565 の big-endian で、`pixels` の長さは幅 × 2 の倍数とする。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageRows {
+    pub id: u16,
+    pub row: u16,
+    pub pixels: heapless::Vec<u8, MAX_IMAGE_ROWS_BYTES>,
+}
+
+/// 画素は長さだけを出す。host の trace ログに 1 件あたり数 KB の数値列が出るのを避ける。
+impl core::fmt::Debug for ImageRows {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ImageRows")
+            .field("id", &self.id)
+            .field("row", &self.row)
+            .field("pixels_len", &self.pixels.len())
+            .finish()
+    }
+}
+
 /// host から firmware へ送るメッセージ。
 ///
 /// firmware は本 enum の variant に対応する描画以外の動作を行わない。
@@ -309,6 +370,12 @@ pub enum Message {
     ClearSlot(Slot),
     /// タップの扱いを切り替える。
     InputMode(InputMode),
+    /// 画像領域の開始。
+    ImageBegin(ImageBegin),
+    /// 画像領域の行の組。
+    ImageRows(ImageRows),
+    /// 画像領域の完了。全行を受け取っていれば Overlay に表示する。
+    ImageEnd { id: u16 },
 }
 
 /// firmware から host へ返す応答。
@@ -797,5 +864,64 @@ mod tests {
         let mut received = frame;
         assert_eq!(decode::<Reply>(&mut received[..len]), Ok(event));
         assert_eq!(received[0], 4);
+    }
+
+    #[test]
+    fn image_region_is_validated_against_limits_and_screen() {
+        let begin = ImageBegin {
+            id: 1,
+            x: 80,
+            y: 60,
+            width: 160,
+            height: 120,
+            ttl_s: 5,
+        };
+        assert_eq!(begin.validate(), Ok(()));
+        for invalid in [
+            ImageBegin { width: 0, ..begin },
+            ImageBegin {
+                height: 121,
+                ..begin
+            },
+            ImageBegin {
+                width: 161,
+                ..begin
+            },
+            ImageBegin { x: 161, ..begin },
+            ImageBegin { y: 121, ..begin },
+        ] {
+            assert!(invalid.validate().is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn version_9_image_messages_fit_in_a_frame_and_keep_variant_numbers() {
+        let mut frame = [0; MAX_FRAME_BYTES];
+        let rows = Message::ImageRows(ImageRows {
+            id: u16::MAX,
+            row: u16::MAX,
+            pixels: heapless::Vec::from_slice(&[0xFF; MAX_IMAGE_ROWS_BYTES]).unwrap(),
+        });
+        for (message, variant) in [
+            (
+                Message::ImageBegin(ImageBegin {
+                    id: u16::MAX,
+                    x: u16::MAX,
+                    y: u16::MAX,
+                    width: u16::MAX,
+                    height: u16::MAX,
+                    ttl_s: u16::MAX,
+                }),
+                10,
+            ),
+            (rows, 11),
+            (Message::ImageEnd { id: u16::MAX }, 12),
+        ] {
+            let len = encode(&message, &mut frame).unwrap().len();
+            assert!(len <= MAX_FRAME_BYTES);
+            let mut received = frame;
+            assert_eq!(decode::<Message>(&mut received[..len]), Ok(message));
+            assert_eq!(received[0], variant);
+        }
     }
 }

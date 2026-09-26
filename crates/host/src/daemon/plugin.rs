@@ -133,6 +133,7 @@ pub enum Request {
     Notify(plugin_api::Notify),
     Presence(protocol::Presence),
     Emote(protocol::Emote),
+    Image(plugin_api::ImageFrame),
 }
 
 pub enum Outcome {
@@ -392,6 +393,14 @@ impl PluginRuntime {
             PluginMessage::Emote(emote) if granted.presence => self.face_request(now, || {
                 convert::emote(&emote, granted.motion).map(Request::Emote)
             }),
+            // 送信の間隔は受信時ではなくデバイスへの送信時に制限する (daemon の sync_slots)。
+            // 受信時に制限すると、daemon の処理待ちで溜まった画像がまとめて届いた場合に
+            // 最初の古い画像が採られ、新しい画像が拒否される。
+            PluginMessage::ImageFrame(frame) if granted.image => match convert::image_frame(&frame)
+            {
+                Ok(()) => Outcome::Request(Request::Image(frame)),
+                Err(reason) => Outcome::Reject(reason),
+            },
             PluginMessage::Log { level, text } => {
                 let level = match level {
                     plugin_api::LogLevel::Error => log::Level::Error,
@@ -406,7 +415,8 @@ impl PluginRuntime {
             PluginMessage::CardPut(_)
             | PluginMessage::Notify(_)
             | PluginMessage::Presence(_)
-            | PluginMessage::Emote(_) => Outcome::Reject("許可されていない操作です"),
+            | PluginMessage::Emote(_)
+            | PluginMessage::ImageFrame(_) => Outcome::Reject("許可されていない操作です"),
         }
     }
 

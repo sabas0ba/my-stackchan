@@ -37,6 +37,11 @@ static RECEIVER: StaticCell<Receiver> = StaticCell::new();
 static CONTROLLER: StaticCell<Controller> = StaticCell::new();
 // 150 KB あるため、スタック上に作ってから移す経路を通らないよう const で初期化する。
 static FRAME: ConstStaticCell<FrameBuffer> = ConstStaticCell::new(FrameBuffer::new());
+/// フレームの途中で次の byte を待つ時間。host は 1 フレームを 1 回の書込みで送るため、
+/// USB のパケットの間隔 (1 ms 程度) より長ければ足りる。
+const RECEIVE_IDLE_US: u64 = 3_000;
+/// 1 周で受信に使う時間の上限。
+const RECEIVE_BUDGET_US: u64 = 30_000;
 
 fn send_servo(
     uart: &mut Uart<'_, esp_hal::Blocking>,
@@ -257,10 +262,24 @@ fn main() -> ! {
         }
         // 応答 1 件分だけを保持し、送信待ちでもブロッキング API を使わない。
         if tx_len == 0 {
-            for _ in 0..64 {
+            // USB の受信 FIFO は 64 byte であり、1 周に 1 回だけ読むと 1 KB のフレームに
+            // ループ十数周分 (数百 ms) かかる。フレームの途中では、FIFO が空になっても
+            // 次の byte を短い間待って読み続ける。待つ時間の上限はタッチと表示期限の
+            // 処理を遅らせすぎないために設ける。
+            let receive_started_us = Instant::now().duration_since_epoch().as_micros();
+            let mut last_byte_us = receive_started_us;
+            loop {
                 let Ok(byte) = usb.read_byte() else {
+                    let now_us = Instant::now().duration_since_epoch().as_micros();
+                    if receiver.in_frame()
+                        && now_us.saturating_sub(last_byte_us) < RECEIVE_IDLE_US
+                        && now_us.saturating_sub(receive_started_us) < RECEIVE_BUDGET_US
+                    {
+                        continue;
+                    }
                     break;
                 };
+                last_byte_us = Instant::now().duration_since_epoch().as_micros();
                 if let Some(message) = receiver.push(byte) {
                     let reply = match message {
                         Ok(protocol::Message::HardwareProbe) => {

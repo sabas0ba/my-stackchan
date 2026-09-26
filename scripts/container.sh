@@ -160,7 +160,7 @@ case "$cmd" in
     # build は書込み可能なマウントで先に行う。
     prepare_workspace_mounts
     "$engine" run --rm --network none "${workspace_mounts[@]}" "$image" \
-      cargo build --release --locked --offline -p my-stackchan-host -p stackchan-clock
+      cargo build --release --locked --offline -p my-stackchan-host -p stackchan-clock -p stackchan-image-demo
     # plugin は daemon と同じ uid で動くため、書き換えられて困るものは読取り専用で渡す
     # (docs/plugin.md の「信頼境界と権限」)。リポジトリは読取り専用とし、git のディレクトリは
     # 渡さない (.git/hooks の書換えによるホスト側でのコード実行を防ぐ)。設定ディレクトリも

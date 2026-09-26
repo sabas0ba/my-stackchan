@@ -73,6 +73,7 @@ stackchan CLI ---> spool dir -> | 受付 (通知、手動の表示命令)     | 
 | `crates/plugin-api` | plugin プロトコルの型、版、上限値、フレームの読み書き。`client` module は Rust で plugin を書くための接続補助 |
 | `crates/host` | 既存 CLI に daemon (`stackchan daemon`)、利用者設定の読込み (`stackchan config`) を追加する |
 | `plugins/clock` | 本リポジトリ内の参照実装。API の検証に用いる |
+| `plugins/image-demo` | 画像 (`ImageFrame`) の参照実装。試験模様を送る |
 
 plugin を書くための補助は crate を分けず `plugin-api` に含める。crate 数を抑え、型と補助の版を一致させるためである。plugin の試験には、pipe で接続した daemon 側を模擬する方法を用いる (`crates/plugin-api/src/client.rs` と `crates/host/src/daemon/tests.rs` の試験を参照)。
 
@@ -160,11 +161,12 @@ cards = 1            # 同時に持てる Card の数 (0..8)
 notify = false
 presence = false
 motion = false
+image = false
 param.utc_offset_minutes = "540"
 ```
 
 - `command` は argv である。Linux では隔離コマンドを前置きできる (例: `["podman", "run", "--rm", "-i", ...]`)
-- `cards` / `notify` / `presence` / `motion` は許可の上限であり、plugin が `Hello` で要求したものとの共通部分を `Init` で通知する。省略時はすべて不許可とする
+- `cards` / `notify` / `presence` / `motion` / `image` は許可の上限であり、plugin が `Hello` で要求したものとの共通部分を `Init` で通知する。省略時はすべて不許可とする
 - `param.*` は `Init` で plugin に渡す値である。path 等の環境依存の値は plugin に既定値を持たせず、利用者設定から与える
 
 secret は同じディレクトリの `secrets.conf` に、同じ構文の `[plugin <id>]` と `param.*` だけで書く。`stackchan.conf` を共有・版管理しても secret が混入しないようにするためである。`secrets.conf` から plugin や権限を追加することはできない。`stackchan config` は設定を検証して要約を表示し、`param` は名前だけを表示する。
@@ -199,12 +201,13 @@ plugin-api の型は host 側でのみ使うため、`String` / `Vec` を用い�
 | `Presence` | 表情・活動状態の要求。capability `presence` が必要。採否は daemon が決める |
 | `Emote` | 一時的な表情と視線の要求。capability `presence` が必要。機構部の駆動には加えて `motion` が必要 |
 | `Log` | 診断用の文字列 |
+| `ImageFrame` | 画像 1 枚 (幅、高さ、TTL、RGB565 big-endian の画素)。capability `image` が必要 |
 
 ### daemon -> plugin
 
 | type | 内容 |
 | --- | --- |
-| `Init` | 許可された capability、利用者設定の `param.*` (secret を含む)、表示可能な行数と文字列長の上限 |
+| `Init` | 許可された capability、利用者設定の `param.*` (secret を含む)、表示可能な行数・文字列長・画像の大きさの上限 |
 | `Visibility` | 論理 Card が表示中か否か。カメラ等は表示中だけ取得することで負荷を下げる |
 | `Action` | 論理 Card ID と action ID。タップの結果 |
 | `Rejected` | 検証に失敗したメッセージと理由 |
@@ -212,7 +215,13 @@ plugin-api の型は host 側でのみ使うため、`String` / `Vec` を用い�
 
 Card の識別子は plugin ごとに 0..7 とする。Card の内容はデバイスプロトコルの Card と同じ要素 (Text / Bar / Spacer) で表し、帯は 2 行、Overlay は 4 行までとする。Overlay の Card は TTL を必須とする。期限の無い Overlay は顔を隠し続けるためである。
 
-画像 (`ImageFrame`) は P4 で variant の末尾に追加する。画像は RGB565 で受け取り、daemon に画像 codec を持たせないため、デコードと縮小は plugin 側で行う。
+画像 (`ImageFrame`) は plugin API 版 2 で追加した。画像は RGB565 で受け取り、daemon に画像 codec を持たせないため、デコードと縮小は plugin 側で行う。
+
+- 大きさは `Init` の `limits.image_width` / `image_height` (現在 160×120 px) 以下とする。daemon は画面の中央に置く
+- TTL は 0 で 10 秒とし、期限の無い画像は受け付けない。Overlay の Card と同じく顔を隠し続けないためである。連続した映像は、TTL を数秒とした画像を送り続けることで表す
+- daemon が保持する画像は最新の 1 枚だけで、別の plugin の画像でも置き換える。plugin の停止時にはその plugin の画像を取り除く
+- 1 枚はデバイスへ約 40 フレーム (約 40 KB) になり、転送中は daemon のイベントループが止まる (実機で約 0.3 秒)。daemon は新しい画像をデバイスへ送る間隔を 500 ms 以上とし、間隔内に届いた画像は最新の 1 枚だけを残して間隔の経過後に送る。受信時に拒否しないのは、daemon の処理待ちで溜まった画像がまとめて届いた場合に、古い画像が採られて新しい画像が拒否されるためである
+- 版 1 から版 2 への変更は `Capabilities` と `Limits` のフィールド追加を含み、postcard の符号化が変わる。daemon は版の異なる plugin の `Hello` を拒否するため、外部 plugin は plugin-api の rev を更新して再構築する
 
 `plugin-api` の検証は大きさの一般的な上限 (文字列 256 byte、8 行 × 4 要素) だけを扱い、デバイスに収まるかは daemon が変換時に検証する。plugin API の版をデバイスの上限値の変更から切り離すためである。
 
@@ -253,7 +262,7 @@ firmware の slot (BannerTop / BannerBottom / Overlay) はそのまま使い、d
 | --- | --- | --- |
 | 常設 Card (時計、使用率) | 帯 | 帯ごとに候補を一定間隔で巡回する。利用者設定で固定表示も可能 |
 | 通知 | 帯または Overlay | 優先度が高いものは巡回に割り込む。TTL 満了または既読化で巡回に戻る |
-| 画像 (カメラ) | 画像領域 (Overlay 内) | 利用者の操作で開始し、操作または一定時間で終了する |
+| 画像 (カメラ) | 画像領域 (Overlay 内) | 利用者の操作で開始し、操作または一定時間で終了する。通常優先度の Overlay Card と同順位とし、同順位では新しい方を出す。高優先度の通知と Card は画像に勝つ |
 | presence / emote | 顔と機構部 | 手動の `status` / `face` / `emote` が最優先。plugin からの要求は許可されたものだけを短い TTL で採用する。Emote は連続送信で上書きされるため、plugin ごとに最短間隔を設ける |
 
 firmware 内の表示期限 (TTL) は保険として残し、daemon は表示を切り替えるたびに Card を送り直す。daemon が停止しても古い表示が残らないようにするためである。
@@ -295,7 +304,9 @@ daemon はタップを次のように振り分ける。
 - 帯のそれ以外の位置のタップは、帯の巡回を次の組へ送る
 - 顔の領域と、Overlay の action の無い位置では何もしない
 
-画像領域の分割転送 (`ImageBegin` / `ImageRows` / `ImageEnd`) は P4 で追加する。受信した行はフレームバッファ ([design.md](design.md#画面の更新)) に書き、`ImageEnd` の受信後にまとめて LCD へ転送する。途中まで受信した画像が表示されないようにするためである。160×120 px の画像は約 38 KB であり、1 fps 以下の更新を想定する。
+版 9 で画像領域の分割転送 (`ImageBegin` / `ImageRows` / `ImageEnd`) を追加した (P4)。詳細は [protocol.md](protocol.md#画像領域-版-9) を参照する。受信した行は firmware の画像用の static 領域に書き、`ImageEnd` の受信後にフレームバッファ ([design.md](design.md#画面の更新)) へ描いて LCD へ転送する。途中まで受信した画像が表示されないようにするためである。160×120 px の画像は約 38 KB であり、1 fps 以下の更新を想定する。
+
+画像用の領域はフレームバッファとは別に持つ。表示状態 (Slot の内容) は描画のたびに複製されるため、画素を表示状態に含めると 38 KB の複製が描画ごとに生じるためである。
 
 ## 検証
 
