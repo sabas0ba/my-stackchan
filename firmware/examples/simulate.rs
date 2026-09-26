@@ -195,11 +195,13 @@ fn card(options: &Options) -> Message {
     let mut card = Card {
         slot: Slot::BannerTop,
         ttl_s: 0,
+        id: 0,
         rows: Default::default(),
         image: None,
     };
     let mut title = Row {
         elements: Default::default(),
+        action: None,
     };
     title
         .elements
@@ -214,6 +216,7 @@ fn card(options: &Options) -> Message {
     card.rows.push(title).expect("card has capacity");
     let mut bar = Row {
         elements: Default::default(),
+        action: None,
     };
     bar.elements
         .push(Element::Bar {
@@ -238,6 +241,7 @@ fn image_card() -> Message {
     }
     let mut row = Row {
         elements: Default::default(),
+        action: None,
     };
     row.elements
         .push(Element::Text {
@@ -248,6 +252,7 @@ fn image_card() -> Message {
     let mut card = Card {
         slot: Slot::BannerTop,
         ttl_s: 0,
+        id: 0,
         rows: Default::default(),
         image: Some(ImageData {
             width: 16,

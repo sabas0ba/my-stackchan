@@ -225,6 +225,8 @@ name = "my-stackchan-host"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "heapless",
+ "plugin-api",
  "protocol",
  "serialport",
 ]
@@ -245,6 +247,14 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "plugin-api"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+]
 
 [[package]]
 name = "postcard"
@@ -344,6 +354,13 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "stackchan-clock"
+version = "0.1.0"
+dependencies = [
+ "plugin-api",
+]
 
 [[package]]
 name = "strsim"

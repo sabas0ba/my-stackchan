@@ -8,6 +8,7 @@ Claude Code が本リポジトリで作業する際の補足。利用者全体�
 - プロトコル: [docs/protocol.md](docs/protocol.md)
 - 開発環境と操作: [docs/environment.md](docs/environment.md)
 - 依存の固定と調査記録: [docs/dependencies.md](docs/dependencies.md)
+- プラグイン機構 (設計案): [docs/plugin.md](docs/plugin.md)
 
 ## 作業環境
 

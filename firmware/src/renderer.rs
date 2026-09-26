@@ -1,4 +1,5 @@
-//! 起動確認画面と Slot の描画。フレームバッファを持たず描画先へ直接出力する。
+//! 起動確認画面と Slot の描画。描画先は任意の DrawTarget で、実機では
+//! `framebuffer::FrameBuffer` に描いてから変化した範囲だけを LCD へ送る。
 
 use crate::model::{Content, DisplayState};
 use embedded_graphics::{
@@ -9,7 +10,7 @@ use embedded_graphics::{
     primitives::{Circle, Line, PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
-use protocol::{Activity, Card, Element, Expression, EyeStyle, Gaze, Presence, Slot};
+use protocol::{Activity, Card, Element, Expression, EyeStyle, Gaze, ImageData, Presence, Slot};
 
 const IMAGE_WIDTH: usize = 96;
 const IMAGE_HEIGHT: usize = 16;
@@ -413,8 +414,7 @@ fn draw_card<D: DrawTarget<Color = Rgb565>>(
                 Element::Spacer { .. } => {}
                 Element::Image => {
                     if let Some(image) = &card.image {
-                        let raw = ImageRawBE::<Rgb565>::new(&image.pixels, u32::from(image.width));
-                        Image::new(&raw, cell.top_left + Point::new(0, 2)).draw(&mut clipped)?;
+                        draw_inline_image(&mut clipped, image, cell.top_left + Point::new(0, 2))?;
                     }
                 }
             }
@@ -422,6 +422,22 @@ fn draw_card<D: DrawTarget<Color = Rgb565>>(
         y += i32::from(row.height());
     }
     Ok(())
+}
+
+/// Card の画像を描く。
+///
+/// インライン展開させないのは、`ImageRaw::new` の高さの計算 (画素数 / (幅 × 2)) が
+/// `card.image` の判定より前に先行実行されるのを防ぐためである。Xtensa の除算命令は
+/// 0 で例外を起こすため、画像を持たない Card の未初期化の幅が 0 だと描画中に停止した
+/// (2026-09-26、`quou` による IntegerDivideByZero を逆アセンブルで確認)。
+#[inline(never)]
+fn draw_inline_image<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    image: &ImageData,
+    top_left: Point,
+) -> Result<(), D::Error> {
+    let raw = ImageRawBE::<Rgb565>::new(&image.pixels, u32::from(image.width));
+    Image::new(&raw, top_left).draw(display)
 }
 
 fn draw_cell_label<D: DrawTarget<Color = Rgb565>>(
@@ -824,6 +840,7 @@ mod tests {
                 },
             ])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         rows.push(Row {
@@ -832,6 +849,7 @@ mod tests {
                 label: "Usage".try_into().unwrap(),
             }])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         let mut controller = Controller::default();
@@ -841,6 +859,7 @@ mod tests {
                 Message::Card(Card {
                     slot: Slot::BannerTop,
                     ttl_s: 0,
+                    id: 0,
                     rows,
                     image: None,
                 }),
@@ -857,7 +876,7 @@ mod tests {
     #[test]
     fn inline_rgb565_image_preserves_pixel_colors_and_row_position() {
         use crate::model::Controller;
-        use protocol::{ImageData, Message, Row};
+        use protocol::{Message, Row};
         let mut rows = heapless::Vec::new();
         rows.push(Row {
             elements: heapless::Vec::from_slice(&[
@@ -867,11 +886,13 @@ mod tests {
                 Element::Image,
             ])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         let card = Card {
             slot: Slot::BannerTop,
             ttl_s: 0,
+            id: 0,
             rows,
             image: Some(ImageData {
                 width: 2,

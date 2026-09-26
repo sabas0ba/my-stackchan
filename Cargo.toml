@@ -1,4 +1,5 @@
-# host 側の workspace。protocol (no_std 両用)、host CLI、fontgen を含む。
+# host 側の workspace。protocol (no_std 両用)、plugin-api、host CLI と daemon、fontgen、
+# 参照実装の plugin (plugins/) を含む。
 #
 # firmware/ は本 workspace に含めない。target (xtensa-esp32s3-none-elf) と build-std の
 # 設定が host と異なり、同一 workspace では `cargo build` の既定動作が衝突するため。
@@ -7,6 +8,8 @@
 resolver = "2"
 members = [
   "crates/protocol",
+  "crates/plugin-api",
+  "plugins/clock",
   "crates/host",
   "crates/fontgen",
 ]

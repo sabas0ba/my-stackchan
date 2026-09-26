@@ -28,6 +28,12 @@ pkgs.mkShell {
 
     # vendoring した依存の所在 (Nix store)。shellHook が書込可能な複製を作る。
     MY_STACKCHAN_CARGO_VENDOR = "${cargoVendor}";
+
+    # Windows 向け cross build の linker 設定 (nix/packages.nix)。std の windows-gnu
+    # 実装は静的な libpthread.a を要求し、mingw-w64 の gcc wrapper はその検索 path を
+    # 持たないため、winpthreads の lib を明示する。
+    CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "x86_64-w64-mingw32-gcc";
+    CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = "-L native=${pkgs.pkgsCross.mingwW64.windows.pthreads}/lib";
   };
 
   shellHook = ''

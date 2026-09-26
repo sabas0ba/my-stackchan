@@ -75,6 +75,39 @@ RustSec の公開一覧で esp-bootloader-esp-idf の該当なし。GitHub Advis
 
 [公式の固定タグ](https://github.com/esp-rs/esp-hal/tree/esp-bootloader-esp-idf-v0.5.0/esp-bootloader-esp-idf) の Cargo.toml、src/lib.rs、build.rs を確認した。build.rs は設定生成と日時の埋込を行い、外部取得やコマンド実行はない。0.5.0 の SOURCE_DATE_EPOCH の解釈には秒／マイクロ秒の不一致があるため、記述子の macro に日時を明示し、壁時計への依存を避ける。jiff はビルド時依存として 0.2.13 に固定する。
 
+## Windows 向け host CLI の追加調査 (2026-09-23)
+
+host CLI を `x86_64-pc-windows-gnu` 向けに cross build するため ([plugin.md](plugin.md#windows-向けの-cross-build))、nixpkgs の mingw-w64 cross toolchain を開発環境に追加した。crate の追加と版の変更は無い。
+
+### toolchain
+
+| 成果物 | 版 | 固定 | 備考 |
+| --- | --- | --- | --- |
+| `pkgsCross.mingwW64.stdenv.cc` | gcc 15.2.0、binutils 2.46、mingw-w64 13.0.0 | 既存の nixpkgs rev | linker と C runtime。cache.nixos.org から取得でき、ソースからの構築は発生しない (取得 約 120 MiB) |
+| `pkgsCross.mingwW64.windows.pthreads` | mingw-w64 13.0.0 | 同上 | std の windows-gnu 実装が静的にリンクする `libpthread.a` |
+
+上流の `rust-std-x86_64-pc-windows-gnu` は Espressif fork の compiler (commit `8ea53bcd7`) と組み合わせられないため採らない。std は同梱の rust-src から build-std で構築する。
+
+### Windows 向けで初めてコンパイル対象となる crate
+
+いずれも既に `Cargo.lock` に記録され、`make audit` (cargo-deny は target を限定していない) の対象に含まれていた。Windows 向けの構築で初めてコンパイルされるため、改めて調査した。
+
+| crate | 版 | 公開日 | publish した利用者 | 経路 |
+| --- | --- | --- | --- | --- |
+| windows-sys | 0.52.0 | 2023-11-15 | kennykerr | serialport |
+| windows-targets | 0.52.6 | 2024-07-03 | kennykerr | windows-sys 0.52 |
+| windows_x86_64_gnu | 0.52.6 | 2024-07-03 | kennykerr | windows-targets |
+| windows-sys | 0.61.2 | 2025-10-06 | kennykerr | anstyle-wincon、anstyle-query (clap) |
+| windows-link | 0.2.1 | 2025-10-06 | kennykerr | windows-sys 0.61 |
+| anstyle-wincon | 3.0.11 | 2025-11-13 | epage | anstream (clap) |
+| once_cell_polyfill | 1.70.2 | 2025-10-21 | epage | anstyle-wincon |
+
+- crates.io API で公開日、yank されていないこと、checksum が `Cargo.lock` と一致することを確認した。すべて公開後 7 日を経過している
+- GitHub Advisory API で上記 crate に該当する advisory は無い。RustSec は `make audit` で確認する
+- build script を持つのは windows_x86_64_gnu のみで、内容は同梱の `lib/` を link search path に加える 1 行である。外部取得やコマンド実行は無い
+- windows_x86_64_gnu は構築済みの import library `lib/libwindows.0.52.0.a` (12.7 MB) を同梱する。ソースから再生成できない配布物であり、crate の checksum による固定のみが同一性の根拠となる。Windows の API への import 記述だけを含む想定であるが、内容の独立した検証は行っていない
+- 生成された `stackchan.exe` の import table は Windows 標準の DLL (KERNEL32、msvcrt、advapi32、cfgmgr32、ntdll、setupapi、bcryptprimitives、api-ms-win-core-synch) のみを参照することを `x86_64-w64-mingw32-objdump -p` で確認した
+
 ## 未調査・保留の項目
 
 - GNU Unifont の版と sha256 (Phase 4 で固定する)

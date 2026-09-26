@@ -15,5 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 protocol = { path = "../protocol", features = ["std"] }
+plugin-api = { path = "../plugin-api" }
+# protocol の上限付き型を daemon で組み立てるため。版は workspace で固定済み。
+heapless = { workspace = true }
 clap = { workspace = true }
 serialport = { workspace = true }

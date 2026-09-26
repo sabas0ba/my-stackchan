@@ -30,6 +30,7 @@ required_commands=(
   shfmt
   statix
   tree
+  x86_64-w64-mingw32-gcc
   xtensa-esp32s3-elf-gcc
 )
 

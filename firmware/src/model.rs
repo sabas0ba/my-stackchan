@@ -2,8 +2,14 @@
 
 use embedded_graphics::{pixelcolor::Rgb565, prelude::DrawTarget};
 use protocol::{
-    Card, Emote, Expression, EyeStyle, Gaze, MAX_TEXT_BYTES, Message, Presence, Reply, Slot,
+    Card, Emote, Event, Expression, EyeStyle, Gaze, InputMode, MAX_TEXT_BYTES, Message, Presence,
+    Reply, Slot,
 };
+
+/// タップ位置の照合に使う配置。renderer の描画位置と一致させる。
+const BANNER_HEIGHT: u16 = 48;
+const BOTTOM_BANNER_Y: u16 = 192;
+const CARD_TOP_MARGIN: u16 = 4;
 
 const DEMO_FACES: [(Expression, &str); 12] = [
     (Expression::Happy, "01/12 HAPPY"),
@@ -154,6 +160,7 @@ pub struct Controller {
     state: DisplayState,
     seq: u32,
     pitch_trim_raw_steps: i16,
+    input_mode: InputMode,
     demo_index: Option<usize>,
     blink: bool,
     startup: bool,
@@ -165,6 +172,7 @@ impl Default for Controller {
             state: DisplayState::default(),
             seq: 0,
             pitch_trim_raw_steps: 0,
+            input_mode: InputMode::Demo,
             demo_index: None,
             blink: false,
             startup: true,
@@ -193,6 +201,56 @@ impl Controller {
         self.pitch_trim_raw_steps
     }
 
+    pub fn input_mode(&self) -> InputMode {
+        self.input_mode
+    }
+
+    /// タップ位置を表示中の slot と Card の行に照合する。y は画面上端からの位置。
+    /// Card の行は画面幅いっぱいに置かれるため、横方向の位置は照合に使わない。
+    pub fn hit(&self, y: u16) -> Event {
+        let (slot, top) = if self.state.get(Slot::Overlay).is_some() {
+            (Slot::Overlay, 0)
+        } else if y < BANNER_HEIGHT && self.state.get(Slot::BannerTop).is_some() {
+            (Slot::BannerTop, 0)
+        } else if (BOTTOM_BANNER_Y..BOTTOM_BANNER_Y + BANNER_HEIGHT).contains(&y)
+            && self.state.get(Slot::BannerBottom).is_some()
+        {
+            (Slot::BannerBottom, BOTTOM_BANNER_Y)
+        } else {
+            return Event::Tap {
+                slot: None,
+                card: None,
+                action: None,
+            };
+        };
+        let Some(Entry {
+            content: Content::Card(card),
+            ..
+        }) = self.state.get(slot)
+        else {
+            return Event::Tap {
+                slot: Some(slot),
+                card: None,
+                action: None,
+            };
+        };
+        let mut row_top = top + CARD_TOP_MARGIN;
+        let mut action = None;
+        for row in &card.rows {
+            let height = row.height();
+            if (row_top..row_top + height).contains(&y) {
+                action = row.action;
+                break;
+            }
+            row_top += height;
+        }
+        Event::Tap {
+            slot: Some(slot),
+            card: (card.id != 0).then_some(card.id),
+            action,
+        }
+    }
+
     pub fn actuator_target(&self) -> crate::behavior::ActuatorTarget {
         crate::behavior::target(self.state.presence(), self.state.emote())
     }
@@ -212,6 +270,13 @@ impl Controller {
                 });
             }
             Message::Clear => next = DisplayState::default(),
+            Message::ClearSlot(slot) => next.slots[slot_index(slot)] = None,
+            Message::InputMode(mode) => {
+                // 表示を変えないため描画せず、PitchTrim と同様に通し番号だけを進める。
+                self.input_mode = mode;
+                self.seq = self.seq.wrapping_add(1);
+                return Ok(Reply::Ack { seq: self.seq });
+            }
             Message::Text { slot, ttl_s, text } => {
                 if self.demo_index.is_some() {
                     next.presence = None;
@@ -357,6 +422,7 @@ mod tests {
                 text: "CPU".try_into().unwrap(),
             }])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         rows.push(protocol::Row {
@@ -365,11 +431,13 @@ mod tests {
                 label: "Usage".try_into().unwrap(),
             }])
             .unwrap(),
+            action: None,
         })
         .unwrap();
         Message::Card(Card {
             slot,
             ttl_s,
+            id: 0,
             rows,
             image: None,
         })
@@ -663,5 +731,103 @@ mod tests {
             controller.handle(Message::Clear, 0, &mut display),
             Ok(Reply::Ack { seq: 0 })
         );
+    }
+
+    fn card_with_actions(slot: Slot, id: u16) -> Message {
+        let Message::Card(mut card) = card(slot, 0, 50) else {
+            unreachable!()
+        };
+        card.id = id;
+        card.rows[0].action = Some(7);
+        Message::Card(card)
+    }
+
+    #[test]
+    fn taps_resolve_to_slot_card_and_row_action() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        let none = Event::Tap {
+            slot: None,
+            card: None,
+            action: None,
+        };
+        assert_eq!(controller.hit(10), none);
+        controller
+            .handle(card_with_actions(Slot::BannerTop, 42), 0, &mut display)
+            .unwrap();
+        controller
+            .handle(text(Slot::BannerBottom, 0, "note"), 0, &mut display)
+            .unwrap();
+        // 1 行目は y 4..24 (action 7)、2 行目は 24..44 (action なし)。
+        for (y, action) in [
+            (4, Some(7)),
+            (23, Some(7)),
+            (24, None),
+            (47, None),
+            (0, None),
+        ] {
+            assert_eq!(
+                controller.hit(y),
+                Event::Tap {
+                    slot: Some(Slot::BannerTop),
+                    card: Some(42),
+                    action
+                },
+                "y={y}"
+            );
+        }
+        assert_eq!(controller.hit(120), none, "顔の領域");
+        assert_eq!(
+            controller.hit(200),
+            Event::Tap {
+                slot: Some(Slot::BannerBottom),
+                card: None,
+                action: None
+            }
+        );
+        // Overlay は画面全体を覆い、識別子 0 の Card は card を返さない。
+        controller
+            .handle(card_with_actions(Slot::Overlay, 0), 0, &mut display)
+            .unwrap();
+        assert_eq!(
+            controller.hit(10),
+            Event::Tap {
+                slot: Some(Slot::Overlay),
+                card: None,
+                action: Some(7)
+            }
+        );
+    }
+
+    #[test]
+    fn clear_slot_removes_only_that_slot() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        controller
+            .handle(text(Slot::BannerTop, 0, "top"), 0, &mut display)
+            .unwrap();
+        controller
+            .handle(text(Slot::BannerBottom, 0, "bottom"), 0, &mut display)
+            .unwrap();
+        assert_eq!(
+            controller.handle(Message::ClearSlot(Slot::BannerTop), 0, &mut display),
+            Ok(Reply::Ack { seq: 3 })
+        );
+        assert!(controller.state.get(Slot::BannerTop).is_none());
+        assert!(controller.state.get(Slot::BannerBottom).is_some());
+    }
+
+    #[test]
+    fn input_mode_is_acknowledged_without_redraw() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        assert_eq!(controller.input_mode(), InputMode::Demo);
+        assert_eq!(
+            controller.handle(Message::InputMode(InputMode::Forward), 0, &mut display),
+            Ok(Reply::Ack { seq: 1 })
+        );
+        assert_eq!(controller.input_mode(), InputMode::Forward);
+        assert_eq!(display.pixels, 0);
+        assert!(controller.startup, "表示確認画面を維持する");
     }
 }

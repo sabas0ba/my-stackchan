@@ -28,12 +28,15 @@ use mipidsi::{
 
 mod board;
 use my_stackchan_firmware::{
-    actuators, model::Controller, power, renderer, touch, transport::Receiver,
+    actuators, framebuffer::FrameBuffer, model::Controller, power, renderer, touch,
+    transport::Receiver,
 };
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 
 static RECEIVER: StaticCell<Receiver> = StaticCell::new();
 static CONTROLLER: StaticCell<Controller> = StaticCell::new();
+// 150 KB あるため、スタック上に作ってから移す経路を通らないよう const で初期化する。
+static FRAME: ConstStaticCell<FrameBuffer> = ConstStaticCell::new(FrameBuffer::new());
 
 fn send_servo(
     uart: &mut Uart<'_, esp_hal::Blocking>,
@@ -146,7 +149,9 @@ fn main() -> ! {
         .invert_colors(ColorInversion::Inverted)
         .init(&mut delay)
         .expect("ILI9342C initialization");
-    renderer::draw(&mut display).expect("display drawing");
+    let frame = FRAME.take();
+    let Ok(()) = renderer::draw(frame);
+    frame.flush(&mut display).expect("display drawing");
     power::set_backlight(&mut i2c, true).expect("display backlight");
     esp_println::println!("Phase 1 display ready: face / ASCII / RGB565");
 
@@ -158,6 +163,8 @@ fn main() -> ! {
     }
     let mut tap_detector = touch::TapDetector::default();
     let mut next_touch_poll_ms = 0u64;
+    // host へ送る入力は最新の 1 件だけを保持する。応答の送信を優先し、空いた時に送る。
+    let mut pending_event: Option<protocol::Event> = None;
 
     let mut actuator_ready = false;
     if power::prepare_body_power(&mut i2c, &mut delay).is_ok() {
@@ -213,7 +220,8 @@ fn main() -> ! {
             tx_len = 0;
             tx_sent = 0;
         }
-        if controller.tick(now_ms, &mut display).is_err() {
+        let Ok(()) = controller.tick(now_ms, frame);
+        if frame.flush(&mut display).is_err() {
             esp_println::println!("display expiry drawing failed");
         }
         if now_ms >= next_touch_poll_ms {
@@ -224,10 +232,19 @@ fn main() -> ! {
                     .is_ok();
                 tap_detector = touch::TapDetector::default();
             } else {
-                match touch::read_pressed(&mut i2c) {
-                    Ok(pressed) if tap_detector.sample(pressed) => {
-                        if controller.tap(now_ms, &mut display).is_err() {
-                            esp_println::println!("touch demo drawing failed");
+                match touch::read_point(&mut i2c) {
+                    Ok(point) if tap_detector.sample(point.is_some()) => {
+                        let (_, y) = point.unwrap_or_default();
+                        match controller.input_mode() {
+                            protocol::InputMode::Demo => {
+                                let Ok(()) = controller.tap(now_ms, frame);
+                                if frame.flush(&mut display).is_err() {
+                                    esp_println::println!("touch demo drawing failed");
+                                }
+                            }
+                            protocol::InputMode::Forward => {
+                                pending_event = Some(controller.hit(y));
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -304,12 +321,15 @@ fn main() -> ! {
                                 enabled: actuator_ready,
                             }
                         }
-                        Ok(message) => controller
-                            .handle(message, now_ms, &mut display)
-                            .unwrap_or_else(|_| {
+                        // Ack は LCD への転送まで済んでから返す。転送に失敗した場合、
+                        // 状態は確定済みで、次の転送で画面全体を送り直す。
+                        Ok(message) => match controller.handle(message, now_ms, frame) {
+                            Ok(reply) if frame.flush(&mut display).is_ok() => reply,
+                            _ => {
                                 esp_println::println!("display update failed");
                                 receiver.reject()
-                            }),
+                            }
+                        },
                         Err(reply) => reply,
                     };
                     // bootloader が USB に出したログと応答の境界を保証する。
@@ -321,6 +341,15 @@ fn main() -> ! {
                     break;
                 }
             }
+        }
+        if tx_len == 0
+            && let Some(event) = pending_event.take()
+        {
+            tx[0] = 0;
+            tx_len = 1 + protocol::encode(&protocol::Reply::Event(event), &mut tx[1..])
+                .expect("event buffer capacity")
+                .len();
+            tx_started_ms = Instant::now().duration_since_epoch().as_millis();
         }
         while tx_sent < tx_len {
             if usb.write_byte_nb(tx[tx_sent]).is_err() {

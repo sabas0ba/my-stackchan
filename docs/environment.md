@@ -52,6 +52,54 @@ scripts/container.sh device stackchan ping
 
 取り外す場合は `usbipd detach --busid <BUSID>`。
 
+### Windows ネイティブの host CLI
+
+host CLI はコンテナ内で Windows 向けに cross build できる。Windows 上で直接実行するため、toolchain をホストに導入する必要はない。
+
+```bash
+scripts/container.sh run make build-host-windows
+# 成果物: target/x86_64-pc-windows-gnu-build-std/x86_64-pc-windows-gnu/release/stackchan.exe
+```
+
+Espressif fork の toolchain には windows-gnu の std が無いため、同梱の rust-src から build-std で構築する。linker と winpthreads は nixpkgs の mingw-w64 を用い、winpthreads は静的にリンクされる。exe が参照する DLL は Windows に標準で含まれるもののみである。
+
+Windows 上で CoreS3 に接続する場合は、usbipd で WSL 側に attach していないこと (`usbipd list` で `Not shared` または `Shared`) を確認する。
+
+```powershell
+.\stackchan.exe list-ports   # CoreS3 は 303a:1001 の COMx として現れる
+.\stackchan.exe ping
+```
+
+Windows 上の実行時の動作は CI では検査しない。`make check` は Windows 向けの clippy と build が通ることだけを確認する。
+
+### daemon と plugin
+
+`stackchan daemon` は port を占有し、利用者設定に書いた plugin を起動して表示を調停する。設計と設定の書式は [plugin.md](plugin.md) を参照する。参照実装の時計 plugin (`plugins/clock`) を Windows で動かす例:
+
+```bash
+scripts/container.sh run make build-host-windows
+# 成果物: target/x86_64-pc-windows-gnu-build-std/x86_64-pc-windows-gnu/release/{stackchan,stackchan-clock}.exe
+```
+
+`%APPDATA%\stackchan\stackchan.conf` (または `--config-dir` で指定したディレクトリ) に次を置く。
+
+```
+[plugin clock]
+command = ["C:/path/to/stackchan-clock.exe"]
+cards = 1
+param.utc_offset_minutes = "540"
+```
+
+```powershell
+.\stackchan.exe config          # 設定を検証し、要約を表示する
+.\stackchan.exe input forward   # タップを host へ送る (任意。再起動で demo に戻る)
+.\stackchan.exe daemon          # Ctrl+C で終了する
+```
+
+`input forward` の間、帯の Card の行をタップすると、その行に action を持つ plugin へ通知される。帯のそれ以外の位置をタップすると帯の巡回が次の組へ進む。`input demo` で従来の表情デモに戻す。daemon の動作中は port を占有するため、切替は daemon の起動前に行う。
+
+daemon のログは stderr に出る。daemon を終了すると、表示は最長で `rotate_s` + 5 秒後に firmware 側の期限で消える。daemon の動作中は他の CLI の表示命令は port を開けずに失敗する。
+
 ## Linux ホストからの使い方
 
 nix を持つ場合は `nix develop` または `direnv allow` で開発シェルに入り、`make help` で操作を一覧する。コンテナを使う場合は `make docker-build` / `make docker-shell` / `make docker-check`。
@@ -260,7 +308,7 @@ X=460、Y=620、UART は GPIO6/7・1 Mbaud、LED 拡張器は I²C 0x6F を使�
 ### 静的検査・単体テスト
 
 ```bash
-make check        # nix flake check + 環境 + Rust の fmt/clippy/test
+make check        # nix flake check + 環境 + Rust の fmt/clippy/test + Windows 向け clippy/build
 make lint         # 静的解析のみ
 make fmt          # 整形
 make audit        # cargo-deny による advisory と license の検査 (ネットワークを使用)

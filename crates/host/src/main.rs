@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod bmp;
+mod config;
+mod daemon;
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
 const ESP_USB_SERIAL_JTAG: (u16, u16) = (0x303A, 0x1001);
@@ -21,12 +23,27 @@ struct Cli {
     /// 設置場所ごとのピッチ補正ファイル。既定は .work/pitch-trim.txt。
     #[arg(long, global = true)]
     pitch_trim_file: Option<PathBuf>,
+    /// 利用者設定のディレクトリ。既定は %APPDATA%\stackchan または
+    /// $XDG_CONFIG_HOME/stackchan ($HOME/.config/stackchan)。
+    #[arg(long, global = true)]
+    config_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// 利用者設定を検証し、要約を表示する。secret の値は表示しない。
+    Config,
+    /// port を占有し、設定した plugin を起動して表示を調停する。
+    Daemon,
+    /// 画面のタップの扱いを切り替える。firmware の再起動で demo に戻る。
+    Input {
+        #[arg(long)]
+        port: Option<String>,
+        #[arg(value_enum)]
+        mode: HostInputMode,
+    },
     /// M5 StackChan 本体の I²C 拡張器と出力の状態を読み取る。
     Hardware {
         #[arg(long)]
@@ -143,6 +160,23 @@ enum Command {
         #[arg(long, requires = "image_bmp")]
         image_height: Option<u8>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HostInputMode {
+    /// firmware 内の表情デモを進める。
+    Demo,
+    /// タップを host へ通知する (daemon が plugin へ転送する)。
+    Forward,
+}
+
+impl From<HostInputMode> for protocol::InputMode {
+    fn from(value: HostInputMode) -> Self {
+        match value {
+            HostInputMode::Demo => Self::Demo,
+            HostInputMode::Forward => Self::Forward,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -264,6 +298,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let trim_file = pitch_trim_file(cli.pitch_trim_file);
     match cli.command {
+        Command::Config => show_config(cli.config_dir),
+        Command::Input { port, mode } => send_display(
+            port,
+            &protocol::Message::InputMode(mode.into()),
+            Some(&trim_file),
+        ),
+        Command::Daemon => {
+            let dir = config::resolve_dir(cli.config_dir)?;
+            daemon::run(config::load(&dir)?, trim_file)
+        }
         Command::Hardware { port } => hardware(port),
         Command::PitchTrim {
             port,
@@ -386,6 +430,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&trim_file),
         ),
     }
+}
+
+fn show_config(explicit: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = config::resolve_dir(explicit)?;
+    let config = config::load(&dir)?;
+    println!("config dir: {}", dir.display());
+    println!(
+        "daemon: port={}, rotate_s={}",
+        config.daemon.port.as_deref().unwrap_or("(auto)"),
+        config.daemon.rotate_s
+    );
+    for plugin in &config.plugins {
+        let allowed = plugin.allowed;
+        println!(
+            "plugin {}: command={:?}, rev={}, cards={}, notify={}, presence={}, motion={}",
+            plugin.id,
+            plugin.command,
+            plugin.rev.as_deref().unwrap_or("-"),
+            allowed.cards,
+            allowed.notify,
+            allowed.presence,
+            allowed.motion
+        );
+        // 値には secret が含まれ得るため、名前だけを表示する。
+        let names: Vec<&str> = plugin
+            .params
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        println!("  params: {names:?}");
+    }
+    Ok(())
 }
 
 fn list_ports() -> Result<(), Box<dyn std::error::Error>> {
@@ -627,11 +703,14 @@ fn card_message(
     let mut card = protocol::Card {
         slot: slot.into(),
         ttl_s,
+        // CLI から送る Card はタップの通知先を持たない。
+        id: 0,
         rows: Default::default(),
         image,
     };
     let mut header = protocol::Row {
         elements: Default::default(),
+        action: None,
     };
     header
         .elements
@@ -663,6 +742,7 @@ fn card_message(
     if let Some(ratio) = ratio {
         let mut row = protocol::Row {
             elements: Default::default(),
+            action: None,
         };
         row.elements
             .push(protocol::Element::Bar {
@@ -680,6 +760,7 @@ fn card_message(
     if card.image.is_some() {
         let mut row = protocol::Row {
             elements: Default::default(),
+            action: None,
         };
         row.elements
             .push(protocol::Element::Image)
@@ -689,6 +770,7 @@ fn card_message(
     if let Some(height) = space {
         let mut row = protocol::Row {
             elements: Default::default(),
+            action: None,
         };
         row.elements
             .push(protocol::Element::Spacer { height })
@@ -722,9 +804,9 @@ fn send_checked(
         protocol::Reply::Rejected { count } => {
             Err(format!("表示更新が拒否されました: rejected={count}").into())
         }
-        protocol::Reply::Pong { .. } | protocol::Reply::HardwareStatus { .. } => {
-            Err("表示更新に対して Ack 以外の応答を受信しました".into())
-        }
+        protocol::Reply::Pong { .. }
+        | protocol::Reply::HardwareStatus { .. }
+        | protocol::Reply::Event(_) => Err("表示更新に対して Ack 以外の応答を受信しました".into()),
     }
 }
 
@@ -766,8 +848,10 @@ fn read_reply(reader: &mut impl Read) -> Result<protocol::Reply, Box<dyn std::er
         if byte[0] == 0 {
             if !discarding && len != 0 {
                 rx[len] = 0;
-                if let Ok(reply) = protocol::decode(&mut rx[..=len]) {
-                    return Ok(reply);
+                // タップ等の Event は要求への応答ではないため読み飛ばす。
+                match protocol::decode(&mut rx[..=len]) {
+                    Ok(protocol::Reply::Event(_)) | Err(_) => {}
+                    Ok(reply) => return Ok(reply),
                 }
             }
             len = 0;
@@ -1370,6 +1454,7 @@ mod tests {
         for row_index in 0..protocol::MAX_CARD_ROWS {
             let mut row = protocol::Row {
                 elements: Default::default(),
+                action: None,
             };
             for column_index in 0..protocol::MAX_ROW_ELEMENTS {
                 row.elements

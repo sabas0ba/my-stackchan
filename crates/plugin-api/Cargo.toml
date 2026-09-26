@@ -1,0 +1,16 @@
+[package]
+name = "plugin-api"
+description = "plugin と host daemon の間のメッセージ定義、フレームの読み書き、plugin 側の補助"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# crates.io に publish しない。cargo-deny の path 依存の扱いにも関係する (deny.toml)。
+publish = false
+
+# デバイスプロトコル (crates/protocol) には依存しない。firmware 側の変更を plugin に
+# 波及させないため、デバイス固有の上限は daemon が Init で通知し、daemon 側で検証する。
+[dependencies]
+serde = { workspace = true, features = ["std"] }
+postcard = { workspace = true, features = ["use-std"] }
