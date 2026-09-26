@@ -72,6 +72,18 @@ impl Frames {
             if self.discarding {
                 return None;
             }
+            // firmware の出力は改行で終わる行単位であり、直後に区切りの 0x00 を挟まずに
+            // フレームが続き得る。改行の時点で切り出し、後続のフレームと混ぜない。
+            // 応答のフレームは先頭が COBS の符号バイト (次の 0x00 までの距離。応答の大きさでは
+            // 0x20 未満) であり、制御文字を含むためテキストとは判定されない。
+            if byte == b'\n' && self.buffer.len() < protocol::MAX_FRAME_BYTES - 1 {
+                self.buffer.push(byte);
+                if let Some(text) = as_text(&self.buffer) {
+                    self.buffer.clear();
+                    return Some(Received::Text(text));
+                }
+                return None;
+            }
             if self.buffer.len() == protocol::MAX_FRAME_BYTES - 1 {
                 // 長いテキストは区切りを待たずに出す。それ以外は次の区切りまで捨てる。
                 if let Some(text) = as_text(&self.buffer) {
@@ -399,6 +411,25 @@ mod tests {
             Some("\x1b[31m PANIC \r\n")
         );
         assert_eq!(as_text(&[0xFF, b'a']), None);
+
+        // 改行で終わる行の直後に区切り無しでフレームが続いても、両方を取り出す。
+        let mut frames = Frames::default();
+        let tap = protocol::Reply::Event(protocol::Event::Tap {
+            slot: None,
+            card: None,
+            action: None,
+        });
+        let mut stream = b"\x1b[31mPANIC\x1b[0m\r\nboot log\n".to_vec();
+        stream.extend(wire(&tap));
+        let received: Vec<_> = stream.iter().filter_map(|&b| frames.push(b)).collect();
+        assert_eq!(
+            received,
+            [
+                Received::Text("\x1b[31mPANIC\x1b[0m\r\n".into()),
+                Received::Text("boot log\n".into()),
+                Received::Reply(tap),
+            ]
+        );
 
         // 区切りの無い panic の出力は take_text で取り出せる。
         let mut frames = Frames::default();
