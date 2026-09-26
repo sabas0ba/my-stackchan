@@ -28,7 +28,7 @@ PC 側の情報源と、それに伴う描画・操作を本リポジトリ外�
 
 | 条件 | 内容 |
 | --- | --- |
-| 実行環境 | daemon と plugin は Windows ネイティブと Linux (WSL、コンテナを含む) の両方で動作する。OS 固有の機能を必須としない |
+| 実行環境 | daemon と plugin は Windows ネイティブと Linux (WSL、コンテナを含む) の両方で動作するよう実装し、OS 固有の機能を必須としない。運用は Linux 側 (コンテナ) で行う (決定事項を参照) |
 | 依存 | Rust の crate は増やさない。既存の `serde`、`postcard`、`heapless`、`clap`、`serialport` と std で構成する |
 | 隔離 | OS による隔離は必須としない。plugin の権限は daemon がプロトコル上で制限できる範囲 (表示、通知、表情) に限って強制する |
 | plugin の作者 | 主に利用者自身。第三者製もあり得るが、導入前に利用者がソースを確認し、commit SHA で固定することを前提とする |
@@ -284,7 +284,8 @@ Claude / Codex 使用率は P3 の最初の外部 plugin とする。design.md �
 | --- | --- | --- |
 | 隔離 | OS による隔離は必須としない。Linux では起動コマンドの前置きで任意に隔離できるようにする | Windows と Linux に共通する手段を依存なしで用意できない |
 | 形式 | plugin プロトコルは postcard + COBS、利用者設定は自前パーサの簡易形式 | Rust の依存を増やさない |
-| 実行環境 | Windows ネイティブを対象から外さない。local socket の代わりに spool ディレクトリを用いる | std だけで両 OS に対応できる |
+| 実行環境 | 実装は Windows ネイティブを対象から外さない。local socket の代わりに spool ディレクトリを用いる | std だけで両 OS に対応できる |
+| 運用環境 | daemon と plugin は Linux 側 (コンテナ、`scripts/container.sh daemon`) で動かす。設定ディレクトリは Windows の `%APPDATA%\stackchan` をマウントし、Windows 側の hook からも spool に書けるようにする (2026-09-26) | Windows の Smart App Control が、利用者の build した署名の無い exe を実行させない。その設定の変更は難しく不可逆である |
 | タップの切替 | CLI で明示的に切り替える。起動時は Demo | 単体での動作確認を保ち、daemon の暗黙の状態変更を避ける |
 | 設定ディレクトリ | OS ごとの既定値を持ち、`--config-dir` で起動時に変更できる | 複数の構成の併用と試験での分離 |
 | Windows 向けの構築 | コンテナ内で `x86_64-pc-windows-gnu` 向けに cross build する | ホストに toolchain を導入しない規約を保つ |
