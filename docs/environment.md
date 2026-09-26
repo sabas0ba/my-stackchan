@@ -54,7 +54,7 @@ scripts/container.sh device stackchan ping
 
 ### Windows ネイティブの host CLI
 
-host CLI はコンテナ内で Windows 向けに cross build できる。Windows 上で直接実行するため、toolchain をホストに導入する必要はない。
+host CLI はコンテナ内で Windows 向けに cross build できる。Windows 上で直接実行するため、toolchain をホストに導入する必要はない。ただし Smart App Control が有効な環境では実行できない場合がある。運用は次節のとおり Linux 側で行い、Windows 向けの build は `make check` で build が通ることの検査に残す。
 
 ```bash
 scripts/container.sh run make build-host-windows
@@ -74,31 +74,49 @@ Windows 上の実行時の動作は CI では検査しない。`make check` は 
 
 ### daemon と plugin
 
-`stackchan daemon` は port を占有し、利用者設定に書いた plugin を起動して表示を調停する。設計と設定の書式は [plugin.md](plugin.md) を参照する。参照実装の時計 plugin (`plugins/clock`) を Windows で動かす例:
+`stackchan daemon` は port を占有し、利用者設定に書いた plugin を起動して表示を調停する。設計と設定の書式は [plugin.md](plugin.md) を参照する。
 
-```bash
-scripts/container.sh run make build-host-windows
-# 成果物: target/x86_64-pc-windows-gnu-build-std/x86_64-pc-windows-gnu/release/{stackchan,stackchan-clock}.exe
-```
+daemon と plugin は Linux 側 (コンテナ) で動かす。Windows ホストでは、利用者が build した署名の無い exe を Smart App Control が実行させない場合があり、その設定の変更は難しく不可逆であるため、Windows ネイティブでの運用は行わない (2026-09-26 に決定)。
 
-`%APPDATA%\stackchan\stackchan.conf` (または `--config-dir` で指定したディレクトリ) に次を置く。
+1. CoreS3 を WSL へ渡す。firmware の再起動で USB が切断されると通常の attach は外れるため、`--auto-attach` を用いる。usbipd はこの間、前面で動き続ける
 
-```
-[plugin clock]
-command = ["C:/path/to/stackchan-clock.exe"]
-cards = 1
-param.utc_offset_minutes = "540"
-```
+   ```powershell
+   usbipd list                                     # CoreS3 (303a:1001) の BUSID を確認する
+   usbipd attach --wsl --busid <BUSID> --auto-attach
+   ```
 
-```powershell
-.\stackchan.exe config          # 設定を検証し、要約を表示する
-.\stackchan.exe input forward   # タップを host へ送る (任意。再起動で demo に戻る)
-.\stackchan.exe daemon          # Ctrl+C で終了する
-```
+2. 設定ディレクトリに `stackchan.conf` を置く。既定は Windows では `%APPDATA%\stackchan`、Linux ホストでは `${XDG_CONFIG_HOME:-$HOME/.config}/stackchan` で、`STACKCHAN_CONFIG_DIR` で変えられる。コンテナ内では `/config` にマウントされる。plugin の `command` にはコンテナ内の path を書く
+
+   ```
+   [plugin clock]
+   command = ["/workspace/target/release/stackchan-clock"]
+   cards = 1
+   param.utc_offset_minutes = "540"
+   ```
+
+3. 起動する。daemon と同梱の plugin を release で build してから起動する。引数は `stackchan daemon` に渡る
+
+   ```bash
+   scripts/container.sh device cargo run -q --locked --offline -p my-stackchan-host -- input forward  # 任意。再起動で demo に戻る
+   scripts/container.sh daemon                  # Ctrl+C または podman stop stackchan-daemon で終了する
+   scripts/container.sh daemon --trace          # 送受信も記録する
+   ```
+
+コンテナのネットワークは既定で `none` とし、plugin の外部通信を許可しない。LAN 上の機器を使う plugin を動かす場合にだけ、`STACKCHAN_DAEMON_NETWORK=bridge` 等で明示する。
 
 `input forward` の間、帯の Card の行をタップすると、その行に action を持つ plugin へ通知される。帯のそれ以外の位置をタップすると帯の巡回が次の組へ進む。`input demo` で従来の表情デモに戻す。daemon の動作中は port を占有するため、切替は daemon の起動前に行う。
 
-daemon のログは stderr に出る。daemon を終了すると、表示は最長で `rotate_s` + 5 秒後に firmware 側の期限で消える。daemon の動作中は他の CLI の表示命令は port を開けずに失敗する。
+daemon のログは stderr と `<設定ディレクトリ>/logs/daemon.log` に出る。各行は UTC の時刻 (RFC 3339)、重要度、発生元 (`daemon`、`device`、`device text`、`plugin <id>`、`plugin <id> stderr`) を持つ。ファイルは 1 MiB を超えると `daemon.log.1`、`daemon.log.2` へ送り、それより古いものは消す。
+
+| オプション | 内容 |
+| --- | --- |
+| `--log-level error\|warn\|info\|debug` | 出力する最も低い重要度。既定は info。タップの受信は debug |
+| `--trace` | デバイスと plugin との送受信をすべて記録する。plugin へ渡す `param` (secret を含み得る) は件数だけを記録する |
+| `--no-log-file` | ファイルに書かず、stderr にだけ出す |
+
+`device text` は、USB 上でフレームとして復号できなかったテキスト (firmware の起動ログや panic の出力) である。panic で firmware が停止した場合も、応答待ちのタイムアウトの時点でそれまでの出力を記録する。
+
+daemon を終了すると、表示は最長で `rotate_s` + 5 秒後に firmware 側の期限で消える。daemon の動作中は他の CLI の表示命令は port を開けずに失敗する。
 
 ## Linux ホストからの使い方
 
@@ -115,7 +133,7 @@ nix を持つ場合は `nix develop` または `direnv allow` で開発シェル
 5. 中央の顔、下部の `ASCII 0123456789 !?` と `RGB565`、左から赤・緑・青・白のカラーバーを確認する。
 6. リセット後と電源再投入後の両方で同じ画面になることを確認する。
 
-成功時は UART0 に `Phase 1 display ready: face / ASCII / RGB565` を出力する。USB Serial/JTAG へログは出さないため、USB monitor でこのログは観測できない。表示が点灯しない場合は UART0 のエラーと内部 I2C の応答を確認する。ビルド成功だけでは実機の表示確認を代替できない。
+成功時は UART0 に `Phase 1 display ready: face / ASCII / RGB565` を出力する。ROM のコンソールを経由するため USB 側にも出力され得るが、host の CLI は接続時に受信バッファを破棄するため、起動直後のログは CLI では観測できない ([design.md](design.md#ログと通信の分離))。表示が点灯しない場合は UART0 のエラーと内部 I2C の応答を確認する。ビルド成功だけでは実機の表示確認を代替できない。
 
 ## 検査
 

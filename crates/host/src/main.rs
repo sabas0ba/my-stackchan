@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 mod bmp;
 mod config;
 mod daemon;
+mod log;
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
 const ESP_USB_SERIAL_JTAG: (u16, u16) = (0x303A, 0x1001);
@@ -36,7 +37,17 @@ enum Command {
     /// 利用者設定を検証し、要約を表示する。secret の値は表示しない。
     Config,
     /// port を占有し、設定した plugin を起動して表示を調停する。
-    Daemon,
+    Daemon {
+        /// ログに出す最も低い重要度。
+        #[arg(long, value_enum, default_value = "info")]
+        log_level: HostLogLevel,
+        /// デバイスと plugin との送受信を記録する。secret を含む値は記録しない。
+        #[arg(long)]
+        trace: bool,
+        /// ログをファイルに書かない (stderr のみ)。
+        #[arg(long)]
+        no_log_file: bool,
+    },
     /// 画面のタップの扱いを切り替える。firmware の再起動で demo に戻る。
     Input {
         #[arg(long)]
@@ -160,6 +171,14 @@ enum Command {
         #[arg(long, requires = "image_bmp")]
         image_height: Option<u8>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HostLogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -304,8 +323,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &protocol::Message::InputMode(mode.into()),
             Some(&trim_file),
         ),
-        Command::Daemon => {
+        Command::Daemon {
+            log_level,
+            trace,
+            no_log_file,
+        } => {
             let dir = config::resolve_dir(cli.config_dir)?;
+            let level = match (trace, log_level) {
+                (true, _) => log::Level::Trace,
+                (false, HostLogLevel::Error) => log::Level::Error,
+                (false, HostLogLevel::Warn) => log::Level::Warn,
+                (false, HostLogLevel::Info) => log::Level::Info,
+                (false, HostLogLevel::Debug) => log::Level::Debug,
+            };
+            let log_dir = dir.join("logs");
+            log::init(level, (!no_log_file).then_some(log_dir.as_path()))?;
+            if !no_log_file {
+                log::info!(
+                    "daemon",
+                    "ログを {} に書きます",
+                    log_dir.join(log::FILE_NAME).display()
+                );
+            }
             daemon::run(config::load(&dir)?, trim_file)
         }
         Command::Hardware { port } => hardware(port),

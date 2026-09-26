@@ -43,7 +43,7 @@ sha256 の取得元は GitHub Releases の asset digest (API の `digest` フィ
 | serialport | 4.9.0 | 2026-03-16 | シリアル通信 (MPL-2.0)。`libudev` feature は無効 (C ライブラリ依存を持ち込まないため。Linux では sysfs から VID/PID を列挙する) | RustSec / GHSA なし。4.10.0 (2026-08-26) は侵害事案の直後のため見送り |
 | esp-hal | 1.1.2 | 2026-08-05 | HAL (MSRV 1.88) | RustSec / GHSA なし。1.2.0 (2026-09-02) はクールダウン中 |
 | esp-backtrace | 0.19.0 | 2026-04-16 | panic / 例外の出力 | esp-hal 1.1 系に対応 |
-| esp-println | 0.17.0 | 2026-04-16 | ログ出力 (UART0) | 同上 |
+| esp-println | 0.17.0 | 2026-04-16 | ログ出力 (UART0。ESP32-S3 では ROM のコンソールを経由し USB にも出力され得る) | 同上 |
 | embedded-hal | 1.0.0 | - | HAL trait | - |
 | embedded-hal-bus | 0.3.0 | 2025-01-21 | SPI device の共有 | - |
 | embedded-graphics | 0.8.2 | 2026-02-15 | 2D 描画 | GHSA なし |

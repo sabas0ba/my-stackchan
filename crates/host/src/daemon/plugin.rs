@@ -16,6 +16,7 @@ use plugin_api::{
 
 use super::convert;
 use crate::config::PluginConfig;
+use crate::log;
 
 /// Hello を待つ時間。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -183,8 +184,9 @@ impl PluginRuntime {
         let spawned = match spawner.spawn(&self.config) {
             Ok(spawned) => spawned,
             Err(error) => {
-                eprintln!(
-                    "[daemon] plugin {} を起動できません: {error}",
+                log::error!(
+                    "daemon",
+                    "plugin {} を起動できません: {error}",
                     self.config.id
                 );
                 self.fail(now, now);
@@ -232,8 +234,9 @@ impl PluginRuntime {
             thread::spawn(move || forward_stderr(&id, stderr));
         }
         let rev = self.config.rev.as_deref().unwrap_or("-");
-        eprintln!(
-            "[daemon] plugin {} を起動しました (rev {rev})",
+        log::info!(
+            "daemon",
+            "plugin {} を起動しました (rev {rev})",
             self.config.id
         );
         self.window = (now, 0);
@@ -290,8 +293,9 @@ impl PluginRuntime {
         };
         // 旧プロセスから遅れて届くイベントを無視するため、世代を進める。
         self.generation += 1;
-        eprintln!(
-            "[daemon] plugin {} を停止しました: {reason}",
+        log::warning!(
+            "daemon",
+            "plugin {} を停止しました: {reason}",
             self.config.id
         );
         self.fail(started, now);
@@ -303,8 +307,9 @@ impl PluginRuntime {
         }
         self.failures += 1;
         if self.failures > MAX_FAILURES {
-            eprintln!(
-                "[daemon] plugin {} は {MAX_FAILURES} 回続けて失敗したため無効にしました",
+            log::error!(
+                "daemon",
+                "plugin {} は {MAX_FAILURES} 回続けて失敗したため無効にしました",
                 self.config.id
             );
             self.state = State::Disabled;
@@ -355,11 +360,14 @@ impl PluginRuntime {
                 convert::emote(&emote, granted.motion).map(Request::Emote)
             }),
             PluginMessage::Log { level, text } => {
-                eprintln!(
-                    "[plugin {}] {level:?}: {}",
-                    self.config.id,
-                    text.escape_debug()
-                );
+                let level = match level {
+                    plugin_api::LogLevel::Error => log::Level::Error,
+                    plugin_api::LogLevel::Warn => log::Level::Warn,
+                    plugin_api::LogLevel::Info => log::Level::Info,
+                    plugin_api::LogLevel::Debug => log::Level::Debug,
+                };
+                let source = format!("plugin {}", self.config.id);
+                log::write(level, &source, format_args!("{}", text.escape_debug()));
                 Outcome::Nothing
             }
             PluginMessage::CardPut(_)
@@ -403,8 +411,9 @@ impl PluginRuntime {
             ));
         }
         let granted = self.config.allowed.intersect(hello.capabilities);
-        eprintln!(
-            "[daemon] plugin {}: {} {} (要求 {:?}, 許可 {granted:?})",
+        log::info!(
+            "daemon",
+            "plugin {}: {} {} (要求 {:?}, 許可 {granted:?})",
             self.config.id,
             hello.name.escape_debug(),
             hello.version.escape_debug(),
@@ -426,6 +435,10 @@ impl PluginRuntime {
             params: self.config.params.clone(),
             limits: convert::LIMITS,
         });
+        if log::enabled(log::Level::Trace) {
+            let source = format!("plugin {}", self.config.id);
+            log::trace!(source, "送信 {}", super::describe(&init));
+        }
         match self.send(&init) {
             Ok(()) => Outcome::Nothing,
             Err(reason) => Outcome::Stop(reason.into()),
@@ -451,16 +464,18 @@ fn forward_stderr(id: &str, stderr: Box<dyn Read + Send>) {
         let consumed = chunk.len() + usize::from(newline);
         reader.consume(consumed);
         if newline {
-            eprintln!(
-                "[plugin {id}] {}",
+            log::info!(
+                format!("plugin {id} stderr"),
+                "{}",
                 String::from_utf8_lossy(&line).trim_end()
             );
             line.clear();
         }
     }
     if !line.is_empty() {
-        eprintln!(
-            "[plugin {id}] {}",
+        log::info!(
+            format!("plugin {id} stderr"),
+            "{}",
             String::from_utf8_lossy(&line).trim_end()
         );
     }

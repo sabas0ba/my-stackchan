@@ -12,11 +12,18 @@
 #     scripts/container.sh check            コンテナ内で make check を実行する (--network none)
 #     scripts/container.sh run <cmd...>     コンテナ内で任意のコマンドを実行する
 #     scripts/container.sh device <cmd...>  USB デバイスを渡してコマンドを実行する
+#     scripts/container.sh daemon [args...] daemon と同梱の plugin を build して起動する
+#                                           (args は stackchan daemon に渡す。例: --trace)
 #
 #   環境変数:
 #     CONTAINER_ENGINE  既定 podman。docker も可
 #     IMAGE             既定 my-stackchan-dev
-#     SERIAL_DEVICE     既定 /dev/ttyACM0。device サブコマンドでコンテナに渡す
+#     SERIAL_DEVICE     既定 /dev/ttyACM0。device と daemon サブコマンドでコンテナに渡す
+#     STACKCHAN_CONFIG_DIR     daemon の設定ディレクトリ。コンテナの /config にマウントする。
+#                              既定は Windows では %APPDATA%\stackchan、それ以外では
+#                              ${XDG_CONFIG_HOME:-$HOME/.config}/stackchan
+#     STACKCHAN_DAEMON_NETWORK daemon のコンテナのネットワーク。既定 none。LAN 上の機器を
+#                              使う plugin を動かす場合にだけ明示する (例: bridge)
 set -euo pipefail
 
 engine=${CONTAINER_ENGINE:-podman}
@@ -27,7 +34,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 
 # Git Bash (MSYS) では /c/Users/... 形式のパスをエンジンに渡すと変換されて壊れる。
 # Windows 形式に直し、以降のパス変換を抑止する。
-case "$(uname -o 2>/dev/null || true)" in
+host_os=$(uname -o 2>/dev/null || true)
+case "$host_os" in
   Msys | Cygwin)
     root=$(cd "$root" && pwd -W)
     export MSYS_NO_PATHCONV=1
@@ -127,6 +135,26 @@ case "$cmd" in
     prepare_workspace_mounts
     "$engine" run --rm "${tty_flags[@]}" "${workspace_mounts[@]}" \
       --device "$serial_device:$serial_device" "$image" "$@"
+    ;;
+  daemon)
+    # 設定ディレクトリは Windows 側の hook 等からも書けるよう、ホストのディレクトリを
+    # マウントする。既定値は docs/plugin.md の「設定ディレクトリ」と同じ。
+    config_dir=${STACKCHAN_CONFIG_DIR:-}
+    if [ -z "$config_dir" ]; then
+      case "$host_os" in
+        Msys | Cygwin) config_dir="$(cygpath -m "$APPDATA")/stackchan" ;;
+        *) config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/stackchan" ;;
+      esac
+    fi
+    mkdir -p "$config_dir"
+    prepare_workspace_mounts
+    # plugin の外部通信は既定で許可しない。必要な場合だけ STACKCHAN_DAEMON_NETWORK で明示する。
+    # shellcheck disable=SC2016 # $@ はコンテナ内の bash で展開する。
+    "$engine" run --rm "${tty_flags[@]}" --name stackchan-daemon \
+      --network "${STACKCHAN_DAEMON_NETWORK:-none}" "${workspace_mounts[@]}" \
+      --device "$serial_device:$serial_device" -v "$config_dir:/config" "$image" \
+      bash -c 'cargo build --release --locked --offline -p my-stackchan-host -p stackchan-clock &&
+        exec target/release/stackchan --config-dir /config daemon "$@"' daemon "$@"
     ;;
   *)
     usage >&2
