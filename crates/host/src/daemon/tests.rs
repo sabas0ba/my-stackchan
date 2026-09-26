@@ -405,3 +405,92 @@ fn tap_on_card_row_is_returned_to_the_plugin_as_action() {
     }
     assert_eq!(plugin.join().unwrap(), Some((3, 5)));
 }
+
+/// 書込みが戻らない stdin。plugin が stdin を読まない状況を再現する。
+struct StalledStdin;
+
+impl io::Write for StalledStdin {
+    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        loop {
+            thread::park();
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct KillFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl Process for KillFlag {
+    fn kill(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// stdin を読まない plugin を 1 つだけ起動する。
+struct StalledSpawner {
+    plugin_stdout: Option<PipeReader>,
+    killed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Spawner for StalledSpawner {
+    fn spawn(&mut self, _config: &PluginConfig) -> io::Result<Spawned> {
+        let stdout = self
+            .plugin_stdout
+            .take()
+            .ok_or_else(|| io::Error::other("再起動は試験の対象外"))?;
+        Ok(Spawned {
+            stdin: Box::new(StalledStdin),
+            stdout: Box::new(stdout),
+            stderr: None,
+            process: Box::new(KillFlag(self.killed.clone())),
+        })
+    }
+}
+
+#[test]
+fn plugin_that_does_not_read_stdin_is_stopped_without_blocking_the_loop() {
+    let config =
+        crate::config::parse("[plugin stalled]\ncommand = [\"fake\"]\ncards = 1\n", None).unwrap();
+    let (daemon_reader, mut plugin_writer) = io::pipe().unwrap();
+    let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spawner = StalledSpawner {
+        plugin_stdout: Some(daemon_reader),
+        killed: killed.clone(),
+    };
+    let mut daemon = Daemon::new(config, FakeDevice::default(), spawner, Instant::now());
+    daemon.step(Duration::ZERO);
+
+    // 拒否されるメッセージを流量の上限未満で送り続け、Rejected を溜めさせる。
+    let capabilities = api::Capabilities {
+        cards: 1,
+        ..api::Capabilities::default()
+    };
+    api::write_frame(
+        &mut plugin_writer,
+        &api::PluginMessage::Hello(hello(capabilities)),
+    )
+    .unwrap();
+    for _ in 0..40 {
+        api::write_frame(
+            &mut plugin_writer,
+            &api::PluginMessage::CardRemove {
+                card: api::MAX_CARDS,
+            },
+        )
+        .unwrap();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !killed.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "plugin が停止されません");
+        let started = Instant::now();
+        daemon.step(Duration::from_millis(20));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "イベントループが plugin への書込みで止まっています"
+        );
+    }
+}

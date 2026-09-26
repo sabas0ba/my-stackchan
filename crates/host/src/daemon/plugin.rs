@@ -6,7 +6,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,9 @@ const STABLE_RUN: Duration = Duration::from_secs(60);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// stderr の 1 行としてログへ出す最大バイト数。
 const MAX_STDERR_LINE: usize = 1024;
+/// plugin へ送るメッセージの待ち行列の長さ。溢れた plugin は stdin を読んでいないとみなし、
+/// 停止する。書込みをイベントループで待つと、読まない plugin 1 つで daemon 全体が止まる。
+const OUTGOING_QUEUE: usize = 32;
 
 pub trait Process: Send {
     fn kill(&mut self);
@@ -108,7 +111,9 @@ pub enum Outcome {
 }
 
 struct Io {
-    stdin: Box<dyn Write + Send>,
+    /// plugin ごとの書込みスレッドへの待ち行列。破棄すると書込みスレッドが終わり、
+    /// plugin の stdin が閉じる。
+    outgoing: SyncSender<HostMessage>,
     process: Box<dyn Process>,
 }
 
@@ -212,6 +217,16 @@ impl PluginRuntime {
                 generation,
             });
         });
+        let (outgoing, queued) = mpsc::sync_channel::<HostMessage>(OUTGOING_QUEUE);
+        let mut stdin = spawned.stdin;
+        thread::spawn(move || {
+            for message in queued {
+                // 書込みの失敗は plugin の終了によるものであり、Closed の通知で扱う。
+                if plugin_api::write_frame(&mut stdin, &message).is_err() {
+                    break;
+                }
+            }
+        });
         if let Some(stderr) = spawned.stderr {
             let id = self.config.id.clone();
             thread::spawn(move || forward_stderr(&id, stderr));
@@ -224,7 +239,7 @@ impl PluginRuntime {
         self.window = (now, 0);
         self.state = State::Handshake {
             io: Io {
-                stdin: spawned.stdin,
+                outgoing,
                 process: spawned.process,
             },
             deadline: now + HANDSHAKE_TIMEOUT,
@@ -243,12 +258,17 @@ impl PluginRuntime {
         false
     }
 
-    pub fn send(&mut self, message: &HostMessage) {
+    /// plugin へ送る。待ち行列が溢れた場合は理由を返し、呼出し側が plugin を停止する。
+    pub fn send(&mut self, message: &HostMessage) -> Result<(), &'static str> {
         let (State::Handshake { io, .. } | State::Running { io, .. }) = &mut self.state else {
-            return;
+            return Ok(());
         };
-        // 書込みの失敗は plugin の終了によるものであり、Closed の通知で扱う。
-        let _ = plugin_api::write_frame(&mut io.stdin, message);
+        match io.outgoing.try_send(message.clone()) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err("plugin が標準入力を読んでいません"),
+            // 書込みスレッドの終了は plugin の終了によるものであり、Closed の通知で扱う。
+            Err(TrySendError::Disconnected(_)) => Ok(()),
+        }
     }
 
     /// plugin を停止し、再起動を予約する。
@@ -400,13 +420,16 @@ impl PluginRuntime {
             granted,
             started,
         };
-        self.send(&HostMessage::Init(Init {
+        let init = HostMessage::Init(Init {
             api_version: API_VERSION,
             granted,
             params: self.config.params.clone(),
             limits: convert::LIMITS,
-        }));
-        Outcome::Nothing
+        });
+        match self.send(&init) {
+            Ok(()) => Outcome::Nothing,
+            Err(reason) => Outcome::Stop(reason.into()),
+        }
     }
 }
 

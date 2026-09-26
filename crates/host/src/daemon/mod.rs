@@ -113,7 +113,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                 match self.plugins[plugin].receive(frame, now) {
                     Outcome::Nothing => {}
                     Outcome::Request(request) => self.apply(plugin, request, now),
-                    Outcome::Reject(reason) => self.reject(plugin, reason),
+                    Outcome::Reject(reason) => self.reject(plugin, reason, now),
                     Outcome::Stop(reason) => self.stop_plugin(plugin, &reason, now),
                 }
             }
@@ -125,10 +125,18 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
         }
     }
 
-    fn reject(&mut self, plugin: usize, reason: &str) {
-        self.plugins[plugin].send(&HostMessage::Rejected {
+    fn reject(&mut self, plugin: usize, reason: &str, now: Instant) {
+        let message = HostMessage::Rejected {
             reason: reason.into(),
-        });
+        };
+        self.send_plugin(plugin, &message, now);
+    }
+
+    /// plugin へ送る。待ち行列が溢れた plugin は stdin を読んでいないとみなし、停止する。
+    fn send_plugin(&mut self, plugin: usize, message: &HostMessage, now: Instant) {
+        if let Err(reason) = self.plugins[plugin].send(message) {
+            self.stop_plugin(plugin, reason, now);
+        }
     }
 
     fn stop_plugin(&mut self, plugin: usize, reason: &str, now: Instant) {
@@ -171,7 +179,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             }
         };
         if let Err(reason) = result {
-            self.reject(plugin, reason);
+            self.reject(plugin, reason, now);
         }
     }
 
@@ -210,7 +218,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
         }
         let plan = self.scheduler.plan(now);
         self.sync_slots(&plan, now);
-        self.sync_visibility(&plan);
+        self.sync_visibility(&plan, now);
     }
 
     /// タップを振り分ける。行に action がある Card は発生元の plugin へ返し、帯のそれ以外の
@@ -223,10 +231,11 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             (Some(key), Some(action))
                 if key.plugin < self.plugins.len() && self.visible.contains(&key) =>
             {
-                self.plugins[key.plugin].send(&HostMessage::Action {
+                let message = HostMessage::Action {
                     card: key.card,
                     action,
-                });
+                };
+                self.send_plugin(key.plugin, &message, now);
             }
             _ if matches!(
                 slot,
@@ -289,25 +298,23 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
         refresh.min(remaining).max(1)
     }
 
-    fn sync_visibility(&mut self, plan: &Plan) {
+    fn sync_visibility(&mut self, plan: &Plan, now: Instant) {
         let visible: Vec<CardKey> = plan.visible_cards().collect();
-        for key in &self.visible {
-            if !visible.contains(key) {
-                self.plugins[key.plugin].send(&HostMessage::Visibility {
-                    card: key.card,
-                    visible: false,
-                });
-            }
-        }
-        for key in &visible {
-            if !self.visible.contains(key) {
-                self.plugins[key.plugin].send(&HostMessage::Visibility {
-                    card: key.card,
-                    visible: true,
-                });
-            }
-        }
+        // 送信中に plugin が停止されても一覧が崩れないよう、通知を先に確定する。
+        let hidden = self.visible.iter().filter(|key| !visible.contains(key));
+        let shown = visible.iter().filter(|key| !self.visible.contains(key));
+        let changes: Vec<(CardKey, bool)> = hidden
+            .map(|key| (*key, false))
+            .chain(shown.map(|key| (*key, true)))
+            .collect();
         self.visible = visible;
+        for (key, visible) in changes {
+            let message = HostMessage::Visibility {
+                card: key.card,
+                visible,
+            };
+            self.send_plugin(key.plugin, &message, now);
+        }
     }
 }
 

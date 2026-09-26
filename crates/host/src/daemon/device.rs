@@ -215,7 +215,12 @@ impl Device for SerialDevice {
         if restarted(self.last_seq, seq) {
             eprintln!("[daemon] firmware の再起動を検出しました (seq {seq})");
             self.last_seq = Some(seq);
-            self.apply_trim()?;
+            // 要求自体は受理されている。表示状態は失われているため、trim の成否に
+            // かかわらず Reset を返して全 slot を送り直させる。trim を適用できなかった
+            // 場合は接続を切り、再接続の手順 (trim の適用を含む) でやり直す。
+            if let Err(error) = self.apply_trim() {
+                self.disconnect(now, &format!("pitch trim を再適用できません: {error}"));
+            }
             return Ok(Delivery::Reset);
         }
         self.last_seq = Some(seq);
