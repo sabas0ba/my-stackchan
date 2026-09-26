@@ -97,20 +97,22 @@ daemon と plugin は Linux 側 (コンテナ) で動かす。Windows ホスト�
 3. 起動する。daemon と同梱の plugin を release で build してから起動する。引数は `stackchan daemon` に渡る
 
    ```bash
-   scripts/container.sh device cargo run -q --locked --offline -p my-stackchan-host -- input forward  # 任意。再起動で demo に戻る
+   scripts/container.sh device cargo run -q --locked --offline -p my-stackchan-host -- input forward  # 任意。起動後は cli input --via-daemon forward
    scripts/container.sh daemon                  # Ctrl+C または podman stop stackchan-daemon で終了する
    scripts/container.sh daemon --trace          # 送受信も記録する
    ```
 
 コンテナのネットワークは既定で `none` とし、plugin の外部通信を許可しない。LAN 上の機器を使う plugin を動かす場合にだけ、`STACKCHAN_DAEMON_NETWORK=bridge` 等で明示する。
 
-daemon の動作中は port を占有するため、通知と活動状態、タップの扱いの切替は spool 経由で渡す ([plugin.md](plugin.md#通知と手動命令の受付-spool))。コンテナ内の CLI からは次のとおりに書く。daemon のコンテナと同じ設定ディレクトリを `--config-dir` で指定する。
+daemon の動作中は port を占有するため、通知と活動状態、タップの扱いの切替は spool 経由で渡す ([plugin.md](plugin.md#通知と手動命令の受付-spool))。`scripts/container.sh cli` は daemon と同じ設定ディレクトリ (`STACKCHAN_CONFIG_DIR` または既定値) を `/config` にマウントして CLI を実行するため、要求は動作中の daemon に届く。
 
 ```bash
-scripts/container.sh run bash -c 'cargo run -q --locked --offline -p my-stackchan-host -- \
-  --config-dir .work/daemon-linux notify --text "build done" --priority high --ttl 10'
-# status --via-daemon --activity waiting --detail INPUT / input --via-daemon forward も同様
+scripts/container.sh cli notify --text "build done" --priority high --ttl 10
+scripts/container.sh cli status --via-daemon --activity waiting --detail INPUT
+scripts/container.sh cli input --via-daemon forward
 ```
+
+daemon は spool の要求のうちデバイスへ送るもの (status、input) を、切断中や再接続待ちの間は保持し、送れるまで送り直す。どちらも最新の 1 件だけを保持し、status は要求された期限を過ぎたら捨てる。
 
 Windows 側の hook 等からは、exe を使わずに PowerShell で要求のファイルを書く。`*.tmp` に書いてから `*.req` へ rename し、daemon が書きかけを読まないようにする。
 

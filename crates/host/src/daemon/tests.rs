@@ -19,6 +19,8 @@ use crate::config::PluginConfig;
 struct FakeDevice {
     sent: Arc<Mutex<Vec<protocol::Message>>>,
     events: Arc<Mutex<Vec<protocol::Event>>>,
+    /// 真の間は切断中として送信に失敗する。
+    offline: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeDevice {
@@ -29,6 +31,9 @@ impl FakeDevice {
 
 impl Device for FakeDevice {
     fn send(&mut self, message: &protocol::Message, _now: Instant) -> Result<Delivery, String> {
+        if self.offline.load(Ordering::SeqCst) {
+            return Err("切断中".into());
+        }
         self.sent.lock().unwrap().push(message.clone());
         Ok(Delivery::Delivered)
     }
@@ -543,5 +548,61 @@ fn spool_requests_reach_the_device_and_are_removed() {
         0,
         "処理した要求は削除する"
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn spool_device_commands_survive_disconnection_and_respect_deadline() {
+    let dir = std::env::temp_dir().join(format!("stackchan-daemon-retry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = crate::config::parse("[plugin idle]\ncommand = [\"fake\"]\n", None).unwrap();
+    let (sender, _plugin_ends) = mpsc::channel();
+    let spawner = PipeSpawner {
+        spawned: Arc::new(AtomicUsize::new(0)),
+        plugin_ends: sender,
+    };
+    let device = FakeDevice::default();
+    device.offline.store(true, Ordering::SeqCst);
+    let start = Instant::now();
+    let mut daemon = Daemon::new(config, device.clone(), spawner, start).with_spool(dir.clone());
+    let status = |detail: &str, ttl_s| crate::spool::Request::Status {
+        activity: protocol::Activity::Working,
+        detail: detail.into(),
+        ttl_s,
+    };
+
+    // 切断中に届いた要求は保持され、接続後に最新のものだけが送られる。
+    crate::spool::write(&dir, &status("OLD", 60)).unwrap();
+    crate::spool::write(&dir, &status("NEW", 60)).unwrap();
+    crate::spool::write(
+        &dir,
+        &crate::spool::Request::Input(protocol::InputMode::Forward),
+    )
+    .unwrap();
+    daemon.tick(start);
+    daemon.tick(start + Duration::from_secs(1));
+    assert!(device.messages().is_empty());
+    device.offline.store(false, Ordering::SeqCst);
+    daemon.tick(start + Duration::from_secs(20));
+    let sent = device.messages();
+    let presences: Vec<_> = sent
+        .iter()
+        .filter_map(|message| match message {
+            protocol::Message::Presence(presence) => Some(presence.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(presences.len(), 1);
+    assert_eq!(presences[0].detail, "NEW");
+    assert_eq!(presences[0].ttl_s, 40, "遅れた分だけ TTL を短くする");
+    assert!(sent.contains(&protocol::Message::InputMode(protocol::InputMode::Forward)));
+
+    // 送れないまま期限を過ぎた status は送らない。
+    device.offline.store(true, Ordering::SeqCst);
+    crate::spool::write(&dir, &status("EXPIRED", 5)).unwrap();
+    daemon.tick(start + Duration::from_secs(21));
+    device.offline.store(false, Ordering::SeqCst);
+    daemon.tick(start + Duration::from_secs(30));
+    assert_eq!(device.messages().len(), sent.len());
     std::fs::remove_dir_all(&dir).unwrap();
 }

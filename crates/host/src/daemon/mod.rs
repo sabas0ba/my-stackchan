@@ -75,6 +75,11 @@ pub struct Daemon<D, S> {
     refresh: Duration,
     device_error: Option<String>,
     spool: Option<PathBuf>,
+    /// spool の要求のうち、デバイスへ未送信のもの。spool のファイルは取込み時に削除するため、
+    /// 切断中や再接続待ちの間はここに保持し、送れるまで送り直す。どちらも最新の 1 件だけが
+    /// 意味を持つため、新しい要求で置き換える。
+    pending_status: Option<(protocol::Presence, Option<Instant>)>,
+    pending_input: Option<protocol::InputMode>,
 }
 
 impl<D: Device, S: Spawner> Daemon<D, S> {
@@ -97,6 +102,8 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             refresh,
             device_error: None,
             spool: None,
+            pending_status: None,
+            pending_input: None,
         }
     }
 
@@ -141,14 +148,39 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                     protocol::EyeStyle::Auto,
                     ttl_s,
                 ) {
-                    Ok(message) => {
-                        self.send_device(&message, now);
+                    Ok(protocol::Message::Presence(presence)) => {
+                        let deadline =
+                            (ttl_s != 0).then(|| now + Duration::from_secs(u64::from(ttl_s)));
+                        self.pending_status = Some((presence, deadline));
                     }
+                    Ok(_) => unreachable!("presence_message は Presence を返す"),
                     Err(reason) => log::warning!("spool", "{name} を捨てました: {reason}"),
                 },
-                crate::spool::Request::Input(mode) => {
-                    self.send_device(&protocol::Message::InputMode(mode), now);
+                crate::spool::Request::Input(mode) => self.pending_input = Some(mode),
+            }
+        }
+    }
+
+    /// spool の要求のうち未送信のものを送る。送れなければ保持し、次の周期で送り直す。
+    fn flush_pending(&mut self, now: Instant) {
+        if let Some(mode) = self.pending_input.take()
+            && !self.send_device(&protocol::Message::InputMode(mode), now)
+        {
+            self.pending_input = Some(mode);
+        }
+        if let Some((mut presence, deadline)) = self.pending_status.take() {
+            if let Some(deadline) = deadline {
+                if now >= deadline {
+                    log::warning!("spool", "送れないまま期限を過ぎた status を捨てました");
+                    return;
                 }
+                // 遅れて送る場合も、要求された期限を越えて表示しない。
+                let remaining = deadline - now;
+                let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+                presence.ttl_s = u16::try_from(seconds).unwrap_or(u16::MAX).max(1);
+            }
+            if !self.send_device(&protocol::Message::Presence(presence.clone()), now) {
+                self.pending_status = Some((presence, deadline));
             }
         }
     }
@@ -286,6 +318,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             self.on_device_event(event, now);
         }
         self.drain_spool(now);
+        self.flush_pending(now);
         for index in 0..self.plugins.len() {
             self.plugins[index].start_if_due(index, now, &mut self.spawner, &self.sender);
             if self.plugins[index].check_timeout(now) {
