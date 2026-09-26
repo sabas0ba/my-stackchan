@@ -192,13 +192,25 @@ pub struct Emote {
 
 /// Overlay に表示する画像の 1 枚。画素は RGB565 の big-endian で、長さは幅 × 高さ × 2。
 /// デコードと縮小は plugin が行う (daemon に画像の codec を持たせないため)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageFrame {
     pub width: u16,
     pub height: u16,
     /// 表示を保つ秒数。0 は既定 (10 秒)。期限の無い Overlay は顔を隠し続けるため設けない。
     pub ttl_s: u16,
     pub pixels: Vec<u8>,
+}
+
+/// 画素は長さだけを出す。daemon の trace ログに 1 枚あたり数十 KB の数値列が出るのを避ける。
+impl std::fmt::Debug for ImageFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageFrame")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("ttl_s", &self.ttl_s)
+            .field("pixels_len", &self.pixels.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,6 +551,19 @@ mod tests {
             assert!(!text.contains("s3cr3t-value"), "{text}");
             assert!(text.contains("access_code"), "{text}");
         }
+    }
+
+    #[test]
+    fn image_frame_debug_omits_pixels() {
+        let frame = ImageFrame {
+            width: 2,
+            height: 1,
+            ttl_s: 0,
+            pixels: vec![0xAB; 4],
+        };
+        let text = format!("{frame:?}");
+        assert!(text.contains("pixels_len: 4"), "{text}");
+        assert!(!text.contains("171"), "{text}");
     }
 
     #[test]

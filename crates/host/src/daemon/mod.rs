@@ -27,6 +27,10 @@ const TICK: Duration = Duration::from_millis(200);
 /// 送り直しの間隔に加える firmware 側の TTL の余裕。daemon が停止した場合、
 /// 表示は最長でこの時間だけ残る。
 const DEVICE_TTL_MARGIN_S: u16 = 5;
+/// 新しい画像をデバイスへ送る最短の間隔。1 枚 (約 40 KB) の転送中はイベントループが
+/// 止まるため、他の plugin の表示と入力の処理が遅れ続けないようにする。間隔内に届いた
+/// 画像は scheduler が最新の 1 枚だけを保持し、間隔の経過後に送る。
+const MIN_IMAGE_INTERVAL: Duration = Duration::from_millis(500);
 
 pub fn run(
     config: Config,
@@ -71,6 +75,8 @@ pub struct Daemon<D, S> {
     events: Receiver<Event>,
     sender: Sender<Event>,
     sent: [Option<Sent>; 3],
+    /// 画像をデバイスへ最後に送った時刻。
+    image_sent: Option<Instant>,
     visible: Vec<CardKey>,
     refresh: Duration,
     device_error: Option<String>,
@@ -98,6 +104,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             events,
             sender,
             sent: [None; 3],
+            image_sent: None,
             visible: Vec::new(),
             refresh,
             device_error: None,
@@ -385,10 +392,21 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                     if unchanged {
                         continue;
                     }
+                    let image = matches!(shown.content, Content::Image(_));
+                    if image
+                        && self
+                            .image_sent
+                            .is_some_and(|at| now.duration_since(at) < MIN_IMAGE_INTERVAL)
+                    {
+                        continue;
+                    }
                     let ttl_s = self.device_ttl(shown);
                     let delivered = slot_messages(slot, ttl_s, shown)
                         .iter()
                         .all(|message| self.send_device(message, now));
+                    if delivered && image {
+                        self.image_sent = Some(now);
+                    }
                     if delivered {
                         self.sent[index] = Some(Sent {
                             source: shown.source,

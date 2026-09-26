@@ -9,6 +9,10 @@
 //! 書込み時に追跡すると元の色に戻った画素まで変化として扱ってしまう。画面を 16×16 px の
 //! タイルに分け、前回転送した内容のハッシュと比べて、変わったタイルを行ごとに横へ
 //! まとめて送る。LCD の内容を複製するより少ない RAM (2.4 KB) で済む。
+//!
+//! ハッシュの計算は画面全体で数十 ms かかる (実機で約 39 ms)。前回の転送から書込みが
+//! 無い場合は計算を省く。メインループは周ごとに転送を試みるため、省かなければ受信と
+//! 応答がこの時間だけ遅れる。
 
 use core::convert::Infallible;
 
@@ -32,6 +36,8 @@ pub struct FrameBuffer {
     flushed: [u64; TILE_COLUMNS * TILE_ROWS],
     /// `flushed` が LCD の内容を表しているか。起動直後と `invalidate` の後は偽。
     synced: bool,
+    /// 前回の転送の後に書込みがあったか。
+    written: bool,
 }
 
 impl Default for FrameBuffer {
@@ -40,15 +46,14 @@ impl Default for FrameBuffer {
     }
 }
 
-/// FNV-1a (64 bit)。暗号的な強度は不要で、表示内容の変化を見落とさない分散があればよい。
+/// FNV-1a (64 bit) の画素 (16 bit) 単位の変形。暗号的な強度は不要で、表示内容の変化を
+/// 見落とさない分散があればよい。byte 単位より乗算 (32 bit CPU では複数命令) が半分で済む。
 fn tile_hash(pixels: &[u16; WIDTH * HEIGHT], column: usize, row: usize) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for y in row * TILE..(row + 1) * TILE {
         for &pixel in &pixels[y * WIDTH + column * TILE..y * WIDTH + (column + 1) * TILE] {
-            for byte in pixel.to_le_bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
+            hash ^= u64::from(pixel);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
     hash
@@ -62,6 +67,7 @@ impl FrameBuffer {
             pixels: [0; WIDTH * HEIGHT],
             flushed: [0; TILE_COLUMNS * TILE_ROWS],
             synced: false,
+            written: false,
         }
     }
 
@@ -78,9 +84,13 @@ impl FrameBuffer {
         &mut self,
         display: &mut D,
     ) -> Result<(), D::Error> {
+        if self.synced && !self.written {
+            return Ok(());
+        }
         let result = self.transfer(display);
-        if result.is_err() {
-            self.synced = false;
+        match result {
+            Ok(()) => self.written = false,
+            Err(_) => self.synced = false,
         }
         result
     }
@@ -152,6 +162,7 @@ impl DrawTarget for FrameBuffer {
         &mut self,
         pixels: I,
     ) -> Result<(), Infallible> {
+        self.written = true;
         for Pixel(point, color) in pixels {
             // 画面外は描画先で捨てる (embedded-graphics の DrawTarget の約束)。
             if let (Ok(x @ 0..WIDTH), Ok(y @ 0..HEIGHT)) =
@@ -164,6 +175,7 @@ impl DrawTarget for FrameBuffer {
     }
 
     fn fill_solid(&mut self, area: &Rectangle, color: Rgb565) -> Result<(), Infallible> {
+        self.written = true;
         let area = area.intersection(&self.bounding_box());
         let Some(bottom_right) = area.bottom_right() else {
             return Ok(());
@@ -177,6 +189,7 @@ impl DrawTarget for FrameBuffer {
     }
 
     fn clear(&mut self, color: Rgb565) -> Result<(), Infallible> {
+        self.written = true;
         self.pixels.fill(RawU16::from(color).into_inner());
         Ok(())
     }
@@ -262,6 +275,32 @@ mod tests {
         assert_eq!(colors[4 * 48 + 10], Rgb565::WHITE, "(10, 20) の画素");
         assert_eq!(colors[0], Rgb565::BLACK);
         assert_eq!(*lcd.fills[1].1.last().unwrap(), Rgb565::RED);
+    }
+
+    #[test]
+    fn scan_is_skipped_until_the_next_write() {
+        let (mut frame, mut lcd) = synced();
+        assert!(!frame.written);
+        Pixel(Point::new(0, 0), Rgb565::RED)
+            .draw(&mut *frame)
+            .unwrap();
+        assert!(frame.written);
+        frame.flush(&mut lcd).unwrap();
+        assert!(!frame.written);
+        assert_eq!(lcd.fills.len(), 1);
+        // 書込みの無い転送は何も送らず、フラグも変えない。
+        frame.flush(&mut lcd).unwrap();
+        assert_eq!(lcd.fills.len(), 1);
+        // 失敗した転送の後は、書込みが無くても全体を送り直す。
+        Pixel(Point::new(0, 0), Rgb565::BLUE)
+            .draw(&mut *frame)
+            .unwrap();
+        lcd.fail = true;
+        assert!(frame.flush(&mut lcd).is_err());
+        lcd.fail = false;
+        lcd.fills.clear();
+        frame.flush(&mut lcd).unwrap();
+        assert_eq!(lcd.fills[0].0, frame.bounding_box());
     }
 
     #[test]

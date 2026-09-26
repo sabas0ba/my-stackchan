@@ -196,6 +196,7 @@ decoder の coverage-guided fuzz 検証は別途実施する。
 - `ImageEnd { id }` で全行を受け取っていれば Overlay に表示する。行が不足する場合は拒否し、受信中の画像を破棄する
 - `ImageBegin` と `ImageRows` は描画せずに Ack を返す。表示は `ImageEnd` の時点で行い、受信途中の画像が画面に出ないようにする
 - 画像の外側の Overlay は黒とする。`ttl_s` の扱いは Text / Card と同じであり、0 は `Clear` / `ClearSlot` または上書きまで保つ
+- 1 件の `ImageRows` は USB の受信 FIFO (64 byte) を十数回満たす。firmware はフレームの途中では FIFO が空になっても最大 3 ms 次の byte を待って読み続け (1 周あたり最大 30 ms)、フレームごとにメインループを周回しないようにする
 - firmware は 160×120 px 1 枚分 (38,400 byte) の画素を static に持つ。受信した行はこの領域に書くため、表示中の画像を送り直す間に別の理由で再描画が起きると、書換え途中の画像が一時的に見え得る。1 fps 以下の更新を前提として許容する
 
 ## 不変条件

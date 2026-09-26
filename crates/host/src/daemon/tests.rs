@@ -609,29 +609,68 @@ fn spool_device_commands_survive_disconnection_and_respect_deadline() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// 画像の画素を先頭の値で区別する。
+fn image_frame(first: u8) -> api::PluginMessage {
+    let mut pixels: Vec<u8> = (0..40 * 30 * 2).map(|i| i as u8).collect();
+    pixels[0] = first;
+    api::PluginMessage::ImageFrame(api::ImageFrame {
+        width: 40,
+        height: 30,
+        ttl_s: 5,
+        pixels,
+    })
+}
+
+/// デバイスへ送った画像 (ImageBegin の時刻の代わりに送信順) と、その画素。
+fn sent_images(messages: &[protocol::Message]) -> Vec<(protocol::ImageBegin, Vec<u8>)> {
+    let mut images = Vec::new();
+    let mut current: Option<(protocol::ImageBegin, Vec<u8>)> = None;
+    for message in messages {
+        match message {
+            protocol::Message::ImageBegin(begin) => current = Some((*begin, Vec::new())),
+            protocol::Message::ImageRows(rows) => {
+                if let Some((_, pixels)) = current.as_mut() {
+                    pixels.extend_from_slice(&rows.pixels);
+                }
+            }
+            protocol::Message::ImageEnd { .. } => images.extend(current.take()),
+            _ => {}
+        }
+    }
+    images
+}
+
 #[test]
-fn image_frame_reaches_device_as_centered_rows_and_is_rate_limited() {
-    let mut harness = Harness::new("image = true\n");
+fn image_frames_reach_device_centered_and_latest_wins_within_interval() {
+    let mut harness = Harness::new(
+        "image = true
+",
+    );
     let plugin = harness.start_plugin(|reader, writer| {
         let capabilities = api::Capabilities {
             image: true,
             ..api::Capabilities::default()
         };
         let mut connection = client::connect(reader, writer, hello(capabilities)).unwrap();
-        let frame = api::PluginMessage::ImageFrame(api::ImageFrame {
-            width: 40,
-            height: 30,
-            ttl_s: 5,
-            pixels: (0..40 * 30 * 2).map(|i| i as u8).collect(),
-        });
-        connection.send(&frame).unwrap();
-        // 間隔の制限により、直後の 2 枚目は拒否される。
-        connection.send(&frame).unwrap();
-        next_rejection(&mut connection)
+        connection.send(&image_frame(1)).unwrap();
+        // 最初の画像の直後に 2 枚を続けて送る。送信の間隔内に届いた画像は最新の 1 枚だけが
+        // 残り、拒否はされない。
+        thread::sleep(Duration::from_millis(100));
+        connection.send(&image_frame(2)).unwrap();
+        connection.send(&image_frame(3)).unwrap();
+        // 拒否が無いことの確認であり、next_rejection の 10 秒は待たない。
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if let Ok(Some(HostMessage::Rejected { reason })) =
+                connection.recv_timeout(Duration::from_millis(50))
+            {
+                return Some(reason);
+            }
+        }
+        None
     });
-    harness.run_until("ImageEnd の送信", |sent| {
-        sent.iter()
-            .any(|message| matches!(message, protocol::Message::ImageEnd { .. }))
+    harness.run_until("2 枚目の画像の送信", |sent| {
+        sent_images(sent).len() >= 2
     });
     let rejection = loop {
         harness.daemon.step(Duration::from_millis(20));
@@ -639,33 +678,24 @@ fn image_frame_reaches_device_as_centered_rows_and_is_rate_limited() {
             break plugin.join().unwrap();
         }
     };
-    assert!(rejection.is_some(), "間隔の短い画像は拒否される");
+    assert!(
+        rejection.is_none(),
+        "間隔の短い画像も拒否しない: {rejection:?}"
+    );
 
-    let messages = harness.device.messages();
-    let begin = messages
-        .iter()
-        .find_map(|message| match message {
-            protocol::Message::ImageBegin(begin) => Some(*begin),
-            _ => None,
-        })
-        .unwrap();
+    let images = sent_images(&harness.device.messages());
+    let (begin, pixels) = &images[0];
     assert_eq!(
         (begin.x, begin.y, begin.width, begin.height),
         (140, 105, 40, 30)
     );
     assert!((1..=5).contains(&begin.ttl_s));
-    let pixels: Vec<u8> = messages
-        .iter()
-        .filter_map(|message| match message {
-            protocol::Message::ImageRows(rows) if rows.id == begin.id => Some(rows.pixels.to_vec()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-    assert_eq!(
-        pixels,
-        (0..40 * 30 * 2).map(|i| i as u8).collect::<Vec<u8>>()
-    );
+    let api::PluginMessage::ImageFrame(first) = image_frame(1) else {
+        unreachable!()
+    };
+    assert_eq!(pixels, &first.pixels);
+    let latest: Vec<u8> = images.iter().map(|(_, pixels)| pixels[0]).collect();
+    assert_eq!(latest, [1, 3], "2 枚目は 3 枚目に置き換えられる");
 }
 
 #[test]

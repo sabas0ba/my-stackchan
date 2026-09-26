@@ -319,11 +319,22 @@ impl ImageBegin {
 
 /// 画像領域の行の組。`row` は領域の上端からの行番号で、行は上から順に送る。
 /// 画素は RGB565 の big-endian で、`pixels` の長さは幅 × 2 の倍数とする。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageRows {
     pub id: u16,
     pub row: u16,
     pub pixels: heapless::Vec<u8, MAX_IMAGE_ROWS_BYTES>,
+}
+
+/// 画素は長さだけを出す。host の trace ログに 1 件あたり数 KB の数値列が出るのを避ける。
+impl core::fmt::Debug for ImageRows {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ImageRows")
+            .field("id", &self.id)
+            .field("row", &self.row)
+            .field("pixels_len", &self.pixels.len())
+            .finish()
+    }
 }
 
 /// host から firmware へ送るメッセージ。
