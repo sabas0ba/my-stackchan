@@ -299,16 +299,17 @@ host 側の crate は Espressif fork の toolchain (nix/esp-rust.nix) で構築�
 
 手順は [environment.md](environment.md#windows-ネイティブの-host-cli) を参照する。
 
-## 既知の不具合 (2026-09-23 時点)
+## 解決した不具合
 
-Forward 状態でタップした後、daemon が次の Card を送ると firmware が停止する。実機で再現し、調査途中である。
+### Card の描画中のゼロ除算 (2026-09-23 発見、2026-09-26 修正)
 
-- 停止は `renderer::draw_card` の除算で起きる `IntegerDivideByZero` 例外による panic である (panic 出力を USB 側で受信し、ELF で位置を特定した)。除数になり得るのは行の要素数だけだが、描画の前に `Card::validate` が空の行を拒否しているため、描画時に状態が壊れている可能性がある
-- タップ自体は無関係だった。firmware に一時的に疑似タップを入れた試験で、Event が daemon を経て plugin へ Action として届くまでは正常に動作し、その後の Card で停止した
-- 同じバイト列の Card でも送り方で結果が変わる。CLI (`stackchan card`) では正常に処理され、.NET の SerialPort から送ると毎回 panic した。Text と Clear はどちらの経路でも正常である。DTR の状態は関係しなかった
-- daemon の書込みタイムアウトの誤り (待機中の読取りの 1 ms が書込みに残る) を修正したが、この停止は解消しなかった
+P2 の実機確認で、Forward 状態のタップ後に daemon が送る Card で firmware が停止した。
 
-次の調査では、描画の直前に Card の内容を検査して不整合を検出する診断用 build を用い、状態が壊れる時点を特定する。
+- 停止は `renderer::draw_card` での `IntegerDivideByZero` 例外による panic だった。逆アセンブルすると、除数は行の要素数ではなく `card.image` の幅だった。`ImageRaw::new` の高さの計算 (画素数 / (幅 × 2)) が、`card.image` の判定より前にループの外へ先行して実行されていた
+- 画像を持たない Card ではこの幅が未初期化で、0 のときだけ Xtensa の除算命令が例外を起こす。値はそれまでの処理の経過で変わるため、送り方やタイミングで発生が変わり、host の試験では再現しなかった。版 8 で Card の配置が変わり表面化したと考えられる。タップと Forward 状態は発生の条件ではなかった
+- 画像の描画を `#[inline(never)]` の関数に分け、先行実行されないようにした。逆アセンブルで、`draw_card` に残る除算が 0 の判定を経た行の要素数だけであることを確認した。修正前に毎回停止した手順 (リセット直後に .NET の SerialPort から Card を送る) を 12 回繰り返し、すべて応答することを確認した
+
+調査の過程で、daemon の書込みに待機中の読取りの待ち時間 (1 ms) が残る誤りも見つけて修正した。
 
 ## 未決事項
 
