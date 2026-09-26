@@ -226,7 +226,9 @@ pub struct Limits {
     pub presence_detail_bytes: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Debug は params の値を出さない (下の impl)。secret を含み得るため、plugin 作者が
+/// `{:?}` でログに出しても漏れないようにする。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Init {
     pub api_version: u16,
     /// 要求と利用者設定の許可の共通部分。これを超えるメッセージは拒否される。
@@ -234,6 +236,18 @@ pub struct Init {
     /// 利用者設定の `param.*` (secret を含む)。path 等の環境依存の値はここから受け取る。
     pub params: Vec<(String, String)>,
     pub limits: Limits,
+}
+
+impl std::fmt::Debug for Init {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.params.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("Init")
+            .field("api_version", &self.api_version)
+            .field("granted", &self.granted)
+            .field("params", &format_args!("{names:?} (値は伏せる)"))
+            .field("limits", &self.limits)
+            .finish()
+    }
 }
 
 /// daemon から plugin へ送るメッセージ。variant の追加は末尾に限る。
@@ -462,6 +476,31 @@ mod tests {
             },
         ] {
             assert!(PluginMessage::Emote(invalid).validate().is_err());
+        }
+    }
+
+    #[test]
+    fn init_debug_does_not_show_parameter_values() {
+        let init = Init {
+            api_version: API_VERSION,
+            granted: Capabilities::default(),
+            params: vec![("access_code".into(), "s3cr3t-value".into())],
+            limits: Limits {
+                banner_rows: 2,
+                overlay_rows: 4,
+                row_elements: 2,
+                text_bytes: 48,
+                bar_label_bytes: 12,
+                notify_bytes: 512,
+                presence_detail_bytes: 20,
+            },
+        };
+        for text in [
+            format!("{init:?}"),
+            format!("{:?}", HostMessage::Init(init.clone())),
+        ] {
+            assert!(!text.contains("s3cr3t-value"), "{text}");
+            assert!(text.contains("access_code"), "{text}");
         }
     }
 

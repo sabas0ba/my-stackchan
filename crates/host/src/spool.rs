@@ -37,6 +37,33 @@ pub enum Request {
     Input(protocol::InputMode),
 }
 
+impl Request {
+    /// ログ用の要約。本文と詳細は含めず、長さだけを出す。
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Notify {
+                text,
+                priority,
+                ttl_s,
+            } => format!(
+                "notify (priority={}, ttl_s={ttl_s}, text={} byte)",
+                name_of(&PRIORITIES, priority),
+                text.len()
+            ),
+            Self::Status {
+                activity,
+                detail,
+                ttl_s,
+            } => format!(
+                "status (activity={}, ttl_s={ttl_s}, detail={} byte)",
+                name_of(&ACTIVITIES, activity),
+                detail.len()
+            ),
+            Self::Input(mode) => format!("input (mode={})", name_of(&MODES, mode)),
+        }
+    }
+}
+
 fn validate_header(header: &str) -> Result<(), &'static str> {
     match header {
         "notify" | "status" | "input" => Ok(()),
@@ -189,7 +216,7 @@ pub fn format(request: &Request) -> Result<String, &'static str> {
 pub fn write(dir: &Path, request: &Request) -> io::Result<PathBuf> {
     static SEQUENCE: AtomicU32 = AtomicU32::new(0);
     let content = format(request).map_err(io::Error::other)?;
-    fs::create_dir_all(dir)?;
+    crate::log::create_private_dir(dir)?;
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -281,6 +308,25 @@ mod tests {
             let text = format(&request).unwrap();
             assert_eq!(parse(&text).unwrap(), request, "{text}");
         }
+    }
+
+    #[test]
+    fn summary_does_not_include_message_contents() {
+        let notify = Request::Notify {
+            text: "project-x build failed".into(),
+            priority: plugin_api::Priority::High,
+            ttl_s: 5,
+        };
+        let status = Request::Status {
+            activity: protocol::Activity::Waiting,
+            detail: "PRIVATE".into(),
+            ttl_s: 30,
+        };
+        assert_eq!(
+            notify.summary(),
+            "notify (priority=high, ttl_s=5, text=22 byte)"
+        );
+        assert!(!status.summary().contains("PRIVATE"));
     }
 
     #[test]

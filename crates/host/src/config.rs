@@ -45,7 +45,7 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PluginConfig {
     pub id: String,
     /// 起動する argv。先頭が実行ファイル。隔離コマンドを前置きしてもよい。
@@ -55,6 +55,78 @@ pub struct PluginConfig {
     pub allowed: plugin_api::Capabilities,
     /// `param.*` と `secrets.conf` の値。plugin へ `Init` で渡す。
     pub params: Vec<(String, String)>,
+    /// `env.*`。plugin に追加で渡す環境変数。daemon の環境変数は許可したものしか渡さない
+    /// (daemon/plugin.rs)。環境変数はプロセスの情報から見え得るため、secret は `param` で渡す。
+    pub env: Vec<(String, String)>,
+}
+
+/// Debug は params と env の値を出さない。secret を含み得るため。
+impl std::fmt::Debug for PluginConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names = |pairs: &[(String, String)]| -> Vec<String> {
+            pairs.iter().map(|(name, _)| name.clone()).collect()
+        };
+        f.debug_struct("PluginConfig")
+            .field("id", &self.id)
+            .field("command", &self.command)
+            .field("rev", &self.rev)
+            .field("allowed", &self.allowed)
+            .field("params", &names(&self.params))
+            .field("env", &names(&self.env))
+            .finish()
+    }
+}
+
+/// `stackchan config` の要約。param と env は名前だけを出す。
+pub fn summary(dir: &Path, config: &Config) -> String {
+    let mut lines = vec![
+        format!("config dir: {}", dir.display()),
+        format!(
+            "daemon: port={}, rotate_s={}",
+            config.daemon.port.as_deref().unwrap_or("(auto)"),
+            config.daemon.rotate_s
+        ),
+    ];
+    for plugin in &config.plugins {
+        let allowed = plugin.allowed;
+        lines.push(format!(
+            "plugin {}: command={:?}, rev={}, cards={}, notify={}, presence={}, motion={}",
+            plugin.id,
+            plugin.command,
+            plugin.rev.as_deref().unwrap_or("-"),
+            allowed.cards,
+            allowed.notify,
+            allowed.presence,
+            allowed.motion
+        ));
+        let names = |pairs: &[(String, String)]| -> Vec<String> {
+            pairs.iter().map(|(name, _)| name.clone()).collect()
+        };
+        lines.push(format!("  params: {:?}", names(&plugin.params)));
+        lines.push(format!("  env: {:?}", names(&plugin.env)));
+    }
+    lines.join("\n")
+}
+
+const MAX_ENV: usize = 16;
+
+fn push_env(plugin: &mut PluginConfig, key: &str, value: String) -> Result<(), &'static str> {
+    let name = &key["env.".len()..];
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && !name.as_bytes()[0].is_ascii_digit();
+    if !valid {
+        return Err("env の名前は英字・数字・_ で、数字で始めません");
+    }
+    if value.len() > plugin_api::MAX_PARAM_VALUE_BYTES {
+        return Err("env の値が長すぎます");
+    }
+    if plugin.env.len() == MAX_ENV {
+        return Err("env の数が上限を超えます");
+    }
+    plugin.env.push((name.into(), value));
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +282,7 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
         rev: None,
         allowed: plugin_api::Capabilities::default(),
         params: Vec::new(),
+        env: Vec::new(),
     };
     for (key, (line, value)) in section.entries {
         match (key.as_str(), value) {
@@ -229,6 +302,9 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
             ("notify", Value::Bool(value)) => plugin.allowed.notify = value,
             ("presence", Value::Bool(value)) => plugin.allowed.presence = value,
             ("motion", Value::Bool(value)) => plugin.allowed.motion = value,
+            (key, Value::String(value)) if key.starts_with("env.") => {
+                push_env(&mut plugin, key, value).map_err(|reason| error(line, reason.into()))?;
+            }
             (key, Value::String(value)) if key.starts_with("param.") => {
                 push_param(&mut plugin, key, value).map_err(|reason| error(line, reason.into()))?;
             }
@@ -342,10 +418,17 @@ pub(crate) fn parse_sections(
             .split_once('=')
             .ok_or_else(|| error(number, "key = 値 の形式ではありません"))?;
         let key = key.trim();
+        // 環境変数の名前は大文字を含むため、env. の後に限り英大文字も許す。
+        let (prefix, rest) = key.split_at(if key.starts_with("env.") { 4 } else { 0 });
+        let allowed = |b: u8, upper: bool| {
+            b.is_ascii_lowercase()
+                || b.is_ascii_digit()
+                || b"_.".contains(&b)
+                || (upper && b.is_ascii_uppercase())
+        };
         if key.is_empty()
-            || !key
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.".contains(&b))
+            || !prefix.bytes().all(|b| allowed(b, false))
+            || !rest.bytes().all(|b| allowed(b, !prefix.is_empty()))
         {
             return Err(error(number, "key に使えない文字があります"));
         }
@@ -496,6 +579,47 @@ motion = false
         assert_eq!(usage.command.len(), 5);
         assert!(usage.allowed.notify && usage.allowed.presence && !usage.allowed.motion);
         assert_eq!(usage.params, [("token".into(), "s\"ecret".into())]);
+    }
+
+    #[test]
+    fn summary_and_debug_do_not_show_secret_values() {
+        let config = parse(
+            "[plugin p]\ncommand = [\"x\"]\nparam.host = \"printer.local\"\nenv.HTTP_PROXY = \"http://user:pw@proxy\"\n",
+            Some("[plugin p]\nparam.access_code = \"s3cr3t\"\n"),
+        )
+        .unwrap();
+        let text = format!(
+            "{}\n{:?}",
+            summary(Path::new("/config"), &config),
+            config.plugins
+        );
+        for secret in ["s3cr3t", "printer.local", "user:pw"] {
+            assert!(!text.contains(secret), "{secret}: {text}");
+        }
+        for name in ["access_code", "host", "HTTP_PROXY"] {
+            assert!(text.contains(name), "{name}: {text}");
+        }
+    }
+
+    #[test]
+    fn env_names_allow_uppercase_only_after_prefix() {
+        let base = "[plugin p]\ncommand = [\"x\"]\n";
+        let config = parse(
+            &format!("{base}env.HTTP_PROXY = \"v\"\nenv.no_proxy = \"w\"\n"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.plugins[0].env.len(), 2);
+        for bad in [
+            "env.1X = \"v\"",
+            "env. = \"v\"",
+            "Param.x = \"v\"",
+            "env.A-B = \"v\"",
+        ] {
+            assert!(parse(&format!("{base}{bad}\n"), None).is_err(), "{bad}");
+        }
+        // secrets.conf には env を書けない (環境変数はプロセスの情報から見え得るため)。
+        assert!(parse(base, Some("[plugin p]\nenv.TOKEN = \"v\"\n")).is_err());
     }
 
     #[test]

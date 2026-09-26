@@ -54,14 +54,25 @@ struct Logger {
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 
-fn open(dir: &Path) -> std::io::Result<Sink> {
+/// 他の利用者から読めないディレクトリを作る。unix では 0700 とし、既存のものも直す。
+/// Windows では利用者のプロファイル配下 (%APPDATA%) の ACL の継承に従う。
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    Ok(())
+}
+
+fn open(dir: &Path) -> std::io::Result<Sink> {
+    create_private_dir(dir)?;
     let mut options = OpenOptions::new();
     options.create(true).append(true);
-    // 他の利用者から読めないようにする。Windows では利用者のプロファイル配下の ACL に従う。
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let file = options.open(dir.join(FILE_NAME))?;
+    // mode は新規作成の時だけ効くため、既存のファイルの権限も直す。
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     let written = file.metadata()?.len();
     Ok(Sink {
         dir: dir.to_path_buf(),

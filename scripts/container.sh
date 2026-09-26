@@ -156,14 +156,28 @@ case "$cmd" in
     # 設定ディレクトリは Windows 側の hook 等からも書けるよう、ホストのディレクトリを
     # マウントする。
     resolve_config_dir
+    mkdir -p "$config_dir/logs" "$config_dir/spool"
+    # build は書込み可能なマウントで先に行う。
     prepare_workspace_mounts
+    "$engine" run --rm --network none "${workspace_mounts[@]}" "$image" \
+      cargo build --release --locked --offline -p my-stackchan-host -p stackchan-clock
+    # plugin は daemon と同じ uid で動くため、書き換えられて困るものは読取り専用で渡す
+    # (docs/plugin.md の「信頼境界と権限」)。リポジトリは読取り専用とし、git のディレクトリは
+    # 渡さない (.git/hooks の書換えによるホスト側でのコード実行を防ぐ)。設定ディレクトリも
+    # 読取り専用とし、daemon が書く logs と spool だけを書込み可能にする (plugin が設定や
+    # plugin の実行ファイルを書き換えて、次の起動で権限を広げることを防ぐ)。
+    # 開発シェルの初期化はリポジトリに書き込むため通さず、build 済みのバイナリを直接起動する
+    # (バイナリは Nix store の動的リンカを絶対パスで参照するため、イメージ内で動く)。
     # plugin の外部通信は既定で許可しない。必要な場合だけ STACKCHAN_DAEMON_NETWORK で明示する。
-    # shellcheck disable=SC2016 # $@ はコンテナ内の bash で展開する。
     "$engine" run --rm "${tty_flags[@]}" --name stackchan-daemon \
-      --network "${STACKCHAN_DAEMON_NETWORK:-none}" "${workspace_mounts[@]}" \
-      --device "$serial_device:$serial_device" -v "$config_dir:/config" "$image" \
-      bash -c 'cargo build --release --locked --offline -p my-stackchan-host -p stackchan-clock &&
-        exec target/release/stackchan --config-dir /config daemon "$@"' daemon "$@"
+      --network "${STACKCHAN_DAEMON_NETWORK:-none}" \
+      -v "$root:/workspace:ro" \
+      -v "$config_dir:/config:ro" \
+      -v "$config_dir/logs:/config/logs" \
+      -v "$config_dir/spool:/config/spool" \
+      --device "$serial_device:$serial_device" \
+      --entrypoint /workspace/target/release/stackchan \
+      "$image" --config-dir /config daemon "$@"
     ;;
   cli)
     # daemon のコンテナと同じ設定ディレクトリを /config にマウントし、spool 経由の命令

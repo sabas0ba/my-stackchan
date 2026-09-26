@@ -58,12 +58,45 @@ pub trait Spawner {
     fn spawn(&mut self, config: &PluginConfig) -> io::Result<Spawned>;
 }
 
+/// plugin に引き継ぐ daemon の環境変数。daemon の環境 (利用者のシェルにあるトークン等) を
+/// そのまま渡さないため、実行に必要なものだけに限る。Windows の変数名は大文字小文字を区別しない。
+const INHERITED_ENV: [&str; 10] = [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SYSTEMROOT",
+];
+
+/// plugin の環境変数。許可した daemon の変数と、利用者設定の `env.*` だけからなる。
+fn plugin_env(
+    config: &PluginConfig,
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<(String, std::ffi::OsString)> {
+    let mut env: Vec<(String, std::ffi::OsString)> = INHERITED_ENV
+        .iter()
+        .filter_map(|name| lookup(name).map(|value| ((*name).to_owned(), value)))
+        .collect();
+    for (name, value) in &config.env {
+        env.retain(|(existing, _)| existing != name);
+        env.push((name.clone(), value.into()));
+    }
+    env
+}
+
 pub struct OsSpawner;
 
 impl Spawner for OsSpawner {
     fn spawn(&mut self, config: &PluginConfig) -> io::Result<Spawned> {
         let mut child = Command::new(&config.command[0])
             .args(&config.command[1..])
+            .env_clear()
+            .envs(plugin_env(config, |name| std::env::var_os(name)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -437,7 +470,8 @@ impl PluginRuntime {
         });
         if log::enabled(log::Level::Trace) {
             let source = format!("plugin {}", self.config.id);
-            log::trace!(source, "送信 {}", super::describe(&init));
+            // Init の Debug は params の値を伏せる (plugin-api)。
+            log::trace!(source, "送信 {init:?}");
         }
         match self.send(&init) {
             Ok(()) => Outcome::Nothing,
@@ -464,10 +498,11 @@ fn forward_stderr(id: &str, stderr: Box<dyn Read + Send>) {
         let consumed = chunk.len() + usize::from(newline);
         reader.consume(consumed);
         if newline {
+            // 制御文字 (端末の色指定、復帰) で daemon のログの表示を偽装されないようにする。
             log::info!(
                 format!("plugin {id} stderr"),
                 "{}",
-                String::from_utf8_lossy(&line).trim_end()
+                String::from_utf8_lossy(&line).trim_end().escape_debug()
             );
             line.clear();
         }
@@ -476,7 +511,35 @@ fn forward_stderr(id: &str, stderr: Box<dyn Read + Send>) {
         log::info!(
             format!("plugin {id} stderr"),
             "{}",
-            String::from_utf8_lossy(&line).trim_end()
+            String::from_utf8_lossy(&line).trim_end().escape_debug()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugins_receive_only_allowed_and_configured_environment() {
+        let config = crate::config::parse(
+            "[plugin p]\ncommand = [\"x\"]\nenv.HTTP_PROXY = \"http://proxy:8080\"\nenv.PATH = \"/opt/bin\"\n",
+            None,
+        )
+        .unwrap();
+        let daemon_env = |name: &str| match name {
+            "PATH" => Some("/usr/bin".into()),
+            "HOME" => Some("/root".into()),
+            "GH_TOKEN" | "ANTHROPIC_API_KEY" => Some("secret".into()),
+            _ => None,
+        };
+        let env = plugin_env(&config.plugins[0], daemon_env);
+        let names: Vec<&str> = env.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["HOME", "HTTP_PROXY", "PATH"]);
+        assert!(
+            env.contains(&("PATH".into(), "/opt/bin".into())),
+            "設定が優先する"
+        );
+        assert!(env.iter().all(|(_, value)| value != "secret"));
     }
 }

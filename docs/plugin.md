@@ -91,6 +91,29 @@ daemon が強制する範囲:
 | 内容 | 上限値と `protocol` の検証。違反は `Rejected` として plugin へ返す |
 | 流量 | 1 メッセージの長さ (64 KiB) と秒間件数の上限。超過した plugin は停止する |
 | 異常終了 | 指数的な待ち時間で再起動し、連続して失敗したものは無効化する |
+| 環境変数 | daemon の環境変数は許可したもの (`PATH`、`HOME`、`LANG`、`TZ`、一時ディレクトリ等) だけを渡す。利用者のシェルにあるトークン等を引き継がないため。その他は利用者設定の `env.*` で plugin ごとに明示する |
+
+### コンテナでの運用時の配置 (`scripts/container.sh daemon`)
+
+plugin は daemon と同じ uid で動くため、書き換えられて困るものは読取り専用で渡す。
+
+| マウント | 権限 | 理由 |
+| --- | --- | --- |
+| `/workspace` (リポジトリ) | 読取り専用。git のディレクトリは渡さない | `.git/hooks` 等の書換えによる、ホスト側での git 実行時のコード実行を防ぐ |
+| `/config` (設定ディレクトリ) | 読取り専用 | plugin が `stackchan.conf` や `plugins/` の実行ファイルを書き換え、次の起動で権限を広げることを防ぐ |
+| `/config/logs`、`/config/spool` | 書込み可能 | daemon がログを書き、spool の要求を削除するため |
+
+build は書込み可能なマウントで先に行い、daemon は開発シェルを通さず build 済みのバイナリを直接起動する。
+
+### 残存するリスク
+
+同じ uid・同じコンテナで動く以上、次は防げない。防ぐには、以前に採らなかった完全な隔離 (plugin ごとの別 uid または別コンテナ) か sandbox が必要である。
+
+- plugin は `/config/secrets.conf` を読める。自分宛て以外の plugin の secret も読める
+- plugin は `/config/logs` と `/config/spool` に書ける (ログの偽装、通知の注入)
+- plugin は daemon のプロセスの情報を読める場合がある (カーネルの ptrace の制限の設定に依存する)
+
+このため、secret を扱う plugin を導入する時点で隔離の方式を改めて検討する。それまでは、導入前にソースを確認し commit SHA で固定した plugin だけを使う。
 
 ### 任意の隔離
 
@@ -99,6 +122,16 @@ Linux では、利用者設定で plugin ごとに起動コマンドの前置き
 ### secret
 
 アクセスコードやトークンは利用者設定側 (他の利用者から読めないファイル) に置き、daemon が起動後の `init` メッセージで plugin の stdin へ渡す。環境変数はプロセス一覧や隔離基盤の設定から参照できる場合があるため用いない。
+
+- secret は `secrets.conf` の `param.*` で渡す。`command` (argv) と `env.*` には書かない。argv はプロセス一覧と `stackchan config` の表示に、環境変数はプロセスの情報に現れるため。`secrets.conf` には `env.*` を書けない
+- daemon は param と env の値をログにも `stackchan config` の表示にも出さない (名前だけを出す)。`Init` の Debug 表示も値を伏せる
+- spool の通知の本文と status の詳細は、hook から個人的な内容が入り得るため、ログの INFO では種類と長さだけを出し、内容は `--trace` の時だけ記録する
+- plugin の標準エラーは、制御文字を無害な表記にしてからログへ転送する
+
+plugin の作者の規約:
+
+- param の値を標準エラー、`Log` メッセージ、Card に出さない
+- 失敗の理由に、受け取った値や外部の応答の本文をそのまま含めない
 
 ## plugin の配布と固定
 
