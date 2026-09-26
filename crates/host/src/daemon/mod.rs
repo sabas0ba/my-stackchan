@@ -9,6 +9,7 @@ mod device;
 mod plugin;
 mod scheduler;
 
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -27,12 +28,22 @@ const TICK: Duration = Duration::from_millis(200);
 /// 表示は最長でこの時間だけ残る。
 const DEVICE_TTL_MARGIN_S: u16 = 5;
 
-pub fn run(config: Config, trim_file: PitchTrimFile) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    config: Config,
+    trim_file: PitchTrimFile,
+    spool_dir: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     if config.plugins.is_empty() {
         return Err("設定に plugin がありません".into());
     }
     let device = device::SerialDevice::new(config.daemon.port.clone(), trim_file);
-    let mut daemon = Daemon::new(config, device, plugin::OsSpawner, Instant::now());
+    log::info!(
+        "daemon",
+        "spool を {} から取り込みます",
+        spool_dir.display()
+    );
+    let mut daemon =
+        Daemon::new(config, device, plugin::OsSpawner, Instant::now()).with_spool(spool_dir);
     loop {
         daemon.step(TICK);
     }
@@ -63,6 +74,12 @@ pub struct Daemon<D, S> {
     visible: Vec<CardKey>,
     refresh: Duration,
     device_error: Option<String>,
+    spool: Option<PathBuf>,
+    /// spool の要求のうち、デバイスへ未送信のもの。spool のファイルは取込み時に削除するため、
+    /// 切断中や再接続待ちの間はここに保持し、送れるまで送り直す。どちらも最新の 1 件だけが
+    /// 意味を持つため、新しい要求で置き換える。
+    pending_status: Option<(protocol::Presence, Option<Instant>)>,
+    pending_input: Option<protocol::InputMode>,
 }
 
 impl<D: Device, S: Spawner> Daemon<D, S> {
@@ -84,6 +101,87 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             visible: Vec::new(),
             refresh,
             device_error: None,
+            spool: None,
+            pending_status: None,
+            pending_input: None,
+        }
+    }
+
+    /// spool の取込みを有効にする。
+    pub fn with_spool(mut self, dir: PathBuf) -> Self {
+        self.spool = Some(dir);
+        self
+    }
+
+    /// spool の要求を取り込む。daemon の port を使う要求 (表情、タップの扱い) もここで送る。
+    fn drain_spool(&mut self, now: Instant) {
+        let Some(dir) = self.spool.clone() else {
+            return;
+        };
+        for (name, request) in crate::spool::drain(&dir, crate::spool::MAX_PER_POLL) {
+            let request = match request {
+                Ok(request) => request,
+                Err(reason) => {
+                    log::warning!("spool", "{name} を捨てました: {reason}");
+                    continue;
+                }
+            };
+            log::info!("spool", "{name}: {request:?}");
+            match request {
+                crate::spool::Request::Notify {
+                    text,
+                    priority,
+                    ttl_s,
+                } => match convert::notice_text(&text) {
+                    Ok(text) => self.scheduler.notify(text.as_str().into(), priority, ttl_s),
+                    Err(reason) => log::warning!("spool", "{name} を捨てました: {reason}"),
+                },
+                crate::spool::Request::Status {
+                    activity,
+                    detail,
+                    ttl_s,
+                } => match crate::presence_message(
+                    Some(activity),
+                    &detail,
+                    crate::status_expression(activity),
+                    protocol::Gaze::Center,
+                    protocol::EyeStyle::Auto,
+                    ttl_s,
+                ) {
+                    Ok(protocol::Message::Presence(presence)) => {
+                        let deadline =
+                            (ttl_s != 0).then(|| now + Duration::from_secs(u64::from(ttl_s)));
+                        self.pending_status = Some((presence, deadline));
+                    }
+                    Ok(_) => unreachable!("presence_message は Presence を返す"),
+                    Err(reason) => log::warning!("spool", "{name} を捨てました: {reason}"),
+                },
+                crate::spool::Request::Input(mode) => self.pending_input = Some(mode),
+            }
+        }
+    }
+
+    /// spool の要求のうち未送信のものを送る。送れなければ保持し、次の周期で送り直す。
+    fn flush_pending(&mut self, now: Instant) {
+        if let Some(mode) = self.pending_input.take()
+            && !self.send_device(&protocol::Message::InputMode(mode), now)
+        {
+            self.pending_input = Some(mode);
+        }
+        if let Some((mut presence, deadline)) = self.pending_status.take() {
+            if let Some(deadline) = deadline {
+                if now >= deadline {
+                    log::warning!("spool", "送れないまま期限を過ぎた status を捨てました");
+                    return;
+                }
+                // 遅れて送る場合も、要求された期限を越えて表示しない。
+                let remaining = deadline - now;
+                let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+                presence.ttl_s = u16::try_from(seconds).unwrap_or(u16::MAX).max(1);
+            }
+            if !self.send_device(&protocol::Message::Presence(presence.clone()), now) {
+                self.pending_status = Some((presence, deadline));
+            }
         }
     }
 
@@ -219,6 +317,8 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
         for event in self.device.poll() {
             self.on_device_event(event, now);
         }
+        self.drain_spool(now);
+        self.flush_pending(now);
         for index in 0..self.plugins.len() {
             self.plugins[index].start_if_due(index, now, &mut self.spawner, &self.sender);
             if self.plugins[index].check_timeout(now) {

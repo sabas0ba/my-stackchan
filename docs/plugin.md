@@ -183,16 +183,32 @@ Card の識別子は plugin ごとに 0..7 とする。Card の内容はデバ�
 
 `plugin-api` の検証は大きさの一般的な上限 (文字列 256 byte、8 行 × 4 要素) だけを扱い、デバイスに収まるかは daemon が変換時に検証する。plugin API の版をデバイスの上限値の変更から切り離すためである。
 
-### 通知と手動命令の受付
+### 通知と手動命令の受付 (spool)
 
-hook やスクリプトからの単発の通知は `stackchan notify` で送る。daemon の動作中、CLI は spool ディレクトリ (利用者の設定ディレクトリ配下) に 1 件 1 ファイルで要求を書き、daemon が短い間隔で取り込む。
+hook やスクリプトからの単発の要求は、設定ディレクトリの `spool/` に 1 件 1 ファイルで書き、daemon が短い間隔で取り込む。daemon が port を占有している間も、通知や活動状態を送れるようにするためである。
 
-- local socket ではなく spool ディレクトリとするのは、Windows と Linux の両方で std だけで実装でき、アクセス制御を OS のファイル権限に委ねられるためである
-- CLI は一時ファイルに書いてから rename し、daemon が書きかけのファイルを読まないようにする
-- 取込み時にファイルの大きさを制限し、処理後に削除する。受付からの通知は `push` という組込み plugin からの `Notify` として扱い、同じ検証と流量制限を適用する
-- 既存の `text` / `card` / `face` / `status` / `clear` も、daemon の動作中は同じ経路で送る
+- local socket ではなく spool ディレクトリとするのは、Windows と Linux の両方で std だけで実装でき、アクセス制御を OS のファイル権限に委ねられるためである。daemon はコンテナで動かし、設定ディレクトリは Windows の `%APPDATA%\stackchan` をマウントするため (決定事項の「運用環境」)、Windows 側の hook もこのディレクトリに書ける
+- Windows では利用者が build した exe を実行できない場合があるため、要求の形式は exe を使わずに書ける行単位のテキストとする。書式は利用者設定と同じで、section 見出しが要求の種類を表す。UTF-8 の BOM と CRLF を受け付ける (PowerShell 5.1 の `Set-Content -Encoding utf8` の出力)
+- 書き手は `*.tmp` に書いてから `*.req` へ rename する。daemon は `*.req` だけを読み、書きかけのファイルを読まない
+- daemon は 200 ms ごとに最大 8 件を、名前の順に取り込む。1 ファイルは 4 KiB までとする。処理した後は、不正なものも含めて削除し、不正なものは理由をログに残す
+- 通知は plugin の `Notify` と同じ検証 (文字列の長さ) を経て scheduler に入る。待ち行列は 16 件で、溢れた分は古いものから捨てる
+- デバイスへ送る要求 (status、input) は、切断中や再接続待ちの間は daemon が保持し、送れるまで送り直す。spool のファイルは取込み時に削除するため、ここで保持しないと失われる。どちらも最新の 1 件だけが意味を持つため新しい要求で置き換え、status は要求された期限を過ぎたら捨てる。遅れて送る場合は、期限までの残り時間を TTL とする
 
-受付は P3 で実装する。それまでは daemon が port を占有するため、daemon の動作中に CLI の表示命令を実行すると port を開けずに失敗する。
+| 見出し | key | 内容 |
+| --- | --- | --- |
+| `[notify]` | `text` (必須)、`priority` (`low` / `normal` / `high`、既定 `normal`)、`ttl_s` (既定 0 = 10 秒) | 通知を表示する。`high` は Overlay、それ以外は下の帯に置く |
+| `[status]` | `activity` (`idle` / `working` / `waiting` / `done` / `error`、必須)、`detail` (既定 空)、`ttl_s` (既定 30) | 活動状態と、それに対応する表情を表示する (`stackchan status` と同じ対応) |
+| `[input]` | `mode` (`demo` / `forward`、必須) | タップの扱いを切り替える |
+
+```
+# 例: <設定ディレクトリ>/spool/20260926-120000-001.req
+[notify]
+text = "Claude Code: 入力を待っています"
+priority = "normal"
+ttl_s = 10
+```
+
+CLI では `stackchan notify --text ...` が spool に書く。`stackchan status` と `stackchan input` は `--via-daemon` を付けた場合に spool に書く。どれも daemon が取り込むまで待たない。
 
 ## 画面と入力の配分
 
@@ -227,7 +243,7 @@ firmware はタップの扱いとして `Demo` (現行の表情デモ) と `Forw
 - 状態は RAM 上にのみ保持し、再起動で `Demo` に戻る。firmware に設定の永続化を持たせない方針 ([design.md](design.md#目標と制約)) に従う
 - `Forward` の間は、タップによる firmware 内の動作 (表情デモの進行、Emote の解除) を行わず、Event の送信だけを行う。タップへの反応は daemon と plugin が決める
 - `Forward` の間も Event の送信先が無ければ破棄するだけで、表示には影響しない
-- P3 の受付 (spool) を実装するまでは、daemon の動作中に `stackchan input` を実行できない。daemon の起動前に `forward` へ切り替える。firmware が再起動した場合は `Demo` に戻るため、daemon を止めて切り替え直す
+- daemon の動作中は `stackchan input --via-daemon forward` (spool 経由) で切り替える。firmware が再起動した場合は `Demo` に戻るため、切り替え直す
 
 ## デバイスプロトコルの拡張
 

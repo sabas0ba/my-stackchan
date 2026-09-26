@@ -13,6 +13,7 @@ mod bmp;
 mod config;
 mod daemon;
 mod log;
+mod spool;
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
 const ESP_USB_SERIAL_JTAG: (u16, u16) = (0x303A, 0x1001);
@@ -54,6 +55,20 @@ enum Command {
         port: Option<String>,
         #[arg(value_enum)]
         mode: HostInputMode,
+        /// port を開かず、動作中の daemon へ spool 経由で渡す。
+        #[arg(long)]
+        via_daemon: bool,
+    },
+    /// 動作中の daemon へ spool 経由で通知を渡す。daemon の取込みを待たない。
+    Notify {
+        /// UTF-8 で最大 512 byte。改行等の制御文字は含められない
+        #[arg(long)]
+        text: String,
+        #[arg(long, value_enum, default_value = "normal")]
+        priority: HostPriority,
+        /// 表示秒数。0 は 10 秒
+        #[arg(long, default_value_t = 0)]
+        ttl: u16,
     },
     /// M5 StackChan 本体の I²C 拡張器と出力の状態を読み取る。
     Hardware {
@@ -115,6 +130,9 @@ enum Command {
         eyes: HostEyeStyle,
         #[arg(long, default_value_t = 30)]
         ttl: u16,
+        /// port を開かず、動作中の daemon へ spool 経由で渡す。視線と目の形は既定値になる
+        #[arg(long)]
+        via_daemon: bool,
     },
     /// 接続されているシリアル port を列挙する
     ListPorts,
@@ -179,6 +197,24 @@ enum HostLogLevel {
     Warn,
     Info,
     Debug,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HostPriority {
+    Low,
+    Normal,
+    /// Overlay に表示する
+    High,
+}
+
+impl From<HostPriority> for plugin_api::Priority {
+    fn from(value: HostPriority) -> Self {
+        match value {
+            HostPriority::Low => Self::Low,
+            HostPriority::Normal => Self::Normal,
+            HostPriority::High => Self::High,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -318,10 +354,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let trim_file = pitch_trim_file(cli.pitch_trim_file);
     match cli.command {
         Command::Config => show_config(cli.config_dir),
-        Command::Input { port, mode } => send_display(
+        Command::Input {
+            via_daemon: true,
+            mode,
+            ..
+        } => write_spool(cli.config_dir, &spool::Request::Input(mode.into())),
+        Command::Input { port, mode, .. } => send_display(
             port,
             &protocol::Message::InputMode(mode.into()),
             Some(&trim_file),
+        ),
+        Command::Notify {
+            text,
+            priority,
+            ttl,
+        } => write_spool(
+            cli.config_dir,
+            &spool::Request::Notify {
+                text,
+                priority: priority.into(),
+                ttl_s: ttl,
+            },
         ),
         Command::Daemon {
             log_level,
@@ -345,7 +398,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log_dir.join(log::FILE_NAME).display()
                 );
             }
-            daemon::run(config::load(&dir)?, trim_file)
+            daemon::run(config::load(&dir)?, trim_file, dir.join(spool::DIR_NAME))
         }
         Command::Hardware { port } => hardware(port),
         Command::PitchTrim {
@@ -391,26 +444,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&trim_file),
         ),
         Command::Status {
+            via_daemon: true,
+            activity,
+            detail,
+            ttl,
+            ..
+        } => write_spool(
+            cli.config_dir,
+            &spool::Request::Status {
+                activity: activity.into(),
+                detail,
+                ttl_s: ttl,
+            },
+        ),
+        Command::Status {
             port,
             activity,
             detail,
             gaze,
             eyes,
             ttl,
+            ..
         } => {
             let activity: protocol::Activity = activity.into();
-            let expression = match activity {
-                protocol::Activity::Idle | protocol::Activity::Done => protocol::Expression::Happy,
-                protocol::Activity::Working => protocol::Expression::Focused,
-                protocol::Activity::Waiting => protocol::Expression::Sleepy,
-                protocol::Activity::Error => protocol::Expression::Worried,
-            };
             send_display(
                 port,
                 &presence_message(
                     Some(activity),
                     &detail,
-                    expression,
+                    status_expression(activity),
                     gaze.into(),
                     eyes.into(),
                     ttl,
@@ -652,6 +714,27 @@ fn text_message(slot: TextSlot, ttl_s: u16, text: &str) -> Result<protocol::Mess
             )
         })?,
     })
+}
+
+/// 活動状態に対応する表情。CLI の status と、daemon が spool の status を扱う場合で共有する。
+fn status_expression(activity: protocol::Activity) -> protocol::Expression {
+    match activity {
+        protocol::Activity::Idle | protocol::Activity::Done => protocol::Expression::Happy,
+        protocol::Activity::Working => protocol::Expression::Focused,
+        protocol::Activity::Waiting => protocol::Expression::Sleepy,
+        protocol::Activity::Error => protocol::Expression::Worried,
+    }
+}
+
+/// 要求を spool に書く。daemon の取込みは待たない。
+fn write_spool(
+    config_dir: Option<PathBuf>,
+    request: &spool::Request,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = config::resolve_dir(config_dir)?.join(spool::DIR_NAME);
+    let path = spool::write(&dir, request)?;
+    println!("{}", path.display());
+    Ok(())
 }
 
 fn presence_message(
