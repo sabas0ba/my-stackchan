@@ -82,9 +82,9 @@ fn parse_offset(value: Option<&str>) -> Result<i64, String> {
     };
     let minutes: i64 = value
         .parse()
-        .map_err(|_| format!("utc_offset_minutes が整数ではありません: {value}"))?;
+        .map_err(|_| "utc_offset_minutes が整数ではありません".to_owned())?;
     if !OFFSET_RANGE_MINUTES.contains(&minutes) {
-        return Err(format!("utc_offset_minutes が範囲外です: {minutes}"));
+        return Err("utc_offset_minutes は -720..840 です".to_owned());
     }
     Ok(minutes)
 }

@@ -126,7 +126,10 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                     continue;
                 }
             };
-            log::info!("spool", "{name}: {request:?}");
+            // 通知の本文や status の詳細は hook から個人的な内容が入り得るため、INFO では
+            // 種類と長さだけを出し、内容は --trace の時だけ記録する。
+            log::info!("spool", "{name}: {}", request.summary());
+            log::trace!("spool", "{name}: {request:?}");
             match request {
                 crate::spool::Request::Notify {
                     text,
@@ -239,7 +242,8 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
     fn send_plugin(&mut self, plugin: usize, message: &HostMessage, now: Instant) {
         if log::enabled(log::Level::Trace) {
             let source = format!("plugin {}", self.plugins[plugin].config.id);
-            log::trace!(source, "送信 {}", describe(message));
+            // Init の Debug は params の値を伏せる (plugin-api)。
+            log::trace!(source, "送信 {message:?}");
         }
         if let Err(reason) = self.plugins[plugin].send(message) {
             self.stop_plugin(plugin, reason, now);
@@ -427,20 +431,6 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             };
             self.send_plugin(key.plugin, &message, now);
         }
-    }
-}
-
-/// 記録用の表記。Init の param には secret が含まれ得るため、件数だけを残す。
-fn describe(message: &HostMessage) -> String {
-    match message {
-        HostMessage::Init(init) => format!(
-            "Init {{ api_version: {}, granted: {:?}, params: {} 件, limits: {:?} }}",
-            init.api_version,
-            init.granted,
-            init.params.len(),
-            init.limits
-        ),
-        other => format!("{other:?}"),
     }
 }
 

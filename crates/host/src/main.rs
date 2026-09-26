@@ -536,32 +536,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn show_config(explicit: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let dir = config::resolve_dir(explicit)?;
     let config = config::load(&dir)?;
-    println!("config dir: {}", dir.display());
-    println!(
-        "daemon: port={}, rotate_s={}",
-        config.daemon.port.as_deref().unwrap_or("(auto)"),
-        config.daemon.rotate_s
-    );
-    for plugin in &config.plugins {
-        let allowed = plugin.allowed;
-        println!(
-            "plugin {}: command={:?}, rev={}, cards={}, notify={}, presence={}, motion={}",
-            plugin.id,
-            plugin.command,
-            plugin.rev.as_deref().unwrap_or("-"),
-            allowed.cards,
-            allowed.notify,
-            allowed.presence,
-            allowed.motion
-        );
-        // 値には secret が含まれ得るため、名前だけを表示する。
-        let names: Vec<&str> = plugin
-            .params
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect();
-        println!("  params: {names:?}");
-    }
+    // param と env の値には secret が含まれ得るため、要約は名前だけを出す。
+    println!("{}", config::summary(&dir, &config));
     Ok(())
 }
 
