@@ -10,7 +10,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 
 - USB Serial/JTAG (ESP32-S3 内蔵)。host からは CDC-ACM のシリアル port として見える (VID 0x303A, PID 0x1001)
 - ボーレートは CDC では意味を持たないが、host 側の API 上の値として 115200 を用いる
-- firmware は同じ port をログに使用しない (esp-println は UART0)
+- firmware のログ (esp-println) は UART0 に出るが、ROM のコンソールを経由するため USB にも出力され得る。ログは 0x00 を含まず、firmware は応答の前に 0x00 を送るため、host はフレームとして復号できない区切り単位を読み飛ばせばよい ([design.md](design.md#ログと通信の分離))
 
 ## フレーミング
 

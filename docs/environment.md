@@ -133,7 +133,7 @@ nix を持つ場合は `nix develop` または `direnv allow` で開発シェル
 5. 中央の顔、下部の `ASCII 0123456789 !?` と `RGB565`、左から赤・緑・青・白のカラーバーを確認する。
 6. リセット後と電源再投入後の両方で同じ画面になることを確認する。
 
-成功時は UART0 に `Phase 1 display ready: face / ASCII / RGB565` を出力する。USB Serial/JTAG へログは出さないため、USB monitor でこのログは観測できない。表示が点灯しない場合は UART0 のエラーと内部 I2C の応答を確認する。ビルド成功だけでは実機の表示確認を代替できない。
+成功時は UART0 に `Phase 1 display ready: face / ASCII / RGB565` を出力する。ROM のコンソールを経由するため USB 側にも出力され得るが、host の CLI は接続時に受信バッファを破棄するため、起動直後のログは CLI では観測できない ([design.md](design.md#ログと通信の分離))。表示が点灯しない場合は UART0 のエラーと内部 I2C の応答を確認する。ビルド成功だけでは実機の表示確認を代替できない。
 
 ## 検査
 

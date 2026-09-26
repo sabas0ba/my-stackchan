@@ -50,7 +50,7 @@ firmware を別 workspace にしているのは、target と `build-std` の設�
 | AW9523 | I2C | GPIO 拡張。LCD リセット等 |
 | FT6336U | I2C (0x38) | タッチ入力。画面タップで表情デモを進める |
 | USB Serial/JTAG | ESP32-S3 内蔵 | host との通信。書込と共用 |
-| UART0 | GPIO | ログ出力 (panic、backtrace)。USB とは分離する |
+| UART0 | GPIO | ログ出力 (panic、backtrace)。ROM のコンソールが USB にも出力する (「ログと通信の分離」を参照) |
 
 ### CoreS3 の表示系接続
 
@@ -101,7 +101,14 @@ LCD は固定済み `mipidsi 0.10.0` の `ILI9342CRgb565` を使用し、BGR 順
 
 ### ログと通信の分離
 
-USB Serial/JTAG はプロトコル専用とし、`esp-println` の出力先は UART0 に固定する。ログがプロトコルのストリームに混入すると host 側の同期が乱れるためである。
+`esp-println` は UART の出力先 (`uart` feature) を選んでいるが、ESP32-S3 では ROM の 1 文字出力関数を経由しており、ROM のコンソールが USB Serial/JTAG を使う状態 (`g_usb_print`) では USB にも出力される。2026-09-23 に、firmware の panic の出力を USB 側で受信したことで確認した (esp-println 0.17.0 の `uart_printer` の実装とも一致する)。
+
+したがって USB Serial/JTAG のストリームにはプロトコルのフレームとログのテキストが混在し得る。次の性質により、プロトコルの同期は乱れない。
+
+- firmware は応答の前に区切りの 0x00 を送る。ログのテキストは 0x00 を含まない
+- host はフレームとして復号できない区切り単位を捨てる。daemon は、そのうち制御文字を含まないテキストを改行の時点で切り出し、`device text` としてログに残す (panic の出力を失わないため)
+
+USB への出力を止めることはしない。panic の出力を host で受け取れることは、原因の特定に役立つためである。
 
 ## プロトコル
 
