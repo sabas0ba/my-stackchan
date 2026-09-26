@@ -28,12 +28,15 @@ use mipidsi::{
 
 mod board;
 use my_stackchan_firmware::{
-    actuators, model::Controller, power, renderer, touch, transport::Receiver,
+    actuators, framebuffer::FrameBuffer, model::Controller, power, renderer, touch,
+    transport::Receiver,
 };
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 
 static RECEIVER: StaticCell<Receiver> = StaticCell::new();
 static CONTROLLER: StaticCell<Controller> = StaticCell::new();
+// 150 KB あるため、スタック上に作ってから移す経路を通らないよう const で初期化する。
+static FRAME: ConstStaticCell<FrameBuffer> = ConstStaticCell::new(FrameBuffer::new());
 
 fn send_servo(
     uart: &mut Uart<'_, esp_hal::Blocking>,
@@ -146,7 +149,9 @@ fn main() -> ! {
         .invert_colors(ColorInversion::Inverted)
         .init(&mut delay)
         .expect("ILI9342C initialization");
-    renderer::draw(&mut display).expect("display drawing");
+    let frame = FRAME.take();
+    let Ok(()) = renderer::draw(frame);
+    frame.flush(&mut display).expect("display drawing");
     power::set_backlight(&mut i2c, true).expect("display backlight");
     esp_println::println!("Phase 1 display ready: face / ASCII / RGB565");
 
@@ -215,7 +220,8 @@ fn main() -> ! {
             tx_len = 0;
             tx_sent = 0;
         }
-        if controller.tick(now_ms, &mut display).is_err() {
+        let Ok(()) = controller.tick(now_ms, frame);
+        if frame.flush(&mut display).is_err() {
             esp_println::println!("display expiry drawing failed");
         }
         if now_ms >= next_touch_poll_ms {
@@ -231,7 +237,8 @@ fn main() -> ! {
                         let (_, y) = point.unwrap_or_default();
                         match controller.input_mode() {
                             protocol::InputMode::Demo => {
-                                if controller.tap(now_ms, &mut display).is_err() {
+                                let Ok(()) = controller.tap(now_ms, frame);
+                                if frame.flush(&mut display).is_err() {
                                     esp_println::println!("touch demo drawing failed");
                                 }
                             }
@@ -314,12 +321,15 @@ fn main() -> ! {
                                 enabled: actuator_ready,
                             }
                         }
-                        Ok(message) => controller
-                            .handle(message, now_ms, &mut display)
-                            .unwrap_or_else(|_| {
+                        // Ack は LCD への転送まで済んでから返す。転送に失敗した場合、
+                        // 状態は確定済みで、次の転送で画面全体を送り直す。
+                        Ok(message) => match controller.handle(message, now_ms, frame) {
+                            Ok(reply) if frame.flush(&mut display).is_ok() => reply,
+                            _ => {
                                 esp_println::println!("display update failed");
                                 receiver.reject()
-                            }),
+                            }
+                        },
                         Err(reply) => reply,
                     };
                     // bootloader が USB に出したログと応答の境界を保証する。

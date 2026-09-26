@@ -162,11 +162,12 @@ host CLI の `face` は表情・視線・目の開き方を明示し、`status` 
 firmware は `eyes=Auto` の顔を時刻に応じて短くまばたきさせる。明示した目の形と
 Overlay は自動まばたきで変更しない。まばたきは Presence の TTL と Ack 番号を変更しない。
 
-Ack は描画完了後に返す。USB 送信が詰まった場合、firmware は 2 秒後に未送信の応答を破棄して次の受信を再開する。
+Ack は描画と LCD への転送の完了後に返す。USB 送信が詰まった場合、firmware は 2 秒後に未送信の応答を破棄して次の受信を再開する。
 host は描画応答を最大 5 秒待つ。seq は起動時 0、Text / Card / Presence / Emote / Clear の成功ごとに加算し、最初の Ack は 1。
 `u32::MAX` の次は 0 に戻る。Ping、拒否、TTL 満了では加算せず、TTL 満了の自発的応答も送らない。
-描画エラー時は Slot の状態と seq を確定せず Rejected を返す。ただし途中まで書かれた画素は
-元に戻せないため、表示装置の障害が解消した後に表示命令を再送する。
+firmware はフレームバッファに描画してから、変化した範囲だけを LCD へ転送する
+([design.md](design.md#画面の更新))。LCD への転送に失敗した場合は Rejected を返す。この場合
+Slot の状態と seq は確定済みであり、次の転送で画面全体を送り直す。
 
 decoder の coverage-guided fuzz 検証は別途実施する。
 

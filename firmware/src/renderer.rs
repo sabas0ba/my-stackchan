@@ -1,4 +1,5 @@
-//! 起動確認画面と Slot の描画。フレームバッファを持たず描画先へ直接出力する。
+//! 起動確認画面と Slot の描画。描画先は任意の DrawTarget で、実機では
+//! `framebuffer::FrameBuffer` に描いてから変化した範囲だけを LCD へ送る。
 
 use crate::model::{Content, DisplayState};
 use embedded_graphics::{
