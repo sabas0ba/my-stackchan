@@ -16,6 +16,7 @@ use plugin_api::HostMessage;
 
 use crate::PitchTrimFile;
 use crate::config::Config;
+use crate::log;
 use device::{Delivery, Device};
 use plugin::{Event, Outcome, PluginRuntime, Request, Spawner};
 use scheduler::{CardKey, Content, Plan, Scheduler, Shown, Source};
@@ -110,6 +111,10 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                 if !self.plugins[plugin].is_current(generation) {
                     return;
                 }
+                if log::enabled(log::Level::Trace) {
+                    let source = format!("plugin {}", self.plugins[plugin].config.id);
+                    log::trace!(source, "受信 {frame:?}");
+                }
                 match self.plugins[plugin].receive(frame, now) {
                     Outcome::Nothing => {}
                     Outcome::Request(request) => self.apply(plugin, request, now),
@@ -134,6 +139,10 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
 
     /// plugin へ送る。待ち行列が溢れた plugin は stdin を読んでいないとみなし、停止する。
     fn send_plugin(&mut self, plugin: usize, message: &HostMessage, now: Instant) {
+        if log::enabled(log::Level::Trace) {
+            let source = format!("plugin {}", self.plugins[plugin].config.id);
+            log::trace!(source, "送信 {}", describe(message));
+        }
         if let Err(reason) = self.plugins[plugin].send(message) {
             self.stop_plugin(plugin, reason, now);
         }
@@ -187,7 +196,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
         match self.device.send(message, now) {
             Ok(delivery) => {
                 if self.device_error.take().is_some() {
-                    eprintln!("[daemon] デバイスへの送信が回復しました");
+                    log::info!("daemon", "デバイスへの送信が回復しました");
                 }
                 if delivery == Delivery::Reset {
                     // 表示状態が失われたため、次の割当てで全 slot を送り直す。
@@ -198,7 +207,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             Err(error) => {
                 // 同じ誤りを割当ての周期ごとに繰り返し出力しない。
                 if self.device_error.as_deref() != Some(error.as_str()) {
-                    eprintln!("[daemon] デバイスへ送信できません: {error}");
+                    log::error!("daemon", "デバイスへ送信できません: {error}");
                     self.device_error = Some(error);
                 }
                 false
@@ -225,7 +234,10 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
     /// 位置は巡回を次へ送る。顔の領域と Overlay のそれ以外の位置では何もしない。
     fn on_device_event(&mut self, event: protocol::Event, now: Instant) {
         let protocol::Event::Tap { slot, card, action } = event;
-        eprintln!("[daemon] tap: slot={slot:?}, card={card:?}, action={action:?}");
+        log::debug!(
+            "daemon",
+            "tap: slot={slot:?}, card={card:?}, action={action:?}"
+        );
         let key = card.and_then(CardKey::from_device_id);
         match (key, action) {
             (Some(key), Some(action))
@@ -315,6 +327,20 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             };
             self.send_plugin(key.plugin, &message, now);
         }
+    }
+}
+
+/// 記録用の表記。Init の param には secret が含まれ得るため、件数だけを残す。
+fn describe(message: &HostMessage) -> String {
+    match message {
+        HostMessage::Init(init) => format!(
+            "Init {{ api_version: {}, granted: {:?}, params: {} 件, limits: {:?} }}",
+            init.api_version,
+            init.granted,
+            init.params.len(),
+            init.limits
+        ),
+        other => format!("{other:?}"),
     }
 }
 

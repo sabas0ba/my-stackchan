@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use crate::PitchTrimFile;
+use crate::log;
 
 /// 切断後、次に接続を試みるまでの間隔。
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
@@ -39,6 +40,25 @@ pub trait Device {
     fn poll(&mut self) -> Vec<protocol::Event>;
 }
 
+/// USB から受け取ったもの。
+#[derive(Debug, PartialEq, Eq)]
+enum Received {
+    Reply(protocol::Reply),
+    /// フレームとして復号できないテキスト。firmware の起動ログや panic の出力であり、
+    /// 調査のためにログへ残す。
+    Text(String),
+}
+
+/// firmware のログとみなす条件。COBS のフレームは 0x01..0x1F の制御バイトをほぼ必ず含む
+/// ため、改行・タブ・ESC (端末の色指定) 以外の制御文字を含まない UTF-8 だけをテキストとする。
+fn as_text(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let printable = text
+        .chars()
+        .all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t' | '\x1b'));
+    printable.then(|| text.to_owned())
+}
+
 /// 0x00 区切りのフレームを 1 byte ずつ組み立てる。上限を超えたフレームは次の区切りまで捨てる。
 #[derive(Default)]
 struct Frames {
@@ -47,14 +67,23 @@ struct Frames {
 }
 
 impl Frames {
-    fn push(&mut self, byte: u8) -> Option<protocol::Reply> {
+    fn push(&mut self, byte: u8) -> Option<Received> {
         if byte != 0 {
-            if self.discarding || self.buffer.len() == protocol::MAX_FRAME_BYTES - 1 {
+            if self.discarding {
+                return None;
+            }
+            if self.buffer.len() == protocol::MAX_FRAME_BYTES - 1 {
+                // 長いテキストは区切りを待たずに出す。それ以外は次の区切りまで捨てる。
+                if let Some(text) = as_text(&self.buffer) {
+                    self.buffer.clear();
+                    self.buffer.push(byte);
+                    return Some(Received::Text(text));
+                }
                 self.buffer.clear();
                 self.discarding = true;
-            } else {
-                self.buffer.push(byte);
+                return None;
             }
+            self.buffer.push(byte);
             return None;
         }
         let complete = !self.discarding && !self.buffer.is_empty();
@@ -63,10 +92,56 @@ impl Frames {
             self.buffer.clear();
             return None;
         }
+        let text = as_text(&self.buffer);
         self.buffer.push(0);
-        let reply = protocol::decode(&mut self.buffer).ok();
+        let received = match protocol::decode(&mut self.buffer) {
+            Ok(reply) => Some(Received::Reply(reply)),
+            Err(_) => text.map(Received::Text),
+        };
         self.buffer.clear();
-        reply
+        received
+    }
+
+    /// 区切りが来ないまま残っているテキストを取り出す。firmware が panic で停止した場合、
+    /// その出力の後に区切りは来ない。
+    fn take_text(&mut self) -> Option<String> {
+        if self.buffer.is_empty() {
+            return None;
+        }
+        let text = as_text(&self.buffer);
+        if text.is_some() {
+            self.buffer.clear();
+        }
+        text
+    }
+}
+
+/// firmware のテキスト出力を行ごとにログへ残す。panic と例外は error、それ以外は info とする。
+fn log_device_text(text: &str) {
+    for line in text.lines() {
+        // 端末の色指定 (ESC [ ... m) を除く。
+        let mut plain = String::with_capacity(line.len());
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(c);
+            }
+        }
+        let plain = plain.trim_end();
+        if plain.is_empty() {
+            continue;
+        }
+        if plain.contains("PANIC") || plain.contains("panicked") || plain.contains("Exception") {
+            log::error!("device text", "{plain}");
+        } else {
+            log::info!("device text", "{plain}");
+        }
     }
 }
 
@@ -101,7 +176,12 @@ impl SerialDevice {
     }
 
     fn queue_event(&mut self, event: protocol::Event) {
+        log::trace!("device", "受信 {event:?}");
         if self.events.len() == MAX_PENDING_EVENTS {
+            log::warning!(
+                "device",
+                "取り出されない Event が溢れたため、古いものを捨てます"
+            );
             self.events.remove(0);
         }
         self.events.push(event);
@@ -112,6 +192,7 @@ impl SerialDevice {
         let (name, port) = self.port.as_mut().ok_or("未接続です")?;
         let mut buffer = [0; protocol::MAX_FRAME_BYTES];
         let frame = protocol::encode(message, &mut buffer).map_err(|e| e.to_string())?;
+        log::trace!("device", "送信 {message:?}");
         port.set_timeout(WRITE_TIMEOUT)
             .and_then(|()| port.write_all(frame).map_err(Into::into))
             .and_then(|()| port.flush().map_err(Into::into))
@@ -130,15 +211,23 @@ impl SerialDevice {
             let mut reply = None;
             for &byte in &chunk[..count] {
                 match self.frames.push(byte) {
-                    Some(protocol::Reply::Event(event)) => self.queue_event(event),
+                    Some(Received::Reply(protocol::Reply::Event(event))) => self.queue_event(event),
+                    Some(Received::Text(text)) => log_device_text(&text),
                     // 応答の後に続く byte は次の読取りで扱えるよう、ここで読み切る。
-                    Some(other) if reply.is_none() => reply = Some(other),
-                    _ => {}
+                    Some(Received::Reply(other)) if reply.is_none() => reply = Some(other),
+                    Some(Received::Reply(other)) => {
+                        log::warning!("device", "要求と対応しない応答を捨てました: {other:?}")
+                    }
+                    None => {}
                 }
             }
             if let Some(reply) = reply {
+                log::trace!("device", "受信 {reply:?}");
                 return Ok(reply);
             }
+        }
+        if let Some(text) = self.frames.take_text() {
+            log_device_text(&text);
         }
         Err("応答待ちがタイムアウトしました".into())
     }
@@ -156,7 +245,7 @@ impl SerialDevice {
             self.port = None;
             return Err(format!("{name}: {error}"));
         }
-        eprintln!("[daemon] {name} に接続しました");
+        log::info!("device", "{name} に接続しました");
         self.retry_at = None;
         Ok(())
     }
@@ -179,8 +268,11 @@ impl SerialDevice {
     }
 
     fn disconnect(&mut self, now: Instant, error: &str) {
+        if let Some(text) = self.frames.take_text() {
+            log_device_text(&text);
+        }
         if let Some((name, _)) = self.port.take() {
-            eprintln!("[daemon] {name} との通信に失敗しました: {error}");
+            log::warning!("device", "{name} との通信に失敗しました: {error}");
         }
         self.retry_at = Some(now + RECONNECT_INTERVAL);
     }
@@ -213,7 +305,7 @@ impl Device for SerialDevice {
         }
         let seq = acked(reply)?;
         if restarted(self.last_seq, seq) {
-            eprintln!("[daemon] firmware の再起動を検出しました (seq {seq})");
+            log::warning!("device", "firmware の再起動を検出しました (seq {seq})");
             self.last_seq = Some(seq);
             // 要求自体は受理されている。表示状態は失われているため、trim の成否に
             // かかわらず Reset を返して全 slot を送り直させる。trim を適用できなかった
@@ -235,8 +327,15 @@ impl Device for SerialDevice {
             let mut chunk = [0; 256];
             if let Ok(count) = port.read(&mut chunk) {
                 for &byte in &chunk[..count] {
-                    if let Some(protocol::Reply::Event(event)) = self.frames.push(byte) {
-                        self.queue_event(event);
+                    match self.frames.push(byte) {
+                        Some(Received::Reply(protocol::Reply::Event(event))) => {
+                            self.queue_event(event)
+                        }
+                        Some(Received::Text(text)) => log_device_text(&text),
+                        Some(Received::Reply(other)) => {
+                            log::warning!("device", "要求の無い応答を捨てました: {other:?}")
+                        }
+                        None => {}
                     }
                 }
             }
@@ -280,6 +379,42 @@ mod tests {
         stream.extend(wire(&ack));
         let mut frames = Frames::default();
         let decoded: Vec<_> = stream.iter().filter_map(|&b| frames.push(b)).collect();
-        assert_eq!(decoded, [event, ack]);
+        assert_eq!(
+            decoded,
+            [
+                Received::Text("log".into()),
+                Received::Reply(event),
+                Received::Reply(ack)
+            ]
+        );
+    }
+
+    #[test]
+    fn device_text_is_separated_from_binary_frames() {
+        // COBS のフレームは制御バイトを含むため、テキストとはみなさない。
+        let ack = wire(&protocol::Reply::Ack { seq: 1 });
+        assert_eq!(as_text(&ack[..ack.len() - 1]), None);
+        assert_eq!(
+            as_text("\x1b[31m PANIC \r\n".as_bytes()).as_deref(),
+            Some("\x1b[31m PANIC \r\n")
+        );
+        assert_eq!(as_text(&[0xFF, b'a']), None);
+
+        // 区切りの無い panic の出力は take_text で取り出せる。
+        let mut frames = Frames::default();
+        for &byte in b"panicked at renderer.rs" {
+            assert_eq!(frames.push(byte), None);
+        }
+        assert_eq!(
+            frames.take_text().as_deref(),
+            Some("panicked at renderer.rs")
+        );
+        assert_eq!(frames.take_text(), None);
+
+        // 上限を超える長いテキストは区切りを待たずに出す。
+        let long = vec![b'x'; protocol::MAX_FRAME_BYTES + 10];
+        let texts: Vec<_> = long.iter().filter_map(|&b| frames.push(b)).collect();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(frames.take_text().map(|t| t.len()), Some(11));
     }
 }

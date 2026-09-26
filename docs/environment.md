@@ -98,7 +98,17 @@ param.utc_offset_minutes = "540"
 
 `input forward` の間、帯の Card の行をタップすると、その行に action を持つ plugin へ通知される。帯のそれ以外の位置をタップすると帯の巡回が次の組へ進む。`input demo` で従来の表情デモに戻す。daemon の動作中は port を占有するため、切替は daemon の起動前に行う。
 
-daemon のログは stderr に出る。daemon を終了すると、表示は最長で `rotate_s` + 5 秒後に firmware 側の期限で消える。daemon の動作中は他の CLI の表示命令は port を開けずに失敗する。
+daemon のログは stderr と `<設定ディレクトリ>/logs/daemon.log` に出る。各行は UTC の時刻 (RFC 3339)、重要度、発生元 (`daemon`、`device`、`device text`、`plugin <id>`、`plugin <id> stderr`) を持つ。ファイルは 1 MiB を超えると `daemon.log.1`、`daemon.log.2` へ送り、それより古いものは消す。
+
+| オプション | 内容 |
+| --- | --- |
+| `--log-level error\|warn\|info\|debug` | 出力する最も低い重要度。既定は info。タップの受信は debug |
+| `--trace` | デバイスと plugin との送受信をすべて記録する。plugin へ渡す `param` (secret を含み得る) は件数だけを記録する |
+| `--no-log-file` | ファイルに書かず、stderr にだけ出す |
+
+`device text` は、USB 上でフレームとして復号できなかったテキスト (firmware の起動ログや panic の出力) である。panic で firmware が停止した場合も、応答待ちのタイムアウトの時点でそれまでの出力を記録する。
+
+daemon を終了すると、表示は最長で `rotate_s` + 5 秒後に firmware 側の期限で消える。daemon の動作中は他の CLI の表示命令は port を開けずに失敗する。
 
 ## Linux ホストからの使い方
 
