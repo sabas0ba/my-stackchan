@@ -4,7 +4,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 
 ## 版
 
-`protocol::VERSION` (現在 8)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
+`protocol::VERSION` (現在 9)。互換性の無い変更で増やす。firmware は `Pong` で自身の版を返し、host は不一致なら送信しない。
 
 ## 物理層
 
@@ -35,18 +35,21 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 | `PitchTrim(PitchTrim)` | ピッチ中心の補正 | -96..64 step |
 | `ClearSlot(Slot)` | 1 つの Slot だけを消す | - |
 | `InputMode(InputMode)` | タップの扱いを `Demo` / `Forward` に切り替える | - |
+| `ImageBegin(ImageBegin)` | Overlay の画像領域の受信を始める | 160×120 px 以下、画面内 |
+| `ImageRows(ImageRows)` | 画像領域の行の組 | 画素 960 byte (幅 160 px で 3 行) |
+| `ImageEnd { id }` | 画像領域を表示する | - |
 
 `protocol::Reply` (firmware -> host):
 
 | variant | 内容 |
 | --- | --- |
 | `Pong { nonce, version }` | `Ping` への応答 |
-| `Ack { seq }` | 描画に成功した Text / Card / Presence / Emote / Clear の通し番号 |
+| `Ack { seq }` | 受理した要求の通し番号。描画を伴う要求は描画に成功した場合に返す |
 | `Rejected { count }` | 破棄したフレームの累計。診断用 |
 | `HardwareStatus { .. }` | `HardwareProbe` への応答 |
 | `Event(Event)` | 要求と独立に送る入力。現在は `Tap { slot, card, action }` のみ |
 
-版 1 は Card、版 2 は Card への画像追加、版 3 は Presence、版 6 は Emote・二軸視線・HardwareProbe、版 7 は PitchTrim と HardwareStatus の補正値追加、版 8 は Card の識別子・行の action・ClearSlot・InputMode・Event に対応する。版 4・5 は使用していない。既存 Message variant の番号は維持する。
+版 1 は Card、版 2 は Card への画像追加、版 3 は Presence、版 6 は Emote・二軸視線・HardwareProbe、版 7 は PitchTrim と HardwareStatus の補正値追加、版 8 は Card の識別子・行の action・ClearSlot・InputMode・Event、版 9 は画像領域 (ImageBegin / ImageRows / ImageEnd) に対応する。版 4・5 は使用していない。既存 Message variant の番号は維持する。
 
 ### 現在の実装範囲
 
@@ -184,12 +187,24 @@ decoder の coverage-guided fuzz 検証は別途実施する。
 
 タッチの座標は FT6336U の P1_XH/XL/YH/YL (0x03..0x06) を接触点数 (0x02) と同じ転送で読み、画面の範囲に丸める。
 
+### 画像領域 (版 9)
+
+版 9 は、plugin の画像 (カメラ等) を表示するために追加した。1 枚の画像はフレームの上限 (1024 byte) を超えるため、行単位に分割して送る。
+
+- `ImageBegin { id, x, y, width, height, ttl_s }` で受信を始める。大きさは 1..160 × 1..120 px、領域は画面 (320×240) に収まらなければならない。受信中の画像があれば破棄して置き換える
+- `ImageRows { id, row, pixels }` は領域の上端からの行番号 `row` から始まる行の組である。画素は RGB565 の big-endian で、長さは幅 × 2 の倍数、最大 960 byte とする。行は上から順に、重複も欠落もなく送る。`id` が受信中の画像と異なる場合、`row` が次に期待する行と異なる場合、領域の下端を超える場合は拒否する
+- `ImageEnd { id }` で全行を受け取っていれば Overlay に表示する。行が不足する場合は拒否し、受信中の画像を破棄する
+- `ImageBegin` と `ImageRows` は描画せずに Ack を返す。表示は `ImageEnd` の時点で行い、受信途中の画像が画面に出ないようにする
+- 画像の外側の Overlay は黒とする。`ttl_s` の扱いは Text / Card と同じであり、0 は `Clear` / `ClearSlot` または上書きまで保つ
+- firmware は 160×120 px 1 枚分 (38,400 byte) の画素を static に持つ。受信した行はこの領域に書くため、表示中の画像を送り直す間に別の理由で再描画が起きると、書換え途中の画像が一時的に見え得る。1 fps 以下の更新を前提として許容する
+
 ## 不変条件
 
 - 可変長のフィールドはすべて `heapless` の上限付き型で表す。上限を超える入力は `Deserialize` の時点で失敗し、firmware のメモリに到達しない (`oversized_text_is_rejected` テスト)
 - firmware は `Message` の variant に対応する描画以外の動作を行わない
 - テキストは UTF-8 として妥当であることを `heapless::String` の `Deserialize` が保証する。改行以外の制御文字は描画側で無視する
 - 画像は縦横の上限と `width × height × 2` byte の長さを検証し、行の位置で決まるセル内に描画する
+- 画像領域は大きさと画面内であることを `ImageBegin` で検証し、行は位置と長さを検証してから static な画素領域に書く
 
 ## 検証
 
