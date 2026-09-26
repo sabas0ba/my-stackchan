@@ -18,7 +18,7 @@ pub use frame::{FrameError, FrameReader, write_frame};
 use serde::{Deserialize, Serialize};
 
 /// plugin API の版。互換性の無い変更を行った場合に増やす。
-pub const API_VERSION: u16 = 1;
+pub const API_VERSION: u16 = 2;
 
 /// COBS 符号化後のフレームの最大バイト数。受信側はこれを超える入力を確保せずに破棄する。
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -36,6 +36,9 @@ pub const MAX_CARDS: u8 = 8;
 pub const MAX_PARAMS: usize = 32;
 pub const MAX_PARAM_KEY_BYTES: usize = 64;
 pub const MAX_PARAM_VALUE_BYTES: usize = 1024;
+/// 画像の一般的な上限。デバイスが表示できる大きさは `Limits` で別に通知する。
+pub const MAX_IMAGE_WIDTH: u16 = 160;
+pub const MAX_IMAGE_HEIGHT: u16 = 120;
 
 /// plugin が要求し、利用者設定が許可する権限。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +51,8 @@ pub struct Capabilities {
     pub presence: bool,
     /// Emote による機構部 (サーボ、LED) の駆動。`presence` と併せて許可する。
     pub motion: bool,
+    /// 画像 (`ImageFrame`) の表示。画像は Overlay (全画面) に出るため、通知と同じく割込みになる。
+    pub image: bool,
 }
 
 impl Capabilities {
@@ -58,6 +63,7 @@ impl Capabilities {
             notify: self.notify && requested.notify,
             presence: self.presence && requested.presence,
             motion: self.presence && requested.presence && self.motion && requested.motion,
+            image: self.image && requested.image,
         }
     }
 }
@@ -184,6 +190,17 @@ pub struct Emote {
     pub duration_ms: u16,
 }
 
+/// Overlay に表示する画像の 1 枚。画素は RGB565 の big-endian で、長さは幅 × 高さ × 2。
+/// デコードと縮小は plugin が行う (daemon に画像の codec を持たせないため)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageFrame {
+    pub width: u16,
+    pub height: u16,
+    /// 表示を保つ秒数。0 は既定 (10 秒)。期限の無い Overlay は顔を隠し続けるため設けない。
+    pub ttl_s: u16,
+    pub pixels: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
     Error,
@@ -209,6 +226,8 @@ pub enum PluginMessage {
         level: LogLevel,
         text: String,
     },
+    /// capability `image` が必要。
+    ImageFrame(ImageFrame),
 }
 
 /// デバイスが表示できる大きさ。plugin はこの範囲で Card を組み立てる。
@@ -224,6 +243,9 @@ pub struct Limits {
     pub bar_label_bytes: u16,
     pub notify_bytes: u16,
     pub presence_detail_bytes: u16,
+    /// `ImageFrame` の最大の幅と高さ。
+    pub image_width: u16,
+    pub image_height: u16,
 }
 
 /// Debug は params の値を出さない (下の impl)。secret を含み得るため、plugin 作者が
@@ -352,6 +374,16 @@ impl PluginMessage {
                 }
             }
             Self::Log { text, .. } => check_len(text, MAX_LOG_BYTES, "ログが長すぎます")?,
+            Self::ImageFrame(frame) => {
+                if !(1..=MAX_IMAGE_WIDTH).contains(&frame.width)
+                    || !(1..=MAX_IMAGE_HEIGHT).contains(&frame.height)
+                {
+                    return Err("画像の大きさが範囲外です");
+                }
+                if frame.pixels.len() != usize::from(frame.width) * usize::from(frame.height) * 2 {
+                    return Err("画素の長さが幅 × 高さ × 2 と一致しません");
+                }
+            }
         }
         Ok(())
     }
@@ -402,12 +434,14 @@ mod tests {
             notify: true,
             presence: false,
             motion: true,
+            image: true,
         };
         let requested = Capabilities {
             cards: 8,
             notify: false,
             presence: true,
             motion: true,
+            image: false,
         };
         assert_eq!(
             allowed.intersect(requested),
@@ -417,6 +451,7 @@ mod tests {
                 presence: false,
                 // motion は presence 無しでは意味を持たないため許可しない。
                 motion: false,
+                image: false,
             }
         );
     }
@@ -493,6 +528,8 @@ mod tests {
                 bar_label_bytes: 12,
                 notify_bytes: 512,
                 presence_detail_bytes: 20,
+                image_width: 160,
+                image_height: 120,
             },
         };
         for text in [
@@ -502,6 +539,22 @@ mod tests {
             assert!(!text.contains("s3cr3t-value"), "{text}");
             assert!(text.contains("access_code"), "{text}");
         }
+    }
+
+    #[test]
+    fn image_frame_size_must_match_dimensions() {
+        let frame = |width: u16, height: u16, len: usize| {
+            PluginMessage::ImageFrame(ImageFrame {
+                width,
+                height,
+                ttl_s: 0,
+                pixels: vec![0; len],
+            })
+        };
+        assert_eq!(frame(160, 120, 38_400).validate(), Ok(()));
+        assert!(frame(160, 120, 38_399).validate().is_err());
+        assert!(frame(161, 1, 322).validate().is_err());
+        assert!(frame(1, 0, 0).validate().is_err());
     }
 
     #[test]

@@ -230,6 +230,7 @@ fn capabilities_are_enforced_per_message() {
             notify: true,
             presence: true,
             motion: true,
+            image: true,
         };
         let mut connection = client::connect(reader, writer, hello(requested)).unwrap();
         let granted = connection.init().granted;
@@ -271,7 +272,8 @@ fn capabilities_are_enforced_per_message() {
             cards: 1,
             notify: false,
             presence: true,
-            motion: false
+            motion: false,
+            image: false,
         }
     );
     assert!(notify.is_some(), "許可されていない通知は拒否される");
@@ -605,4 +607,98 @@ fn spool_device_commands_survive_disconnection_and_respect_deadline() {
     daemon.tick(start + Duration::from_secs(30));
     assert_eq!(device.messages().len(), sent.len());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn image_frame_reaches_device_as_centered_rows_and_is_rate_limited() {
+    let mut harness = Harness::new("image = true\n");
+    let plugin = harness.start_plugin(|reader, writer| {
+        let capabilities = api::Capabilities {
+            image: true,
+            ..api::Capabilities::default()
+        };
+        let mut connection = client::connect(reader, writer, hello(capabilities)).unwrap();
+        let frame = api::PluginMessage::ImageFrame(api::ImageFrame {
+            width: 40,
+            height: 30,
+            ttl_s: 5,
+            pixels: (0..40 * 30 * 2).map(|i| i as u8).collect(),
+        });
+        connection.send(&frame).unwrap();
+        // 間隔の制限により、直後の 2 枚目は拒否される。
+        connection.send(&frame).unwrap();
+        next_rejection(&mut connection)
+    });
+    harness.run_until("ImageEnd の送信", |sent| {
+        sent.iter()
+            .any(|message| matches!(message, protocol::Message::ImageEnd { .. }))
+    });
+    let rejection = loop {
+        harness.daemon.step(Duration::from_millis(20));
+        if plugin.is_finished() {
+            break plugin.join().unwrap();
+        }
+    };
+    assert!(rejection.is_some(), "間隔の短い画像は拒否される");
+
+    let messages = harness.device.messages();
+    let begin = messages
+        .iter()
+        .find_map(|message| match message {
+            protocol::Message::ImageBegin(begin) => Some(*begin),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        (begin.x, begin.y, begin.width, begin.height),
+        (140, 105, 40, 30)
+    );
+    assert!((1..=5).contains(&begin.ttl_s));
+    let pixels: Vec<u8> = messages
+        .iter()
+        .filter_map(|message| match message {
+            protocol::Message::ImageRows(rows) if rows.id == begin.id => Some(rows.pixels.to_vec()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        pixels,
+        (0..40 * 30 * 2).map(|i| i as u8).collect::<Vec<u8>>()
+    );
+}
+
+#[test]
+fn image_frame_without_capability_is_rejected() {
+    let mut harness = Harness::new("cards = 1\n");
+    let plugin = harness.start_plugin(|reader, writer| {
+        let capabilities = api::Capabilities {
+            image: true,
+            ..api::Capabilities::default()
+        };
+        let mut connection = client::connect(reader, writer, hello(capabilities)).unwrap();
+        connection
+            .send(&api::PluginMessage::ImageFrame(api::ImageFrame {
+                width: 1,
+                height: 1,
+                ttl_s: 1,
+                pixels: vec![0, 0],
+            }))
+            .unwrap();
+        next_rejection(&mut connection)
+    });
+    let rejection = loop {
+        harness.daemon.step(Duration::from_millis(20));
+        if plugin.is_finished() {
+            break plugin.join().unwrap();
+        }
+    };
+    assert!(rejection.is_some());
+    assert!(
+        !harness
+            .device
+            .messages()
+            .iter()
+            .any(|message| matches!(message, protocol::Message::ImageBegin(_)))
+    );
 }

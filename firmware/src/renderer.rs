@@ -1,7 +1,7 @@
 //! 起動確認画面と Slot の描画。描画先は任意の DrawTarget で、実機では
 //! `framebuffer::FrameBuffer` に描いてから変化した範囲だけを LCD へ送る。
 
-use crate::model::{Content, DisplayState};
+use crate::model::{Content, DisplayState, ImageRegion};
 use embedded_graphics::{
     image::{Image, ImageRawBE},
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
@@ -300,11 +300,23 @@ pub fn draw_state_with_blink<D: DrawTarget<Color = Rgb565>>(
     state: &DisplayState,
     blink: bool,
 ) -> Result<(), D::Error> {
+    draw_state_with_image(display, state, &[], blink)
+}
+
+/// 画像領域の画素 (`image`) を与えて描く。画素は表示状態とは別に持つ (model の ImagePixels)。
+/// 描画のたびに表示状態を複製するため、38 KB の画素を複製の対象に含めない。
+pub fn draw_state_with_image<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    state: &DisplayState,
+    image: &[u8],
+    blink: bool,
+) -> Result<(), D::Error> {
     display.clear(Rgb565::BLACK)?;
     if let Some(entry) = state.get(Slot::Overlay) {
         draw_content(
             display,
             &entry.content,
+            image,
             Rectangle::new(Point::zero(), Size::new(320, 240)),
         )?;
     } else {
@@ -326,6 +338,7 @@ pub fn draw_state_with_blink<D: DrawTarget<Color = Rgb565>>(
                 draw_content(
                     display,
                     &entry.content,
+                    image,
                     Rectangle::new(Point::new(0, y), Size::new(320, 48)),
                 )?;
             }
@@ -366,12 +379,32 @@ fn draw_presence_status<D: DrawTarget<Color = Rgb565>>(
 fn draw_content<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     content: &Content,
+    image: &[u8],
     area: Rectangle,
 ) -> Result<(), D::Error> {
     match content {
         Content::Text(text) => draw_text(display, text, area),
         Content::Card(card) => draw_card(display, card, area),
+        Content::Image(region) => draw_region_image(display, image, *region),
     }
+}
+
+/// 画像領域を描く。画素が領域に足りない場合は描かない (領域は黒のまま)。
+///
+/// インライン展開させないのは、`draw_inline_image` と同じく `ImageRaw::new` の除算
+/// (画素数 / (幅 × 2)) が条件の判定より前に先行実行されるのを防ぐためである。
+#[inline(never)]
+fn draw_region_image<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    image: &[u8],
+    region: ImageRegion,
+) -> Result<(), D::Error> {
+    let bytes = usize::from(region.width) * usize::from(region.height) * 2;
+    if region.width == 0 || image.len() < bytes {
+        return Ok(());
+    }
+    let raw = ImageRawBE::<Rgb565>::new(&image[..bytes], u32::from(region.width));
+    Image::new(&raw, Point::new(i32::from(region.x), i32::from(region.y))).draw(display)
 }
 
 fn draw_card<D: DrawTarget<Color = Rgb565>>(

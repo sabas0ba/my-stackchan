@@ -5,9 +5,11 @@
 //!
 //! - 帯: 常設の Card を優先度順に並べ、2 枚ずつ上下の帯に置いて一定間隔で巡回する。
 //!   高優先度以外の通知がある間は、下の帯を通知に、上の帯を Card 1 枚ずつの巡回に使う
-//! - Overlay: 一時的な Card (TTL 必須) と高優先度の通知のうち、優先度が高く新しいもの
+//! - Overlay: 一時的な Card (TTL 必須)、画像、高優先度の通知のうち、優先度が高く新しいもの。
+//!   画像は通常優先度の Overlay Card と同順位に扱う
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use plugin_api::{Placement, Priority};
@@ -16,6 +18,8 @@ use super::convert::Rows;
 
 /// 通知の TTL が 0 の場合の表示時間。
 const DEFAULT_NOTICE: Duration = Duration::from_secs(10);
+/// 画像の TTL が 0 の場合の表示時間。
+const DEFAULT_IMAGE: Duration = Duration::from_secs(10);
 /// 待ち行列に置ける通知の数。超えた分は古いものから捨てる。
 const MAX_PENDING_NOTICES: usize = 16;
 
@@ -48,6 +52,15 @@ impl CardKey {
 pub enum Source {
     Card { key: CardKey, revision: u64 },
     Notice { id: u64 },
+    Image { plugin: usize, id: u64 },
+}
+
+/// 画像の画素。割当てのたびに複製されるため、38 KB の画素を Arc で共有する。
+#[derive(Debug, PartialEq, Eq)]
+pub struct Image {
+    pub width: u16,
+    pub height: u16,
+    pub pixels: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +68,7 @@ pub enum Content {
     /// 行は 500 byte を超えるため、Text との大きさの差を Box で抑える。
     Card(Box<Rows>),
     Text(String),
+    Image(Arc<Image>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,9 +94,17 @@ impl Plan {
             .flatten()
             .filter_map(|shown| match shown.source {
                 Source::Card { key, .. } => Some(key),
-                Source::Notice { .. } => None,
+                Source::Notice { .. } | Source::Image { .. } => None,
             })
     }
+}
+
+#[derive(Debug, Clone)]
+struct ImageEntry {
+    plugin: usize,
+    id: u64,
+    image: Arc<Image>,
+    deadline: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +131,8 @@ pub struct Scheduler {
     cards: Vec<CardEntry>,
     pending: VecDeque<Notice>,
     current: Option<(Notice, Instant)>,
+    /// 表示中の画像。画像は最新の 1 枚だけを持ち、別の plugin の画像でも置き換える。
+    image: Option<ImageEntry>,
     counter: u64,
     page: usize,
     next_rotation: Option<Instant>,
@@ -121,6 +145,7 @@ impl Scheduler {
             cards: Vec::new(),
             pending: VecDeque::new(),
             current: None,
+            image: None,
             counter: 0,
             page: 0,
             next_rotation: None,
@@ -177,9 +202,31 @@ impl Scheduler {
         self.cards.retain(|entry| entry.key != key);
     }
 
-    /// plugin の停止時に、その plugin の Card をすべて取り除く。
+    /// plugin の停止時に、その plugin の Card と画像をすべて取り除く。
     pub fn remove_plugin(&mut self, plugin: usize) {
         self.cards.retain(|entry| entry.key.plugin != plugin);
+        if self
+            .image
+            .as_ref()
+            .is_some_and(|entry| entry.plugin == plugin)
+        {
+            self.image = None;
+        }
+    }
+
+    /// 画像を表示する。表示中の画像は置き換える。
+    pub fn image(&mut self, plugin: usize, image: Image, ttl_s: u16, now: Instant) {
+        let duration = match ttl_s {
+            0 => DEFAULT_IMAGE,
+            seconds => Duration::from_secs(u64::from(seconds)),
+        };
+        let id = self.next_id();
+        self.image = Some(ImageEntry {
+            plugin,
+            id,
+            image: Arc::new(image),
+            deadline: now + duration,
+        });
     }
 
     pub fn notify(&mut self, text: String, priority: Priority, ttl_s: u16) {
@@ -208,6 +255,13 @@ impl Scheduler {
             .is_some_and(|(_, deadline)| now >= *deadline)
         {
             self.current = None;
+        }
+        if self
+            .image
+            .as_ref()
+            .is_some_and(|entry| now >= entry.deadline)
+        {
+            self.image = None;
         }
         if self.current.is_none()
             && let Some(notice) = self.pending.pop_front()
@@ -293,9 +347,24 @@ impl Scheduler {
                     .cmp(&b.priority)
                     .then(a.revision.cmp(&b.revision))
             });
-        plan.overlay = match (notice, overlay_card) {
-            (Some((Priority::High, shown)), _) => Some(shown),
-            (_, Some(entry)) => Some(Self::shown_card(entry, now)),
+        // 画像は通常優先度の Card と同順位とし、同順位では新しい方を出す。
+        let image = self.image.as_ref().filter(|image| {
+            overlay_card.is_none_or(|card| {
+                card.priority < Priority::Normal
+                    || (card.priority == Priority::Normal && card.revision < image.id)
+            })
+        });
+        plan.overlay = match (notice, image, overlay_card) {
+            (Some((Priority::High, shown)), _, _) => Some(shown),
+            (_, Some(image), _) => Some(Shown {
+                source: Source::Image {
+                    plugin: image.plugin,
+                    id: image.id,
+                },
+                content: Content::Image(Arc::clone(&image.image)),
+                remaining: Some(image.deadline - now),
+            }),
+            (_, None, Some(entry)) => Some(Self::shown_card(entry, now)),
             _ => None,
         };
         plan
@@ -329,8 +398,90 @@ mod tests {
     fn card_key(shown: &Option<Shown>) -> Option<CardKey> {
         match shown.as_ref()?.source {
             Source::Card { key, .. } => Some(key),
-            Source::Notice { .. } => None,
+            Source::Notice { .. } | Source::Image { .. } => None,
         }
+    }
+
+    fn image(width: u16) -> Image {
+        Image {
+            width,
+            height: 1,
+            pixels: vec![0; usize::from(width) * 2],
+        }
+    }
+
+    #[test]
+    fn image_takes_overlay_by_priority_and_expires() {
+        let now = Instant::now();
+        let mut scheduler = Scheduler::new(Duration::from_secs(5));
+        scheduler
+            .put(
+                key(0, 0),
+                Placement::Overlay,
+                Priority::Normal,
+                30,
+                rows("card"),
+                8,
+                now,
+            )
+            .unwrap();
+        scheduler.image(1, image(2), 0, now);
+        let plan = scheduler.plan(now);
+        assert!(matches!(
+            plan.overlay.unwrap().source,
+            Source::Image { plugin: 1, .. }
+        ));
+
+        // 同順位では新しい方、高い優先度の Card は画像に勝つ。
+        scheduler
+            .put(
+                key(0, 0),
+                Placement::Overlay,
+                Priority::Normal,
+                30,
+                rows("card"),
+                8,
+                now,
+            )
+            .unwrap();
+        assert_eq!(card_key(&scheduler.plan(now).overlay), Some(key(0, 0)));
+        scheduler.image(1, image(3), 0, now);
+        assert!(card_key(&scheduler.plan(now).overlay).is_none());
+        scheduler
+            .put(
+                key(0, 1),
+                Placement::Overlay,
+                Priority::High,
+                30,
+                rows("high"),
+                8,
+                now,
+            )
+            .unwrap();
+        assert_eq!(card_key(&scheduler.plan(now).overlay), Some(key(0, 1)));
+        scheduler.remove(key(0, 1));
+
+        // 高優先度の通知は画像に勝つ。
+        scheduler.notify("urgent".into(), Priority::High, 1);
+        assert_eq!(
+            scheduler.plan(now).overlay.unwrap().content,
+            Content::Text("urgent".into())
+        );
+
+        // 既定の 10 秒で消え、Card が戻る。
+        let later = now + Duration::from_secs(10);
+        assert_eq!(card_key(&scheduler.plan(later).overlay), Some(key(0, 0)));
+    }
+
+    #[test]
+    fn stopping_a_plugin_removes_its_image_only() {
+        let now = Instant::now();
+        let mut scheduler = Scheduler::new(Duration::from_secs(5));
+        scheduler.image(1, image(2), 5, now);
+        scheduler.remove_plugin(0);
+        assert!(scheduler.plan(now).overlay.is_some());
+        scheduler.remove_plugin(1);
+        assert!(scheduler.plan(now).overlay.is_none());
     }
 
     fn put(scheduler: &mut Scheduler, key: CardKey, priority: Priority, now: Instant) {

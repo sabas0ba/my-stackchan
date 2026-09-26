@@ -288,6 +288,15 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                 self.send_device(&protocol::Message::Emote(emote), now);
                 Ok(())
             }
+            Request::Image(frame) => {
+                let image = scheduler::Image {
+                    width: frame.width,
+                    height: frame.height,
+                    pixels: frame.pixels,
+                };
+                self.scheduler.image(plugin, image, frame.ttl_s, now);
+                Ok(())
+            }
         };
         if let Err(reason) = result {
             self.reject(plugin, reason, now);
@@ -377,7 +386,10 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                         continue;
                     }
                     let ttl_s = self.device_ttl(shown);
-                    if self.send_device(&slot_message(slot, ttl_s, shown), now) {
+                    let delivered = slot_messages(slot, ttl_s, shown)
+                        .iter()
+                        .all(|message| self.send_device(message, now));
+                    if delivered {
                         self.sent[index] = Some(Sent {
                             source: shown.source,
                             at: now,
@@ -434,19 +446,28 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
     }
 }
 
-fn slot_message(slot: protocol::Slot, ttl_s: u16, shown: &Shown) -> protocol::Message {
+/// slot の表示内容をデバイスへのメッセージにする。画像は複数のメッセージになる。
+fn slot_messages(slot: protocol::Slot, ttl_s: u16, shown: &Shown) -> Vec<protocol::Message> {
     let id = match shown.source {
         Source::Card { key, .. } => key.device_id(),
+        // デバイスは受信中の画像との照合にだけ使うため、下位 16 bit で足りる。
+        Source::Image { id, .. } => id as u16,
         Source::Notice { .. } => 0,
     };
     match &shown.content {
-        Content::Card(rows) => protocol::Message::Card(convert::device_card(slot, ttl_s, id, rows)),
-        Content::Text(text) => protocol::Message::Text {
+        Content::Card(rows) => vec![protocol::Message::Card(convert::device_card(
+            slot, ttl_s, id, rows,
+        ))],
+        Content::Text(text) => vec![protocol::Message::Text {
             slot,
             ttl_s,
             // Scheduler に入る前に長さを検証済みである。
             text: text.as_str().try_into().unwrap_or_default(),
-        },
+        }],
+        // 画像は Overlay にだけ割り当てられる (Scheduler)。
+        Content::Image(image) => {
+            convert::image_messages(id, ttl_s, image.width, image.height, &image.pixels)
+        }
     }
 }
 

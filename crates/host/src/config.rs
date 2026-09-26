@@ -302,13 +302,14 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
             ("notify", Value::Bool(value)) => plugin.allowed.notify = value,
             ("presence", Value::Bool(value)) => plugin.allowed.presence = value,
             ("motion", Value::Bool(value)) => plugin.allowed.motion = value,
+            ("image", Value::Bool(value)) => plugin.allowed.image = value,
             (key, Value::String(value)) if key.starts_with("env.") => {
                 push_env(&mut plugin, key, value).map_err(|reason| error(line, reason.into()))?;
             }
             (key, Value::String(value)) if key.starts_with("param.") => {
                 push_param(&mut plugin, key, value).map_err(|reason| error(line, reason.into()))?;
             }
-            ("command" | "rev" | "cards" | "notify" | "presence" | "motion", _) => {
+            ("command" | "rev" | "cards" | "notify" | "presence" | "motion" | "image", _) => {
                 return Err(error(line, format!("{key} の値が不正です")));
             }
             _ => return Err(error(line, format!("未知の key です: {key}"))),

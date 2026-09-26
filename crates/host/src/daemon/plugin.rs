@@ -24,6 +24,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_MESSAGES_PER_SECOND: u32 = 50;
 /// 表情の要求の最短間隔。Emote は上書きされるため、連続送信で顔が落ち着かなくなるのを防ぐ。
 const MIN_FACE_INTERVAL: Duration = Duration::from_secs(1);
+/// 画像の要求の最短の間隔。1 枚の転送 (約 40 KB) がデバイスとの通信を占める時間を抑える。
+const MIN_IMAGE_INTERVAL: Duration = Duration::from_millis(500);
 /// 連続して失敗した場合に無効化するまでの回数。
 const MAX_FAILURES: u32 = 5;
 /// この時間以上動作した plugin の停止は連続失敗に数えない。
@@ -133,6 +135,7 @@ pub enum Request {
     Notify(plugin_api::Notify),
     Presence(protocol::Presence),
     Emote(protocol::Emote),
+    Image(plugin_api::ImageFrame),
 }
 
 pub enum Outcome {
@@ -175,6 +178,7 @@ pub struct PluginRuntime {
     failures: u32,
     window: (Instant, u32),
     last_face: Option<Instant>,
+    last_image: Option<Instant>,
 }
 
 impl PluginRuntime {
@@ -186,6 +190,7 @@ impl PluginRuntime {
             failures: 0,
             window: (now, 0),
             last_face: None,
+            last_image: None,
         }
     }
 
@@ -392,6 +397,22 @@ impl PluginRuntime {
             PluginMessage::Emote(emote) if granted.presence => self.face_request(now, || {
                 convert::emote(&emote, granted.motion).map(Request::Emote)
             }),
+            PluginMessage::ImageFrame(frame) if granted.image => {
+                // 画像 1 枚はデバイスへ約 40 フレームになるため、メッセージ数とは別に間隔を制限する。
+                if self
+                    .last_image
+                    .is_some_and(|last| now.duration_since(last) < MIN_IMAGE_INTERVAL)
+                {
+                    return Outcome::Reject("画像の送信の間隔が短すぎます");
+                }
+                match convert::image_frame(&frame) {
+                    Ok(()) => {
+                        self.last_image = Some(now);
+                        Outcome::Request(Request::Image(frame))
+                    }
+                    Err(reason) => Outcome::Reject(reason),
+                }
+            }
             PluginMessage::Log { level, text } => {
                 let level = match level {
                     plugin_api::LogLevel::Error => log::Level::Error,
@@ -406,7 +427,8 @@ impl PluginRuntime {
             PluginMessage::CardPut(_)
             | PluginMessage::Notify(_)
             | PluginMessage::Presence(_)
-            | PluginMessage::Emote(_) => Outcome::Reject("許可されていない操作です"),
+            | PluginMessage::Emote(_)
+            | PluginMessage::ImageFrame(_) => Outcome::Reject("許可されていない操作です"),
         }
     }
 

@@ -363,6 +363,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "stackchan-image-demo"
+version = "0.1.0"
+dependencies = [
+ "plugin-api",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
