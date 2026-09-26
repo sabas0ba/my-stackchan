@@ -104,6 +104,25 @@ daemon と plugin は Linux 側 (コンテナ) で動かす。Windows ホスト�
 
 コンテナのネットワークは既定で `none` とし、plugin の外部通信を許可しない。LAN 上の機器を使う plugin を動かす場合にだけ、`STACKCHAN_DAEMON_NETWORK=bridge` 等で明示する。
 
+daemon の動作中は port を占有するため、通知と活動状態、タップの扱いの切替は spool 経由で渡す ([plugin.md](plugin.md#通知と手動命令の受付-spool))。コンテナ内の CLI からは次のとおりに書く。daemon のコンテナと同じ設定ディレクトリを `--config-dir` で指定する。
+
+```bash
+scripts/container.sh run bash -c 'cargo run -q --locked --offline -p my-stackchan-host -- \
+  --config-dir .work/daemon-linux notify --text "build done" --priority high --ttl 10'
+# status --via-daemon --activity waiting --detail INPUT / input --via-daemon forward も同様
+```
+
+Windows 側の hook 等からは、exe を使わずに PowerShell で要求のファイルを書く。`*.tmp` に書いてから `*.req` へ rename し、daemon が書きかけを読まないようにする。
+
+```powershell
+$dir = Join-Path $env:APPDATA "stackchan\spool"
+New-Item -ItemType Directory -Force $dir | Out-Null
+$name = "{0:D13}-{1}" -f [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(), $PID
+$request = "[notify]`ntext = `"Claude Code: 入力を待っています`"`nttl_s = 10`n"
+Set-Content -Encoding utf8 -NoNewline -Path (Join-Path $dir "$name.tmp") -Value $request
+Rename-Item (Join-Path $dir "$name.tmp") "$name.req"
+```
+
 `input forward` の間、帯の Card の行をタップすると、その行に action を持つ plugin へ通知される。帯のそれ以外の位置をタップすると帯の巡回が次の組へ進む。`input demo` で従来の表情デモに戻す。daemon の動作中は port を占有するため、切替は daemon の起動前に行う。
 
 daemon のログは stderr と `<設定ディレクトリ>/logs/daemon.log` に出る。各行は UTC の時刻 (RFC 3339)、重要度、発生元 (`daemon`、`device`、`device text`、`plugin <id>`、`plugin <id> stderr`) を持つ。ファイルは 1 MiB を超えると `daemon.log.1`、`daemon.log.2` へ送り、それより古いものは消す。

@@ -130,7 +130,7 @@ pub fn load(dir: &Path) -> Result<Config, Box<dyn std::error::Error>> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Value {
+pub(crate) enum Value {
     String(String),
     Integer(u32),
     Bool(bool),
@@ -138,14 +138,14 @@ enum Value {
 }
 
 #[derive(Debug)]
-struct Section {
-    header: String,
-    line: usize,
-    entries: BTreeMap<String, (usize, Value)>,
+pub(crate) struct Section {
+    pub(crate) header: String,
+    pub(crate) line: usize,
+    pub(crate) entries: BTreeMap<String, (usize, Value)>,
 }
 
 pub fn parse(config: &str, secrets: Option<&str>) -> Result<Config, ConfigError> {
-    let sections = parse_sections(CONFIG_FILE, config)?;
+    let sections = parse_sections(CONFIG_FILE, config, validate_header)?;
     let mut result = Config {
         daemon: DaemonConfig::default(),
         plugins: Vec::new(),
@@ -266,7 +266,7 @@ fn push_param(plugin: &mut PluginConfig, key: &str, value: String) -> Result<(),
 }
 
 fn merge_secrets(config: &mut Config, secrets: &str) -> Result<(), ConfigError> {
-    for section in parse_sections(SECRETS_FILE, secrets)? {
+    for section in parse_sections(SECRETS_FILE, secrets, validate_header)? {
         let error = |line: usize, reason: String| ConfigError {
             file: SECRETS_FILE.into(),
             line,
@@ -299,7 +299,13 @@ fn merge_secrets(config: &mut Config, secrets: &str) -> Result<(), ConfigError> 
     Ok(())
 }
 
-fn parse_sections(file: &str, text: &str) -> Result<Vec<Section>, ConfigError> {
+/// 行単位の書式を section ごとに解析する。見出しの検査は呼出し側が与える
+/// (利用者設定と spool の要求で、許す見出しが異なるため)。
+pub(crate) fn parse_sections(
+    file: &str,
+    text: &str,
+    validate_header: fn(&str) -> Result<(), &'static str>,
+) -> Result<Vec<Section>, ConfigError> {
     let error = |line: usize, reason: &str| ConfigError {
         file: file.into(),
         line,
@@ -308,6 +314,8 @@ fn parse_sections(file: &str, text: &str) -> Result<Vec<Section>, ConfigError> {
     if text.len() > MAX_FILE_BYTES {
         return Err(error(0, "ファイルが大きすぎます"));
     }
+    // Windows の PowerShell 5.1 は UTF-8 の先頭に BOM を付けるため、読み飛ばす。
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut sections: Vec<Section> = Vec::new();
     for (index, raw) in text.lines().enumerate() {
         let number = index + 1;

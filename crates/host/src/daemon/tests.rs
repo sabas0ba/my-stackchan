@@ -494,3 +494,54 @@ fn plugin_that_does_not_read_stdin_is_stopped_without_blocking_the_loop() {
         );
     }
 }
+
+#[test]
+fn spool_requests_reach_the_device_and_are_removed() {
+    let dir = std::env::temp_dir().join(format!("stackchan-daemon-spool-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for request in [
+        crate::spool::Request::Notify {
+            text: "hook".into(),
+            priority: api::Priority::Normal,
+            ttl_s: 5,
+        },
+        crate::spool::Request::Status {
+            activity: protocol::Activity::Waiting,
+            detail: "INPUT".into(),
+            ttl_s: 30,
+        },
+        crate::spool::Request::Input(protocol::InputMode::Forward),
+    ] {
+        crate::spool::write(&dir, &request).unwrap();
+    }
+    let config = crate::config::parse("[plugin idle]\ncommand = [\"fake\"]\n", None).unwrap();
+    let (sender, _plugin_ends) = mpsc::channel();
+    let spawner = PipeSpawner {
+        spawned: Arc::new(AtomicUsize::new(0)),
+        plugin_ends: sender,
+    };
+    let device = FakeDevice::default();
+    let mut daemon =
+        Daemon::new(config, device.clone(), spawner, Instant::now()).with_spool(dir.clone());
+    daemon.step(Duration::ZERO);
+
+    let sent = device.messages();
+    assert!(sent.iter().any(|message| matches!(
+        message,
+        protocol::Message::Text { slot: protocol::Slot::BannerBottom, text, .. } if text == "hook"
+    )));
+    assert!(sent.iter().any(|message| matches!(
+        message,
+        protocol::Message::Presence(presence)
+            if presence.activity == Some(protocol::Activity::Waiting)
+                && presence.expression == protocol::Expression::Sleepy
+                && presence.detail == "INPUT"
+    )));
+    assert!(sent.contains(&protocol::Message::InputMode(protocol::InputMode::Forward)));
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "処理した要求は削除する"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
