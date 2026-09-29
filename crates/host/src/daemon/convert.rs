@@ -17,7 +17,50 @@ pub const LIMITS: api::Limits = api::Limits {
     bar_label_bytes: protocol::MAX_BAR_LABEL_BYTES as u16,
     notify_bytes: protocol::MAX_TEXT_BYTES as u16,
     presence_detail_bytes: protocol::MAX_STATUS_DETAIL_BYTES as u16,
+    image_width: protocol::MAX_IMAGE_REGION_WIDTH,
+    image_height: protocol::MAX_IMAGE_REGION_HEIGHT,
 };
+
+/// 画像の大きさがデバイスの画像領域に収まることを確かめる。
+pub fn image_frame(frame: &api::ImageFrame) -> Result<(), &'static str> {
+    if frame.width > protocol::MAX_IMAGE_REGION_WIDTH
+        || frame.height > protocol::MAX_IMAGE_REGION_HEIGHT
+    {
+        return Err("画像がデバイスの画像領域より大きいです");
+    }
+    Ok(())
+}
+
+/// 画像を画面の中央に置き、デバイスへ送るメッセージの列にする。行は `ImageRows` 1 件に
+/// 収まるだけまとめる。
+pub fn image_messages(
+    id: u16,
+    ttl_s: u16,
+    width: u16,
+    height: u16,
+    pixels: &[u8],
+) -> Vec<protocol::Message> {
+    let begin = protocol::ImageBegin {
+        id,
+        x: (protocol::SCREEN_WIDTH - width) / 2,
+        y: (protocol::SCREEN_HEIGHT - height) / 2,
+        width,
+        height,
+        ttl_s,
+    };
+    let row_bytes = usize::from(width) * 2;
+    let rows_per_message = (protocol::MAX_IMAGE_ROWS_BYTES / row_bytes).max(1);
+    let mut messages = vec![protocol::Message::ImageBegin(begin)];
+    for (index, chunk) in pixels.chunks(row_bytes * rows_per_message).enumerate() {
+        messages.push(protocol::Message::ImageRows(protocol::ImageRows {
+            id,
+            row: (index * rows_per_message) as u16,
+            pixels: heapless::Vec::from_slice(chunk).expect("行の組は上限に収まる"),
+        }));
+    }
+    messages.push(protocol::Message::ImageEnd { id });
+    messages
+}
 
 pub type Rows = heapless::Vec<protocol::Row, { protocol::MAX_CARD_ROWS }>;
 
@@ -204,6 +247,50 @@ mod tests {
         assert!(super::presence(&presence).is_ok());
         presence.detail.push('x');
         assert!(super::presence(&presence).is_err());
+    }
+
+    #[test]
+    fn images_are_centered_and_split_into_frames_that_fit() {
+        let pixels: Vec<u8> = (0..160 * 120 * 2).map(|i| i as u8).collect();
+        let messages = image_messages(3, 5, 160, 120, &pixels);
+        let protocol::Message::ImageBegin(begin) = messages[0] else {
+            panic!("最初は ImageBegin");
+        };
+        assert_eq!(
+            (begin.x, begin.y, begin.width, begin.height),
+            (80, 60, 160, 120)
+        );
+        assert_eq!(begin.validate(), Ok(()));
+        assert_eq!(messages.len(), 1 + 40 + 1, "160 px は 1 件 3 行");
+        let mut reassembled = Vec::new();
+        for (index, message) in messages[1..messages.len() - 1].iter().enumerate() {
+            let protocol::Message::ImageRows(rows) = message else {
+                panic!("中間は ImageRows");
+            };
+            assert_eq!(rows.row, (index * 3) as u16);
+            reassembled.extend_from_slice(&rows.pixels);
+            let mut buffer = [0; protocol::MAX_FRAME_BYTES];
+            assert!(
+                protocol::encode(message, &mut buffer).is_ok(),
+                "フレームに収まる"
+            );
+        }
+        assert_eq!(reassembled, pixels);
+        assert_eq!(
+            messages.last(),
+            Some(&protocol::Message::ImageEnd { id: 3 })
+        );
+        // 端数の行と、1 行が 1 件を超えない幅。
+        assert_eq!(image_messages(0, 0, 7, 5, &[0; 70]).len(), 3);
+        assert!(
+            image_frame(&api::ImageFrame {
+                width: 161,
+                height: 1,
+                ttl_s: 0,
+                pixels: vec![]
+            })
+            .is_err()
+        );
     }
 
     #[test]

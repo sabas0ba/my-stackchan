@@ -63,6 +63,7 @@ fn corpus() -> Vec<Vec<u8>> {
             notify: true,
             presence: true,
             motion: false,
+            image: true,
         },
     });
     let init = HostMessage::Init(Init {
@@ -77,6 +78,8 @@ fn corpus() -> Vec<Vec<u8>> {
             bar_label_bytes: 12,
             notify_bytes: 512,
             presence_detail_bytes: 20,
+            image_width: 160,
+            image_height: 120,
         },
     });
     let mut frames = vec![
@@ -124,6 +127,12 @@ fn corpus() -> Vec<Vec<u8>> {
             text: "x".repeat(1024),
         }),
         wire(&init),
+        wire(&PluginMessage::ImageFrame(plugin_api::ImageFrame {
+            width: 160,
+            height: 120,
+            ttl_s: 10,
+            pixels: vec![0xA5; 160 * 120 * 2],
+        })),
         wire(&HostMessage::Action { card: 1, action: 2 }),
         wire(&HostMessage::Shutdown),
         vec![],

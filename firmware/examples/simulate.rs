@@ -12,8 +12,8 @@ use embedded_graphics::{
 };
 use my_stackchan_firmware::{model::Controller, renderer};
 use protocol::{
-    Activity, Card, Element, Emote, Expression, EyeStyle, Gaze, ImageData, MAX_CARD_TEXT_BYTES,
-    MAX_TEXT_BYTES, Message, Presence, Reply, Row, Slot,
+    Activity, Card, Element, Emote, Expression, EyeStyle, Gaze, ImageBegin, ImageData, ImageRows,
+    MAX_CARD_TEXT_BYTES, MAX_IMAGE_ROWS_BYTES, MAX_TEXT_BYTES, Message, Presence, Reply, Row, Slot,
 };
 
 const WIDTH: usize = 320;
@@ -300,6 +300,45 @@ fn apply(controller: &mut Controller, screen: &mut Screen, message: Message) {
     assert!(matches!(reply, Reply::Ack { .. }));
 }
 
+/// 画像領域の試験模様 (色相の横方向の変化と縦方向の明度) を ImageBegin/Rows/End で送る。
+fn apply_image_region(controller: &mut Controller, screen: &mut Screen, width: u16, height: u16) {
+    apply(
+        controller,
+        screen,
+        Message::ImageBegin(ImageBegin {
+            id: 1,
+            x: (WIDTH as u16 - width) / 2,
+            y: (HEIGHT as u16 - height) / 2,
+            width,
+            height,
+            ttl_s: 0,
+        }),
+    );
+    let mut pixels = Vec::new();
+    for y in 0..u32::from(height) {
+        for x in 0..u32::from(width) {
+            let r = (x * 31 / u32::from(width)) as u16;
+            let g = (y * 63 / u32::from(height)) as u16;
+            let b = 31 - r;
+            pixels.extend_from_slice(&((r << 11) | (g << 5) | b).to_be_bytes());
+        }
+    }
+    let row_bytes = usize::from(width) * 2;
+    let rows_per_message = MAX_IMAGE_ROWS_BYTES / row_bytes;
+    for (index, chunk) in pixels.chunks(row_bytes * rows_per_message).enumerate() {
+        apply(
+            controller,
+            screen,
+            Message::ImageRows(ImageRows {
+                id: 1,
+                row: (index * rows_per_message) as u16,
+                pixels: heapless::Vec::from_slice(chunk).unwrap(),
+            }),
+        );
+    }
+    apply(controller, screen, Message::ImageEnd { id: 1 });
+}
+
 fn generate(options: &Options) -> io::Result<()> {
     fs::create_dir_all(&options.output_dir)?;
     let mut screen = Screen::default();
@@ -432,6 +471,13 @@ fn generate(options: &Options) -> io::Result<()> {
         .tick(800, &mut screen)
         .expect("screen is infallible");
     save_bmp(&options.output_dir.join("26-emote-expired.bmp"), &screen)?;
+    apply_image_region(&mut controller, &mut screen, 160, 120);
+    save_bmp(&options.output_dir.join("27-image-region.bmp"), &screen)?;
+    apply(
+        &mut controller,
+        &mut screen,
+        Message::ClearSlot(Slot::Overlay),
+    );
     for index in 0..my_stackchan_firmware::model::DEMO_FACE_COUNT {
         controller
             .tap(index as u64, &mut screen)
@@ -495,6 +541,7 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="24-eyes-half-lidded.bmp" width="320" height="240" alt="ジト目"><figcaption>24. Half-lidded eyes</figcaption></figure>
 <figure><img src="25-emote.bmp" width="320" height="240" alt="一時的な表情と二軸視線"><figcaption>25. Emote / Point</figcaption></figure>
 <figure><img src="26-emote-expired.bmp" width="320" height="240" alt="期限後の表情"><figcaption>26. Emote expired</figcaption></figure>
+<figure><img src="27-image-region.bmp" width="320" height="240" alt="画像領域 160x120"><figcaption>27. Image region 160x120</figcaption></figure>
 "#
     );
     for index in 1..=my_stackchan_firmware::model::DEMO_FACE_COUNT {

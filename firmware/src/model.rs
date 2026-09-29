@@ -2,8 +2,8 @@
 
 use embedded_graphics::{pixelcolor::Rgb565, prelude::DrawTarget};
 use protocol::{
-    Card, Emote, Event, Expression, EyeStyle, Gaze, InputMode, MAX_TEXT_BYTES, Message, Presence,
-    Reply, Slot,
+    Card, Emote, Event, Expression, EyeStyle, Gaze, ImageBegin, InputMode, MAX_IMAGE_REGION_BYTES,
+    MAX_TEXT_BYTES, Message, Presence, Reply, Slot,
 };
 
 /// タップ位置の照合に使う配置。renderer の描画位置と一致させる。
@@ -34,6 +34,39 @@ pub const DEMO_FACE_COUNT: usize = DEMO_FACES.len();
 pub enum Content {
     Text(heapless::String<MAX_TEXT_BYTES>),
     Card(Card),
+    /// 画像領域。画素は Controller の ImagePixels にあり、表示状態には領域だけを持つ。
+    Image(ImageRegion),
+}
+
+/// 画面上の画像領域。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageRegion {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// 受信中の画像。行は上から順に受け取る。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingImage {
+    begin: ImageBegin,
+    next_row: u16,
+}
+
+/// 画像領域の画素。最大の領域 (160x120) の 1 枚分を static に持ち、動的確保を行わない。
+/// 受信した行は表示中の画像と同じ領域に書くため、受信の途中で再描画が起きると部分的に
+/// 更新された画像が見え得る (低い更新頻度を前提とし、許容する)。
+pub struct ImagePixels {
+    pixels: [u8; MAX_IMAGE_REGION_BYTES],
+}
+
+impl Default for ImagePixels {
+    fn default() -> Self {
+        Self {
+            pixels: [0; MAX_IMAGE_REGION_BYTES],
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,6 +197,8 @@ pub struct Controller {
     demo_index: Option<usize>,
     blink: bool,
     startup: bool,
+    image: ImagePixels,
+    pending_image: Option<PendingImage>,
 }
 
 impl Default for Controller {
@@ -176,6 +211,8 @@ impl Default for Controller {
             demo_index: None,
             blink: false,
             startup: true,
+            image: ImagePixels::default(),
+            pending_image: None,
         }
     }
 }
@@ -193,6 +230,7 @@ fn blink_at(now_ms: u64) -> bool {
 pub enum HandleError<E> {
     InvalidCard,
     InvalidFace,
+    InvalidImage,
     Draw(E),
 }
 
@@ -305,6 +343,48 @@ impl Controller {
             }
             // 実機の I²C bus は main が所有する。誤ってモデルへ渡されても描画しない。
             Message::HardwareProbe => return Err(HandleError::InvalidFace),
+            // 開始と行の受信は描画しない。画素は ImageEnd で表示する。
+            Message::ImageBegin(begin) => {
+                begin.validate().map_err(|_| HandleError::InvalidImage)?;
+                self.pending_image = Some(PendingImage { begin, next_row: 0 });
+                self.seq = self.seq.wrapping_add(1);
+                return Ok(Reply::Ack { seq: self.seq });
+            }
+            Message::ImageRows(rows) => {
+                let pending = self
+                    .pending_image
+                    .as_mut()
+                    .filter(|pending| pending.begin.id == rows.id)
+                    .ok_or(HandleError::InvalidImage)?;
+                let row_bytes = usize::from(pending.begin.width) * 2;
+                let count = rows.pixels.len() / row_bytes;
+                if rows.pixels.is_empty()
+                    || rows.pixels.len() % row_bytes != 0
+                    || rows.row != pending.next_row
+                    || usize::from(rows.row) + count > usize::from(pending.begin.height)
+                {
+                    return Err(HandleError::InvalidImage);
+                }
+                let start = usize::from(rows.row) * row_bytes;
+                self.image.pixels[start..start + rows.pixels.len()].copy_from_slice(&rows.pixels);
+                pending.next_row += count as u16;
+                self.seq = self.seq.wrapping_add(1);
+                return Ok(Reply::Ack { seq: self.seq });
+            }
+            Message::ImageEnd { id } => {
+                let pending = self.pending_image.take().ok_or(HandleError::InvalidImage)?;
+                if pending.begin.id != id || pending.next_row != pending.begin.height {
+                    return Err(HandleError::InvalidImage);
+                }
+                let begin = pending.begin;
+                let region = ImageRegion {
+                    x: begin.x,
+                    y: begin.y,
+                    width: begin.width,
+                    height: begin.height,
+                };
+                next.set(Slot::Overlay, Content::Image(region), begin.ttl_s, now_ms);
+            }
         }
         next.presence()
             .map(|presence| presence.gaze.validate())
@@ -313,7 +393,8 @@ impl Controller {
         // Overlay の背後の期限切れも、再表示の前に除去する。
         next.expire(now_ms);
         let blink = blink_at(now_ms);
-        crate::renderer::draw_state_with_blink(display, &next, blink).map_err(HandleError::Draw)?;
+        crate::renderer::draw_state_with_image(display, &next, &self.image.pixels, blink)
+            .map_err(HandleError::Draw)?;
         self.state = next;
         self.blink = blink;
         self.startup = false;
@@ -348,7 +429,7 @@ impl Controller {
         );
         next.expire(now_ms);
         let blink = blink_at(now_ms);
-        crate::renderer::draw_state_with_blink(display, &next, blink)?;
+        crate::renderer::draw_state_with_image(display, &next, &self.image.pixels, blink)?;
         self.state = next;
         self.blink = blink;
         self.startup = false;
@@ -368,7 +449,7 @@ impl Controller {
             if self.startup {
                 crate::renderer::draw_startup_with_blink(display, blink)?;
             } else {
-                crate::renderer::draw_state_with_blink(display, &next, blink)?;
+                crate::renderer::draw_state_with_image(display, &next, &self.image.pixels, blink)?;
             }
             self.state = next;
             self.blink = blink;
@@ -829,5 +910,106 @@ mod tests {
         assert_eq!(controller.input_mode(), InputMode::Forward);
         assert_eq!(display.pixels, 0);
         assert!(controller.startup, "表示確認画面を維持する");
+    }
+
+    fn image_rows(id: u16, row: u16, rows: usize, width: usize, value: u8) -> Message {
+        Message::ImageRows(protocol::ImageRows {
+            id,
+            row,
+            pixels: heapless::Vec::from_slice(&std::vec![value; rows * width * 2]).unwrap(),
+        })
+    }
+
+    fn begin(id: u16, width: u16, height: u16) -> Message {
+        Message::ImageBegin(ImageBegin {
+            id,
+            x: 10,
+            y: 20,
+            width,
+            height,
+            ttl_s: 5,
+        })
+    }
+
+    #[test]
+    fn image_is_shown_only_after_all_rows_arrive() {
+        let mut controller = Controller::default();
+        let mut frame = std::boxed::Box::new(crate::framebuffer::FrameBuffer::new());
+        assert_eq!(
+            controller.handle(begin(7, 4, 3), 0, &mut *frame),
+            Ok(Reply::Ack { seq: 1 })
+        );
+        // 1 行目は赤 (0xF800)、残り 2 行は青 (0x001F)。
+        let red = Message::ImageRows(protocol::ImageRows {
+            id: 7,
+            row: 0,
+            pixels: heapless::Vec::from_slice(&[0xF8, 0x00].repeat(4)).unwrap(),
+        });
+        let blue = Message::ImageRows(protocol::ImageRows {
+            id: 7,
+            row: 1,
+            pixels: heapless::Vec::from_slice(&[0x00, 0x1F].repeat(8)).unwrap(),
+        });
+        assert_eq!(
+            controller.handle(red, 0, &mut *frame),
+            Ok(Reply::Ack { seq: 2 })
+        );
+        assert_eq!(
+            controller.handle(blue, 0, &mut *frame),
+            Ok(Reply::Ack { seq: 3 })
+        );
+        assert!(
+            controller.state.get(Slot::Overlay).is_none(),
+            "End までは表示しない"
+        );
+        assert_eq!(
+            controller.handle(Message::ImageEnd { id: 7 }, 0, &mut *frame),
+            Ok(Reply::Ack { seq: 4 })
+        );
+        use embedded_graphics::pixelcolor::RgbColor;
+        assert_eq!(
+            frame.pixel(10, 20),
+            embedded_graphics::pixelcolor::Rgb565::RED
+        );
+        assert_eq!(
+            frame.pixel(13, 22),
+            embedded_graphics::pixelcolor::Rgb565::BLUE
+        );
+        assert_eq!(
+            frame.pixel(14, 20),
+            embedded_graphics::pixelcolor::Rgb565::BLACK
+        );
+        assert_eq!(
+            controller.hit(21),
+            Event::Tap {
+                slot: Some(Slot::Overlay),
+                card: None,
+                action: None
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_image_sequences_are_rejected() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        let invalid = |result: Result<Reply, HandleError<()>>| {
+            assert_eq!(result, Err(HandleError::InvalidImage));
+        };
+        invalid(controller.handle(image_rows(1, 0, 1, 4, 0), 0, &mut display));
+        invalid(controller.handle(Message::ImageEnd { id: 1 }, 0, &mut display));
+        invalid(controller.handle(begin(1, 161, 1), 0, &mut display));
+
+        controller.handle(begin(1, 4, 2), 0, &mut display).unwrap();
+        invalid(controller.handle(image_rows(2, 0, 1, 4, 0), 0, &mut display));
+        invalid(controller.handle(image_rows(1, 1, 1, 4, 0), 0, &mut display));
+        invalid(controller.handle(image_rows(1, 0, 3, 4, 0), 0, &mut display));
+        controller
+            .handle(image_rows(1, 0, 1, 4, 0), 0, &mut display)
+            .unwrap();
+        // 行が足りない End は拒否し、受信中の画像を破棄する。
+        invalid(controller.handle(Message::ImageEnd { id: 1 }, 0, &mut display));
+        invalid(controller.handle(image_rows(1, 1, 1, 4, 0), 0, &mut display));
+        assert_eq!(display.pixels, 0, "開始と行の受信は描画しない");
     }
 }

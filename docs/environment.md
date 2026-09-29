@@ -94,6 +94,15 @@ daemon と plugin は Linux 側 (コンテナ) で動かす。Windows ホスト�
    param.utc_offset_minutes = "540"
    ```
 
+   画像の表示を確かめる場合は `plugins/image-demo` を加える。帯の `Image demo` の行をタップすると (`input forward` 時) 試験模様を 1 秒ごとに 10 枚表示する。`param.autoplay = "true"` では起動時にも 1 回表示する
+
+   ```
+   [plugin image-demo]
+   command = ["/workspace/target/release/stackchan-image-demo"]
+   cards = 1
+   image = true
+   ```
+
 3. 起動する。daemon と同梱の plugin を release で build してから起動する。引数は `stackchan daemon` に渡る
 
    ```bash

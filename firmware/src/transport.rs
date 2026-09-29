@@ -53,6 +53,11 @@ impl Receiver {
         Some(message.map_err(|_| self.reject()))
     }
 
+    /// フレームの途中 (区切りの前) まで受け取っているか。
+    pub fn in_frame(&self) -> bool {
+        self.len != 0 || self.discarding
+    }
+
     pub fn reject(&mut self) -> Reply {
         self.rejected = self.rejected.saturating_add(1);
         Reply::Rejected {
@@ -86,6 +91,24 @@ mod tests {
             assert!(receive(&mut receiver, &frame[..frame.len() - 1]).is_empty());
             assert_eq!(receiver.push(0), Some(Ok(Message::Ping { nonce })));
         }
+    }
+
+    #[test]
+    fn in_frame_is_true_only_between_first_byte_and_delimiter() {
+        let mut receiver = Receiver::default();
+        let bytes = frame(&Message::Ping { nonce: 7 });
+        assert!(!receiver.in_frame());
+        receive(&mut receiver, &[0]);
+        assert!(!receiver.in_frame(), "同期用の区切りだけでは途中としない");
+        receive(&mut receiver, &bytes[..1]);
+        assert!(receiver.in_frame());
+        assert_eq!(receive(&mut receiver, &bytes[1..]).len(), 1);
+        assert!(!receiver.in_frame());
+        // 上限を超えて読み捨てている間も途中とする。
+        receive(&mut receiver, &[1; MAX_FRAME_BYTES]);
+        assert!(receiver.in_frame());
+        receive(&mut receiver, &[0]);
+        assert!(!receiver.in_frame());
     }
 
     #[test]

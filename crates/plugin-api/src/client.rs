@@ -201,6 +201,8 @@ mod tests {
                 bar_label_bytes: 12,
                 notify_bytes: 512,
                 presence_detail_bytes: 20,
+                image_width: 160,
+                image_height: 120,
             },
         }
     }
