@@ -20,6 +20,7 @@ const MAX_LINE_BYTES: usize = 4096;
 const MAX_PLUGINS: usize = 16;
 const MAX_ARGV: usize = 64;
 const MAX_ID_BYTES: usize = 32;
+const MAX_DIR_BYTES: usize = 1024;
 const DEFAULT_ROTATE_S: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,9 @@ pub struct PluginConfig {
     pub id: String,
     /// 起動する argv。先頭が実行ファイル。隔離コマンドを前置きしてもよい。
     pub command: Vec<String>,
+    /// plugin の実行ファイルを置いたホスト側のディレクトリ。コンテナ分離時に plugin の
+    /// コンテナへマウントする (起動スクリプトが起動計画から読む)。daemon は使わない。
+    pub dir: Option<String>,
     /// 取得・確認した commit SHA。ログへの記録に用いる。
     pub rev: Option<String>,
     pub allowed: plugin_api::Capabilities,
@@ -69,6 +73,7 @@ impl std::fmt::Debug for PluginConfig {
         f.debug_struct("PluginConfig")
             .field("id", &self.id)
             .field("command", &self.command)
+            .field("dir", &self.dir)
             .field("rev", &self.rev)
             .field("allowed", &self.allowed)
             .field("params", &names(&self.params))
@@ -102,6 +107,9 @@ pub fn summary(dir: &Path, config: &Config) -> String {
         let names = |pairs: &[(String, String)]| -> Vec<String> {
             pairs.iter().map(|(name, _)| name.clone()).collect()
         };
+        if let Some(dir) = &plugin.dir {
+            lines.push(format!("  dir: {dir}"));
+        }
         lines.push(format!("  params: {:?}", names(&plugin.params)));
         lines.push(format!("  env: {:?}", names(&plugin.env)));
     }
@@ -279,6 +287,7 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
     let mut plugin = PluginConfig {
         id: id.into(),
         command: Vec::new(),
+        dir: None,
         rev: None,
         allowed: plugin_api::Capabilities::default(),
         params: Vec::new(),
@@ -290,6 +299,14 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
                 if !argv.is_empty() && argv.len() <= MAX_ARGV && !argv[0].is_empty() =>
             {
                 plugin.command = argv;
+            }
+            // 起動計画の 1 行に載せるため、行を分ける文字と区切りのタブを許さない。
+            ("dir", Value::String(dir))
+                if !dir.is_empty()
+                    && dir.len() <= MAX_DIR_BYTES
+                    && !dir.chars().any(char::is_control) =>
+            {
+                plugin.dir = Some(dir);
             }
             ("rev", Value::String(rev))
                 if rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()) =>
@@ -309,7 +326,10 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
             (key, Value::String(value)) if key.starts_with("param.") => {
                 push_param(&mut plugin, key, value).map_err(|reason| error(line, reason.into()))?;
             }
-            ("command" | "rev" | "cards" | "notify" | "presence" | "motion" | "image", _) => {
+            (
+                "command" | "dir" | "rev" | "cards" | "notify" | "presence" | "motion" | "image",
+                _,
+            ) => {
                 return Err(error(line, format!("{key} の値が不正です")));
             }
             _ => return Err(error(line, format!("未知の key です: {key}"))),
@@ -580,6 +600,25 @@ motion = false
         assert_eq!(usage.command.len(), 5);
         assert!(usage.allowed.notify && usage.allowed.presence && !usage.allowed.motion);
         assert_eq!(usage.params, [("token".into(), "s\"ecret".into())]);
+    }
+
+    #[test]
+    fn plugin_dir_is_optional_and_rejects_control_characters() {
+        let base = "[plugin p]\ncommand = [\"/plugin/x\"]\n";
+        assert_eq!(parse(base, None).unwrap().plugins[0].dir, None);
+        let config = parse(&format!("{base}dir = \"C:/Users/a b/release\"\n"), None).unwrap();
+        assert_eq!(
+            config.plugins[0].dir.as_deref(),
+            Some("C:/Users/a b/release")
+        );
+        for bad in [
+            "dir = \"\"".to_owned(),
+            "dir = \"a\tb\"".to_owned(),
+            format!("dir = \"{}\"", "x".repeat(MAX_DIR_BYTES + 1)),
+            "dir = 1".to_owned(),
+        ] {
+            assert!(parse(&format!("{base}{bad}\n"), None).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -96,31 +96,28 @@ daemon が強制する範囲:
 
 ### コンテナでの運用時の配置 (`scripts/container.sh daemon`)
 
-plugin は daemon と同じ uid で動くため、書き換えられて困るものは読取り専用で渡す。
+コンテナでの運用時は、plugin ごとにコンテナを分ける。plugin のコンテナには設定ディレクトリ、ログ、spool、リポジトリを渡さない。構成は [plugin ごとのコンテナ分離](#plugin-ごとのコンテナ分離) に記す。
+
+daemon のコンテナのマウントは次のとおりである。
 
 | マウント | 権限 | 理由 |
 | --- | --- | --- |
-| `/workspace` (リポジトリ) | 読取り専用。git のディレクトリは渡さない | `.git/hooks` 等の書換えによる、ホスト側での git 実行時のコード実行を防ぐ |
-| `/config` (設定ディレクトリ) | 読取り専用 | plugin が `stackchan.conf` や `plugins/` の実行ファイルを書き換え、次の起動で権限を広げることを防ぐ |
+| `/workspace` (リポジトリ) | 読取り専用。git のディレクトリは渡さない | ピッチ補正の既定の保存先を読むため。書込みは不要である |
+| `/config` (設定ディレクトリ) | 読取り専用 | daemon は設定を書き換えない |
 | `/config/logs`、`/config/spool` | 書込み可能 | daemon がログを書き、spool の要求を削除するため |
+| `/run/stackchan/<plugin id>` (plugin ごとの volume) | 書込み可能 | plugin との接続に用いる socket を置くため |
 
-build は書込み可能なマウントで先に行い、daemon は開発シェルを通さず build 済みのバイナリを直接起動する。
+build は書込み可能なマウントで先に行い、各コンテナは開発シェルを通さず build 済みのバイナリを直接起動する。
 
-### 残存するリスク
+### 子プロセス方式で残るリスク
 
-同じ uid・同じコンテナで動く以上、次は防げない。防ぐには、以前に採らなかった完全な隔離 (plugin ごとの別 uid または別コンテナ) か sandbox が必要である。
+`--socket-dir` を指定しない場合 (Windows ネイティブ、開発時の確認)、plugin は daemon と同じ利用者権限の子プロセスとして動き、次は防げない。2026-10-05 より前はコンテナでの運用もこの方式であり、アクセスコードを扱う 3D プリンタの plugin の導入にあたってコンテナ分離へ改めた。
 
-- plugin は `/config/secrets.conf` を読める。自分宛て以外の plugin の secret も読める
-- plugin は `/config/logs` と `/config/spool` に書ける (ログの偽装、通知の注入)
+- plugin は設定ディレクトリの `secrets.conf` を読める。自分宛て以外の plugin の secret も読める
+- plugin はログと spool に書ける (ログの偽装、通知の注入)
 - plugin は daemon のプロセスの情報を読める場合がある (カーネルの ptrace の制限の設定に依存する)
 
-このため、secret を扱う plugin を導入する時点で隔離の方式を改めて検討する。それまでは、導入前にソースを確認し commit SHA で固定した plugin だけを使う。
-
-2026-10-05 に、アクセスコードを扱う 3D プリンタの plugin の導入にあたって再検討し、plugin ごとにコンテナを分ける方式を採ることにした。上記のリスクへの対応を含め、[plugin ごとのコンテナ分離](#plugin-ごとのコンテナ分離-設計案) に記す。実装までは本節の記述が現状である。
-
-### 任意の隔離
-
-Linux では、利用者設定で plugin ごとに起動コマンドの前置き (例: `podman run --rm -i --read-only --cap-drop=all --network=none ...`) を指定できるようにする。daemon は stdio を用いるだけなので、前置きの内容には関知しない。隔離の構成は利用者の選択とし、本リポジトリでは例を示すにとどめる。
+子プロセス方式では、`command` に隔離コマンドを前置きできる (例: `podman run --rm -i --read-only --cap-drop=all --network=none ...`)。daemon は stdio を用いるだけなので、前置きの内容には関知しない。
 
 ### secret
 
@@ -310,18 +307,18 @@ daemon はタップを次のように振り分ける。
 
 画像用の領域はフレームバッファとは別に持つ。表示状態 (Slot の内容) は描画のたびに複製されるため、画素を表示状態に含めると 38 KB の複製が描画ごとに生じるためである。
 
-## plugin ごとのコンテナ分離 (設計案)
+## plugin ごとのコンテナ分離
 
-本節は未実装の設計案である (段階 P5、P6)。実装後に、該当する各節 (信頼境界と権限、利用者設定、plugin プロトコル) へ統合する。
+コンテナの分離と socket での接続 (段階 P5) は実装済みである。接続先の許可 (段階 P6: `net.allow`、中継、`Init` の `endpoints`) は未実装の設計案である。
 
 ### 目的
 
-| 対象 | 現状 | 分離後 |
+| 対象 | 子プロセス方式 | コンテナ分離 |
 | --- | --- | --- |
-| secret | 全 plugin が `/config/secrets.conf` を読める | plugin のコンテナに設定ディレクトリを渡さない。secret は `Init` で自分宛てのものだけを受け取る |
+| secret | 全 plugin が `secrets.conf` を読める | plugin のコンテナに設定ディレクトリを渡さない。secret は `Init` で自分宛てのものだけを受け取る |
 | ログと spool | 全 plugin が書ける | plugin のコンテナに渡さない |
-| 他のプロセス | 同じコンテナの daemon と他の plugin が見える | plugin ごとに PID 名前空間が分かれる |
-| ネットワーク | コンテナ単位の許可が全 plugin に及ぶ | plugin のコンテナはネットワークを持たない。利用者設定に列挙した接続先だけに、中継を介して接続できる |
+| 他のプロセス | daemon と他の plugin が見える | plugin ごとに PID 名前空間が分かれる |
+| ネットワーク | daemon と同じ範囲に接続できる | plugin のコンテナはネットワークを持たない。利用者設定に列挙した接続先だけに、中継を介して接続できる (P6) |
 
 ### 構成
 
@@ -349,10 +346,10 @@ daemon はタップを次のように振り分ける。
 daemon の待受けと、plugin 側の起動補助 (`stackchan plugin-run`) を追加する。plugin 自体は従来どおり stdin / stdout でフレームを交換するプログラムであり、変更を要しない。Rust 以外で書いた plugin も同じ方法で動く。
 
 1. daemon は `--socket-dir <path>` を指定された場合、plugin を子プロセスとして起動せず、`<path>/<plugin id>/plugin.sock` で待ち受ける
-2. `plugin-run` は socket へ接続する。接続できない場合は間隔を空けて再試行する
-3. daemon は接続を受けると、起動情報 (利用者設定の `command` と `env.*`) を 1 フレームで送る。`plugin-run` に設定ディレクトリを渡さずに argv を伝えるためである。この型は `plugin-api` ではなく host の crate に置く。plugin の作者が扱うものではないためである
+2. `plugin-run` は socket へ接続する。接続できない場合は 1 秒後に再試行する
+3. daemon は接続を受けると、起動情報 (利用者設定の `command` と `env.*`) を 1 フレームで送る。`plugin-run` に設定ディレクトリを渡さずに argv を伝えるためである。この型は `plugin-api` ではなく host の crate に置く (`crates/host/src/launch.rs`)。plugin の作者が扱うものではないためである
 4. `plugin-run` は socket を子プロセスの stdin と stdout として渡し、plugin を起動する。以降のフレームは `plugin-run` を経由しない
-5. plugin が終了すると、`plugin-run` は待ち時間を空けて 2 から繰り返す
+5. plugin が終了すると、`plugin-run` は 1 秒後に 2 から繰り返す。daemon が接続を受け付けない間 (再起動までの待ち時間、無効化) は、起動情報を受け取る前に接続が閉じられ、plugin は起動されない
 
 監視と停止は次のとおりとする。
 
@@ -361,9 +358,9 @@ daemon の待受けと、plugin 側の起動補助 (`stackchan plugin-run`) を�
 - 同じ plugin の接続は 1 本だけを保持し、2 本目以降は閉じる
 - plugin の標準エラーは daemon に届かず、コンテナエンジンのログに残る (`podman logs stackchan-plugin-<id>`)。`Log` メッセージは従来どおり daemon のログに出る
 
-`--socket-dir` を指定しない場合は、従来の子プロセス方式で動く。Windows ネイティブでの動作と、開発時の確認のために残す。この方式では分離も接続先の制限も働かないため、`net.allow` を持つ plugin があれば daemon は起動時に警告を出す。
+`--socket-dir` を指定しない場合は、従来の子プロセス方式で動く。Windows ネイティブでの動作と、開発時の確認のために残す。この方式では分離も接続先の制限も働かないため、`net.allow` を持つ plugin があれば daemon は起動時に警告を出す (P6)。
 
-### 接続先の許可
+### 接続先の許可 (P6、設計案)
 
 plugin のコンテナは常に `--network none` とし、許可は宛先を列挙する方式で与える。
 
@@ -392,7 +389,7 @@ param.host = "192.168.1.50:8883"
 | key | 内容 |
 | --- | --- |
 | `dir` | plugin の実行ファイルを置いたホスト側のディレクトリ。plugin のコンテナの `/plugin` に読取り専用でマウントする。省略時は本リポジトリの `target/release` (同梱の plugin) |
-| `net.allow` | 接続を許可する宛先 (`"<IP アドレス>:<port>"`) の並び。最大 4 件。省略時は接続先を持たない |
+| `net.allow` | 接続を許可する宛先 (`"<IP アドレス>:<port>"`) の並び。最大 4 件。省略時は接続先を持たない (P6) |
 
 `command` はコンテナ分離時には plugin のコンテナ内の path を書く。子プロセス方式とは path が異なるため、同じ設定ファイルを両方式で共用することはできない。
 
@@ -405,30 +402,32 @@ plugin<TAB><id><TAB><dir>
 relay<TAB><id><TAB><番号><TAB><IP アドレス>:<port>
 ```
 
-`id` と宛先は使用できる文字が限られる。`dir` は行の最後の項目とし、タブと改行を含むものは設定の検証で拒否する。argv、env、param は出力しない。
+`id` と宛先は使用できる文字が限られる。`dir` は行の最後の項目とし、制御文字 (タブと改行を含む) を含むものは設定の検証で拒否する。省略時は空とし、スクリプトが本リポジトリの `target/release` を用いる。argv、env、param は出力しない。`relay` の行は P6 で追加する。
 
 ### コンテナの起動条件
 
 | コンテナ | 条件 |
 | --- | --- |
 | daemon | `--network none`。`/workspace` と `/config` は読取り専用、`logs` と `spool` は書込み可能。全 plugin の volume、USB デバイス |
-| plugin | `--network none`、`--read-only`、`--cap-drop=all`、`--security-opt no-new-privileges`、メモリとプロセス数の上限。マウントは `/plugin` (読取り専用)、自身の volume、`stackchan` の実行ファイル (読取り専用) だけ |
-| 中継 | ネットワークあり、`--read-only`、`--cap-drop=all`。マウントは `net.allow` を持つ plugin の volume と `stackchan` の実行ファイルだけ |
+| plugin | `--network none`、`--read-only`、`--cap-drop=all`、`--security-opt no-new-privileges`、メモリ 256 MiB とプロセス数 64 の上限。マウントは `/plugin` (読取り専用)、自身の volume、`stackchan` の実行ファイル (読取り専用) だけ |
+| 中継 (P6) | ネットワークあり、`--read-only`、`--cap-drop=all`。マウントは `net.allow` を持つ plugin の volume と `stackchan` の実行ファイルだけ |
 
 `scripts/container.sh daemon` は、構築、起動計画の取得、volume の作成、中継と plugin のコンテナの起動を行ってから、daemon を前面で起動する。daemon の終了時には、起動したコンテナと volume を取り除く。
+
+2026-10-05 に Windows 上の Podman machine (WSL) で、named volume 上の socket による接続、plugin のコンテナから設定ディレクトリ・ネットワーク・他の plugin の socket に到達できないこと、plugin の終了後の再接続、daemon の終了時の後始末を確認した。確認の手順は [environment.md](environment.md#daemon-と-plugin) に置く。
 
 ### 分離後に残るリスク
 
 - コンテナはカーネルを共有する。カーネルやコンテナエンジンの欠陥による脱出は防げない
 - `net.allow` を持つ plugin は、許可された宛先に対しては任意の内容を送れる。宛先の機器に対する操作を制限するものではない
-- 全コンテナが開発用のイメージを共用するため、plugin のコンテナにも compiler 等が含まれる。ネットワークが無く、ファイルシステムが読取り専用であることで影響を抑える
+- 全コンテナが開発用のイメージを共用するため、plugin のコンテナにも compiler 等と、イメージの構築時に複製されたリポジトリの内容 (`/workspace`) が含まれる。ネットワークが無く、ファイルシステムが読取り専用であることで影響を抑える
 - 第三者製の plugin の導入前のソース確認と commit SHA による固定は、引き続き必要である
 
 ## 検証
 
 | 対象 | 方法 |
 | --- | --- |
-| コンテナ分離 (設計案) | socket での待受けと `plugin-run` は、一時ディレクトリの socket を用いた結合テストで確認する (待ち時間内の接続の拒否、2 本目の接続の拒否、起動情報の受渡し)。中継は loopback の宛先で、転送、宛先の固定、同時接続数の上限を確認する。起動計画は出力の形式と、不正な `dir` / `net.allow` の拒否を確認する。コンテナの起動条件は `make check` では実行できないため、手動の確認手順を environment.md に置く (plugin のコンテナから設定ディレクトリと外部への通信に到達できないこと) |
+| コンテナ分離 | socket での待受けと `plugin-run` は、一時ディレクトリの socket を用いた結合テストで確認する (待ち時間内の接続の拒否、2 本目の接続の拒否、起動情報の受渡し)。起動計画は出力の形式と、不正な `dir` の拒否を確認する。コンテナの起動条件は `make check` では実行できないため、手動の確認手順を environment.md に置く (plugin のコンテナから設定ディレクトリと外部への通信に到達できないこと)。P6 では、中継を loopback の宛先で確認する (転送、宛先の固定、同時接続数の上限) |
 | plugin プロトコル | 型の往復、上限ちょうど・超過、不正フレーム、`Hello` 前のメッセージの拒否。`decoder_stress` と同様の固定 seed の変異入力 |
 | 利用者設定のパーサ | 正常系、構文エラー、未知・重複 key、過長行、任意バイト列。固定 seed の変異入力を含める |
 | daemon | mock plugin を用いた結合テスト。異常終了からの再起動、流量超過での停止、許可外 capability の拒否、spool の書きかけファイルの無視 |

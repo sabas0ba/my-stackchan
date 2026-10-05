@@ -16,6 +16,7 @@ use plugin_api::{
 
 use super::convert;
 use crate::config::PluginConfig;
+use crate::launch;
 use crate::log;
 
 /// Hello を待つ時間。
@@ -55,48 +56,25 @@ pub struct Spawned {
 
 /// plugin の起動方法。試験ではプロセスの代わりに pipe を返す。
 pub trait Spawner {
-    fn spawn(&mut self, config: &PluginConfig) -> io::Result<Spawned>;
-}
+    /// plugin を起動する。plugin からの接続を待つ方式で、接続がまだ無い場合は `Ok(None)` を
+    /// 返す (失敗には数えない)。
+    fn spawn(&mut self, config: &PluginConfig) -> io::Result<Option<Spawned>>;
 
-/// plugin に引き継ぐ daemon の環境変数。daemon の環境 (利用者のシェルにあるトークン等) を
-/// そのまま渡さないため、実行に必要なものだけに限る。Windows の変数名は大文字小文字を区別しない。
-const INHERITED_ENV: [&str; 10] = [
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "LANG",
-    "LC_ALL",
-    "TZ",
-    "TMPDIR",
-    "TEMP",
-    "TMP",
-    "SYSTEMROOT",
-];
-
-/// plugin の環境変数。許可した daemon の変数と、利用者設定の `env.*` だけからなる。
-fn plugin_env(
-    config: &PluginConfig,
-    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> Vec<(String, std::ffi::OsString)> {
-    let mut env: Vec<(String, std::ffi::OsString)> = INHERITED_ENV
-        .iter()
-        .filter_map(|name| lookup(name).map(|value| ((*name).to_owned(), value)))
-        .collect();
-    for (name, value) in &config.env {
-        env.retain(|(existing, _)| existing != name);
-        env.push((name.clone(), value.into()));
-    }
-    env
+    /// 起動の時刻に達していない plugin と、動作中または無効化した plugin について呼ばれる。
+    /// 接続を待つ方式では、この間に届いた接続を閉じる。
+    fn refuse(&mut self, _config: &PluginConfig) {}
 }
 
 pub struct OsSpawner;
 
 impl Spawner for OsSpawner {
-    fn spawn(&mut self, config: &PluginConfig) -> io::Result<Spawned> {
+    fn spawn(&mut self, config: &PluginConfig) -> io::Result<Option<Spawned>> {
         let mut child = Command::new(&config.command[0])
             .args(&config.command[1..])
             .env_clear()
-            .envs(plugin_env(config, |name| std::env::var_os(name)))
+            .envs(launch::child_env(&config.env, |name| {
+                std::env::var_os(name)
+            }))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -105,12 +83,12 @@ impl Spawner for OsSpawner {
         let stdin = child.stdin.take().ok_or_else(missing)?;
         let stdout = child.stdout.take().ok_or_else(missing)?;
         let stderr = child.stderr.take().ok_or_else(missing)?;
-        Ok(Spawned {
+        Ok(Some(Spawned {
             stdin: Box::new(stdin),
             stdout: Box::new(stdout),
             stderr: Some(Box::new(stderr)),
             process: Box::new(child),
-        })
+        }))
     }
 }
 
@@ -209,14 +187,14 @@ impl PluginRuntime {
         spawner: &mut impl Spawner,
         events: &Sender<Event>,
     ) {
-        let State::Idle { retry_at } = self.state else {
-            return;
-        };
-        if now < retry_at {
+        let due = matches!(self.state, State::Idle { retry_at } if now >= retry_at);
+        if !due {
+            spawner.refuse(&self.config);
             return;
         }
         let spawned = match spawner.spawn(&self.config) {
-            Ok(spawned) => spawned,
+            Ok(Some(spawned)) => spawned,
+            Ok(None) => return,
             Err(error) => {
                 log::error!(
                     "daemon",
@@ -523,33 +501,5 @@ fn forward_stderr(id: &str, stderr: Box<dyn Read + Send>) {
             "{}",
             String::from_utf8_lossy(&line).trim_end().escape_debug()
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plugins_receive_only_allowed_and_configured_environment() {
-        let config = crate::config::parse(
-            "[plugin p]\ncommand = [\"x\"]\nenv.HTTP_PROXY = \"http://proxy:8080\"\nenv.PATH = \"/opt/bin\"\n",
-            None,
-        )
-        .unwrap();
-        let daemon_env = |name: &str| match name {
-            "PATH" => Some("/usr/bin".into()),
-            "HOME" => Some("/root".into()),
-            "GH_TOKEN" | "ANTHROPIC_API_KEY" => Some("secret".into()),
-            _ => None,
-        };
-        let env = plugin_env(&config.plugins[0], daemon_env);
-        let names: Vec<&str> = env.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["HOME", "HTTP_PROXY", "PATH"]);
-        assert!(
-            env.contains(&("PATH".into(), "/opt/bin".into())),
-            "設定が優先する"
-        );
-        assert!(env.iter().all(|(_, value)| value != "secret"));
     }
 }

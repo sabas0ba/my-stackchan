@@ -12,7 +12,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 mod bmp;
 mod config;
 mod daemon;
+mod launch;
 mod log;
+#[cfg(unix)]
+mod plugin_run;
 mod spool;
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
@@ -36,9 +39,23 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// 利用者設定を検証し、要約を表示する。secret の値は表示しない。
-    Config,
+    Config {
+        /// 要約の代わりに、起動スクリプトが読む起動計画 (タブ区切り) を出力する。
+        #[arg(long)]
+        launch_plan: bool,
+    },
+    /// plugin のコンテナで daemon の socket へ接続し、plugin を起動する (コンテナ分離)。
+    PluginRun {
+        /// daemon が待ち受ける Unix socket。
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// port を占有し、設定した plugin を起動して表示を調停する。
     Daemon {
+        /// plugin を起動せず、このディレクトリの plugin ごとの Unix socket で接続を待つ
+        /// (コンテナ分離)。
+        #[arg(long)]
+        socket_dir: Option<PathBuf>,
         /// ログに出す最も低い重要度。
         #[arg(long, value_enum, default_value = "info")]
         log_level: HostLogLevel,
@@ -353,7 +370,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let trim_file = pitch_trim_file(cli.pitch_trim_file);
     match cli.command {
-        Command::Config => show_config(cli.config_dir),
+        Command::Config { launch_plan } => show_config(cli.config_dir, launch_plan),
+        #[cfg(unix)]
+        Command::PluginRun { socket } => plugin_run::run(&socket),
+        #[cfg(not(unix))]
+        Command::PluginRun { .. } => {
+            Err("plugin-run は Unix socket を使うため、この OS では使えません".into())
+        }
         Command::Input {
             via_daemon: true,
             mode,
@@ -377,6 +400,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         ),
         Command::Daemon {
+            socket_dir,
             log_level,
             trace,
             no_log_file,
@@ -398,7 +422,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log_dir.join(log::FILE_NAME).display()
                 );
             }
-            daemon::run(config::load(&dir)?, trim_file, dir.join(spool::DIR_NAME))
+            daemon::run(
+                config::load(&dir)?,
+                trim_file,
+                dir.join(spool::DIR_NAME),
+                socket_dir,
+            )
         }
         Command::Hardware { port } => hardware(port),
         Command::PitchTrim {
@@ -533,11 +562,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn show_config(explicit: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn show_config(
+    explicit: Option<PathBuf>,
+    launch_plan: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let dir = config::resolve_dir(explicit)?;
     let config = config::load(&dir)?;
-    // param と env の値には secret が含まれ得るため、要約は名前だけを出す。
-    println!("{}", config::summary(&dir, &config));
+    if launch_plan {
+        print!("{}", launch::plan(&config));
+    } else {
+        // param と env の値には secret が含まれ得るため、要約は名前だけを出す。
+        println!("{}", config::summary(&dir, &config));
+    }
     Ok(())
 }
 

@@ -8,6 +8,8 @@ mod convert;
 mod device;
 mod plugin;
 mod scheduler;
+#[cfg(unix)]
+mod socket;
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -32,10 +34,13 @@ const DEVICE_TTL_MARGIN_S: u16 = 5;
 /// 画像は scheduler が最新の 1 枚だけを保持し、間隔の経過後に送る。
 const MIN_IMAGE_INTERVAL: Duration = Duration::from_millis(500);
 
+/// `socket_dir` を指定した場合、plugin を起動せず、plugin ごとの Unix socket で接続を待つ
+/// (plugin ごとのコンテナ分離)。指定しない場合は plugin を子プロセスとして起動する。
 pub fn run(
     config: Config,
     trim_file: PitchTrimFile,
     spool_dir: PathBuf,
+    socket_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if config.plugins.is_empty() {
         return Err("設定に plugin がありません".into());
@@ -46,8 +51,25 @@ pub fn run(
         "spool を {} から取り込みます",
         spool_dir.display()
     );
-    let mut daemon =
-        Daemon::new(config, device, plugin::OsSpawner, Instant::now()).with_spool(spool_dir);
+    match socket_dir {
+        None => serve(config, device, plugin::OsSpawner, spool_dir),
+        #[cfg(unix)]
+        Some(dir) => {
+            let spawner = socket::SocketSpawner::new(&dir, &config)?;
+            log::info!(
+                "daemon",
+                "plugin の接続を {} の socket で待ちます",
+                dir.display()
+            );
+            serve(config, device, spawner, spool_dir)
+        }
+        #[cfg(not(unix))]
+        Some(_) => Err("--socket-dir は Unix socket を使うため、この OS では使えません".into()),
+    }
+}
+
+fn serve<D: Device, S: Spawner>(config: Config, device: D, spawner: S, spool_dir: PathBuf) -> ! {
+    let mut daemon = Daemon::new(config, device, spawner, Instant::now()).with_spool(spool_dir);
     loop {
         daemon.step(TICK);
     }
