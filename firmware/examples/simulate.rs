@@ -10,7 +10,7 @@ use embedded_graphics::{
     pixelcolor::{Rgb565, RgbColor},
     prelude::{DrawTarget, OriginDimensions, Pixel, Point, Size},
 };
-use my_stackchan_firmware::{model::Controller, renderer};
+use my_stackchan_firmware::{client, model::Controller, renderer, touch::Gesture};
 use protocol::{
     Activity, Card, Element, Emote, Expression, EyeStyle, Gaze, ImageBegin, ImageData, ImageRows,
     MAX_CARD_TEXT_BYTES, MAX_IMAGE_ROWS_BYTES, MAX_TEXT_BYTES, Message, Presence, Reply, Row, Slot,
@@ -489,11 +489,64 @@ fn generate(options: &Options) -> io::Result<()> {
             &screen,
         )?;
     }
+    generate_timer(options)?;
 
     fs::write(
         options.output_dir.join("index.html"),
         gallery_html(options.ttl_s),
     )?;
+    Ok(())
+}
+
+fn gesture(controller: &mut Controller, screen: &mut Screen, gesture: Gesture, now_ms: u64) {
+    controller
+        .gesture(gesture, now_ms, screen)
+        .expect("screen is infallible");
+}
+
+/// Client 側のタイマーの各状態。host の帯と同時に表示し、配分を確かめる。
+fn generate_timer(options: &Options) -> io::Result<()> {
+    let mut screen = Screen::default();
+    let mut controller = Controller::default();
+    let press = |index: usize| {
+        let center = client::button_frame(index).center();
+        Gesture::Tap {
+            x: center.x as u16,
+            y: center.y as u16,
+        }
+    };
+    for (slot, content) in [
+        (Slot::BannerTop, "host: top banner"),
+        (Slot::BannerBottom, "host: bottom banner"),
+    ] {
+        controller
+            .handle(text(slot, content, 0), 0, &mut screen)
+            .expect("screen is infallible");
+    }
+    // 長押しで開き、3 時間 24 分を設定する (+1h を 3 回、+10m を 2 回、+1m を 4 回)。
+    gesture(&mut controller, &mut screen, Gesture::LongPress, 0);
+    for button in [0, 0, 0, 1, 1, 2, 2, 2, 2] {
+        gesture(&mut controller, &mut screen, press(button), 0);
+    }
+    save_bmp(&options.output_dir.join("28-timer-setting.bmp"), &screen)?;
+    gesture(&mut controller, &mut screen, press(4), 0);
+    let elapsed_ms = 68 * 60_000;
+    controller
+        .tick(elapsed_ms, &mut screen)
+        .expect("screen is infallible");
+    save_bmp(&options.output_dir.join("29-timer-running.bmp"), &screen)?;
+    gesture(
+        &mut controller,
+        &mut screen,
+        Gesture::Tap { x: 160, y: 20 },
+        elapsed_ms,
+    );
+    save_bmp(&options.output_dir.join("30-timer-adjust.bmp"), &screen)?;
+    gesture(&mut controller, &mut screen, press(3), elapsed_ms);
+    controller
+        .tick(204 * 60_000, &mut screen)
+        .expect("screen is infallible");
+    save_bmp(&options.output_dir.join("31-timer-done.bmp"), &screen)?;
     Ok(())
 }
 
@@ -542,6 +595,10 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="25-emote.bmp" width="320" height="240" alt="一時的な表情と二軸視線"><figcaption>25. Emote / Point</figcaption></figure>
 <figure><img src="26-emote-expired.bmp" width="320" height="240" alt="期限後の表情"><figcaption>26. Emote expired</figcaption></figure>
 <figure><img src="27-image-region.bmp" width="320" height="240" alt="画像領域 160x120"><figcaption>27. Image region 160x120</figcaption></figure>
+<figure><img src="28-timer-setting.bmp" width="320" height="240" alt="タイマーの設定の Panel"><figcaption>28. Timer: setting panel</figcaption></figure>
+<figure><img src="29-timer-running.bmp" width="320" height="240" alt="動作中のタイマーの Card と host の下の帯"><figcaption>29. Timer: running (top banner)</figcaption></figure>
+<figure><img src="30-timer-adjust.bmp" width="320" height="240" alt="タイマーの補正の Panel"><figcaption>30. Timer: adjust panel</figcaption></figure>
+<figure><img src="31-timer-done.bmp" width="320" height="240" alt="タイマーの完了の Panel"><figcaption>31. Timer: done</figcaption></figure>
 "#
     );
     for index in 1..=my_stackchan_firmware::model::DEMO_FACE_COUNT {

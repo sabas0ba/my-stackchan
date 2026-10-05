@@ -346,6 +346,19 @@ scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
   -- --ignored --exact tests::hardware_inline_image_and_invalid_length
 ```
 
+### タイマー (Client 側の plugin) の実機確認
+
+タイマーは firmware に組み込まれており、host を接続せずに確認できる。仕様は [plugin.md](plugin.md#タイマー) を参照する。表示は [表示シミュレーション](#表示シミュレーション) の `28-timer-setting.bmp` 〜 `31-timer-done.bmp` と比べる。
+
+1. firmware を書き込み、USB から給電する (host の CLI や daemon は動かさない)
+2. 画面を 0.6 秒以上押し続ける。設定の Panel が開く。短いタップでは従来どおり表情デモが進む
+3. `+1m` を押して `START` を押す。上の帯に Bar と残り時間が出て、1 秒ごとに減る。更新のたびに画面全体がちらつかないことを確かめる
+4. 上の帯をタップする。補正の Panel が開く。`+10m`、`-10m`、`CLOSE`、`STOP` の動作を確かめる
+5. 1 分のタイマーを完了させる。完了の Panel が出て、首が上を向き発光する。`OK` で閉じる
+6. daemon を起動した状態で 2 から繰り返す。タイマーの Card が上の帯に出ている間、host の Card は下の帯に出続け、タイマーの停止後に上の帯へ戻る
+
+確かめる点は、長押しの判定時間 (0.6 秒) とボタンの大きさが操作に適しているか、である ([plugin.md](plugin.md#未決事項) の未決事項)。
+
 ### 表情・視線と PC 状態の実機確認
 
 版 7 の firmware を書き込んでから、次の例で表情・視線と活動状態を送る。

@@ -7,6 +7,7 @@ extern crate std;
 
 pub mod actuators;
 pub mod behavior;
+pub mod client;
 pub mod framebuffer;
 pub mod model;
 pub mod power;
