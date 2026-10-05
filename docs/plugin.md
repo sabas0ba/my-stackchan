@@ -116,6 +116,8 @@ build は書込み可能なマウントで先に行い、daemon は開発シェ�
 
 このため、secret を扱う plugin を導入する時点で隔離の方式を改めて検討する。それまでは、導入前にソースを確認し commit SHA で固定した plugin だけを使う。
 
+2026-10-05 に、アクセスコードを扱う 3D プリンタの plugin の導入にあたって再検討し、plugin ごとにコンテナを分ける方式を採ることにした。上記のリスクへの対応を含め、[plugin ごとのコンテナ分離](#plugin-ごとのコンテナ分離-設計案) に記す。実装までは本節の記述が現状である。
+
 ### 任意の隔離
 
 Linux では、利用者設定で plugin ごとに起動コマンドの前置き (例: `podman run --rm -i --read-only --cap-drop=all --network=none ...`) を指定できるようにする。daemon は stdio を用いるだけなので、前置きの内容には関知しない。隔離の構成は利用者の選択とし、本リポジトリでは例を示すにとどめる。
@@ -308,10 +310,125 @@ daemon はタップを次のように振り分ける。
 
 画像用の領域はフレームバッファとは別に持つ。表示状態 (Slot の内容) は描画のたびに複製されるため、画素を表示状態に含めると 38 KB の複製が描画ごとに生じるためである。
 
+## plugin ごとのコンテナ分離 (設計案)
+
+本節は未実装の設計案である (段階 P5、P6)。実装後に、該当する各節 (信頼境界と権限、利用者設定、plugin プロトコル) へ統合する。
+
+### 目的
+
+| 対象 | 現状 | 分離後 |
+| --- | --- | --- |
+| secret | 全 plugin が `/config/secrets.conf` を読める | plugin のコンテナに設定ディレクトリを渡さない。secret は `Init` で自分宛てのものだけを受け取る |
+| ログと spool | 全 plugin が書ける | plugin のコンテナに渡さない |
+| 他のプロセス | 同じコンテナの daemon と他の plugin が見える | plugin ごとに PID 名前空間が分かれる |
+| ネットワーク | コンテナ単位の許可が全 plugin に及ぶ | plugin のコンテナはネットワークを持たない。利用者設定に列挙した接続先だけに、中継を介して接続できる |
+
+### 構成
+
+```
+ホスト (scripts/container.sh daemon)
+  |  起動計画 (stackchan config --launch-plan) を読み、次のコンテナを起動する
+  |
+  +-- daemon のコンテナ          --network none、USB デバイス、/config
+  |     plugin ごとの Unix socket で待ち受ける
+  |
+  +-- plugin のコンテナ (plugin ごと)   --network none、読取り専用、capability なし
+  |     stackchan plugin-run が socket へ接続し、plugin を子プロセスとして起動する
+  |
+  +-- 中継のコンテナ (接続先の許可がある場合のみ)   ネットワークあり
+        stackchan relay が Unix socket への接続を、列挙された宛先へ TCP で転送する
+```
+
+- コンテナの起動は、daemon ではなくホスト側のスクリプトが行う。daemon にコンテナエンジンの操作権を渡すと、Podman machine 上の任意の path をマウントできる権限を、plugin からの入力を処理するプロセスに与えることになるためである
+- daemon と plugin は、plugin ごとの named volume に置く Unix socket で接続する。volume は daemon と当該 plugin のコンテナだけにマウントする。plugin は自分の volume の socket にしか到達できないため、daemon は接続を受けた socket で plugin を識別する
+- volume は bind mount ではなく named volume とする。設定ディレクトリは Windows 側のディレクトリであり、その上では Unix socket を作成できない場合があるためである
+- 全コンテナで同じイメージを用いる。plugin の実行ファイルは Nix store の動的リンカを絶対 path で参照しており、開発用のイメージ内でしか動かないためである。plugin 用の最小イメージは後続の課題とする
+
+### plugin との接続
+
+daemon の待受けと、plugin 側の起動補助 (`stackchan plugin-run`) を追加する。plugin 自体は従来どおり stdin / stdout でフレームを交換するプログラムであり、変更を要しない。Rust 以外で書いた plugin も同じ方法で動く。
+
+1. daemon は `--socket-dir <path>` を指定された場合、plugin を子プロセスとして起動せず、`<path>/<plugin id>/plugin.sock` で待ち受ける
+2. `plugin-run` は socket へ接続する。接続できない場合は間隔を空けて再試行する
+3. daemon は接続を受けると、起動情報 (利用者設定の `command` と `env.*`) を 1 フレームで送る。`plugin-run` に設定ディレクトリを渡さずに argv を伝えるためである。この型は `plugin-api` ではなく host の crate に置く。plugin の作者が扱うものではないためである
+4. `plugin-run` は socket を子プロセスの stdin と stdout として渡し、plugin を起動する。以降のフレームは `plugin-run` を経由しない
+5. plugin が終了すると、`plugin-run` は待ち時間を空けて 2 から繰り返す
+
+監視と停止は次のとおりとする。
+
+- daemon は plugin を停止する場合 (手順違反、流量超過、`Shutdown` 後の時間切れ)、接続を閉じる。子プロセスを直接終了させる手段は持たない。接続を閉じられても終了しない plugin は、表示の経路を失ったまま自身のコンテナ内で動き続ける。資源の消費はコンテナの上限 (メモリ、プロセス数) で抑える
+- 再起動までの待ち時間と、連続失敗による無効化は、従来どおり daemon が判断する。`plugin-run` は plugin と同じコンテナで動くため信頼しない。待ち時間内の接続と、無効化した plugin の接続は、daemon が受けた直後に閉じる
+- 同じ plugin の接続は 1 本だけを保持し、2 本目以降は閉じる
+- plugin の標準エラーは daemon に届かず、コンテナエンジンのログに残る (`podman logs stackchan-plugin-<id>`)。`Log` メッセージは従来どおり daemon のログに出る
+
+`--socket-dir` を指定しない場合は、従来の子プロセス方式で動く。Windows ネイティブでの動作と、開発時の確認のために残す。この方式では分離も接続先の制限も働かないため、`net.allow` を持つ plugin があれば daemon は起動時に警告を出す。
+
+### 接続先の許可
+
+plugin のコンテナは常に `--network none` とし、許可は宛先を列挙する方式で与える。
+
+- 利用者設定の `net.allow` に、IP アドレスと port の組を列挙する。名前解決は扱わない。plugin から解決先を変えられる経路を作らないためである
+- 中継 (`stackchan relay`) は、列挙された宛先ごとに Unix socket (`<socket dir>/<plugin id>/net/<番号>.sock`) で待ち受け、接続ごとに宛先へ TCP で接続して双方向に転送する。宛先は起動時の引数で固定され、plugin からは変えられない
+- 中継は daemon と別のコンテナで動かす。daemon のコンテナを `--network none` に保つためである
+- 許可の強制は firewall の規則ではなく、plugin のコンテナにネットワークが存在しないことによる。rootless の Podman は宛先単位の送信制限を備えておらず、Podman machine に規則を入れる方法はリポジトリから再現できないためである
+- TLS は plugin が socket の上で張る。中継は内容を解釈しない
+- 中継は宛先ごとの同時接続数に上限を設ける (4 本)
+
+plugin には、`Init` に追加する `endpoints` (宛先と socket の path の組) で接続方法を伝える。この追加により plugin API は版 3 になる。`plugin-api` の `client` に、宛先を指定して接続する補助を置く。`endpoints` に宛先があれば Unix socket に、無ければ TCP で直接接続する。plugin の実装を、分離の有無で分けないためである。
+
+### 利用者設定の追加
+
+```
+[plugin bambu]
+command = ["/plugin/stackchan-bambu"]   # plugin のコンテナ内の path
+dir = "C:/Users/<user>/repos/stackchan-plugin-bambu/target/release"
+rev = "<40 桁の commit SHA>"
+cards = 1
+notify = true
+net.allow = ["192.168.1.50:8883"]
+param.host = "192.168.1.50:8883"
+```
+
+| key | 内容 |
+| --- | --- |
+| `dir` | plugin の実行ファイルを置いたホスト側のディレクトリ。plugin のコンテナの `/plugin` に読取り専用でマウントする。省略時は本リポジトリの `target/release` (同梱の plugin) |
+| `net.allow` | 接続を許可する宛先 (`"<IP アドレス>:<port>"`) の並び。最大 4 件。省略時は接続先を持たない |
+
+`command` はコンテナ分離時には plugin のコンテナ内の path を書く。子プロセス方式とは path が異なるため、同じ設定ファイルを両方式で共用することはできない。
+
+### 起動計画
+
+`stackchan config --launch-plan` は、スクリプトがコンテナを起動するために必要な項目だけを、1 行 1 件のタブ区切りで出力する。設定の構文の解釈をシェル側に重複させないためである。
+
+```
+plugin<TAB><id><TAB><dir>
+relay<TAB><id><TAB><番号><TAB><IP アドレス>:<port>
+```
+
+`id` と宛先は使用できる文字が限られる。`dir` は行の最後の項目とし、タブと改行を含むものは設定の検証で拒否する。argv、env、param は出力しない。
+
+### コンテナの起動条件
+
+| コンテナ | 条件 |
+| --- | --- |
+| daemon | `--network none`。`/workspace` と `/config` は読取り専用、`logs` と `spool` は書込み可能。全 plugin の volume、USB デバイス |
+| plugin | `--network none`、`--read-only`、`--cap-drop=all`、`--security-opt no-new-privileges`、メモリとプロセス数の上限。マウントは `/plugin` (読取り専用)、自身の volume、`stackchan` の実行ファイル (読取り専用) だけ |
+| 中継 | ネットワークあり、`--read-only`、`--cap-drop=all`。マウントは `net.allow` を持つ plugin の volume と `stackchan` の実行ファイルだけ |
+
+`scripts/container.sh daemon` は、構築、起動計画の取得、volume の作成、中継と plugin のコンテナの起動を行ってから、daemon を前面で起動する。daemon の終了時には、起動したコンテナと volume を取り除く。
+
+### 分離後に残るリスク
+
+- コンテナはカーネルを共有する。カーネルやコンテナエンジンの欠陥による脱出は防げない
+- `net.allow` を持つ plugin は、許可された宛先に対しては任意の内容を送れる。宛先の機器に対する操作を制限するものではない
+- 全コンテナが開発用のイメージを共用するため、plugin のコンテナにも compiler 等が含まれる。ネットワークが無く、ファイルシステムが読取り専用であることで影響を抑える
+- 第三者製の plugin の導入前のソース確認と commit SHA による固定は、引き続き必要である
+
 ## 検証
 
 | 対象 | 方法 |
 | --- | --- |
+| コンテナ分離 (設計案) | socket での待受けと `plugin-run` は、一時ディレクトリの socket を用いた結合テストで確認する (待ち時間内の接続の拒否、2 本目の接続の拒否、起動情報の受渡し)。中継は loopback の宛先で、転送、宛先の固定、同時接続数の上限を確認する。起動計画は出力の形式と、不正な `dir` / `net.allow` の拒否を確認する。コンテナの起動条件は `make check` では実行できないため、手動の確認手順を environment.md に置く (plugin のコンテナから設定ディレクトリと外部への通信に到達できないこと) |
 | plugin プロトコル | 型の往復、上限ちょうど・超過、不正フレーム、`Hello` 前のメッセージの拒否。`decoder_stress` と同様の固定 seed の変異入力 |
 | 利用者設定のパーサ | 正常系、構文エラー、未知・重複 key、過長行、任意バイト列。固定 seed の変異入力を含める |
 | daemon | mock plugin を用いた結合テスト。異常終了からの再起動、流量超過での停止、許可外 capability の拒否、spool の書きかけファイルの無視 |
@@ -329,13 +446,15 @@ daemon はタップを次のように振り分ける。
 | P2 | デバイスプロトコル版 8 (card_id、InputMode、Event)、scheduler、入力の振分け | タップが発生元の plugin に届く。複数 Card が巡回する |
 | P3 | spool による通知の受付、別リポジトリの plugin の導入手順 | commit SHA で固定した外部 plugin が許可した capability の範囲で動作する |
 | P4 | 画像領域 | 外部 plugin からの画像が Overlay に表示される |
+| P5 | plugin ごとのコンテナ分離 (socket での接続、`plugin-run`、起動計画、`container.sh`) | 同梱の plugin が plugin ごとのコンテナで動作する。plugin のコンテナから設定ディレクトリと外部への通信に到達できない |
+| P6 | 接続先の許可 (`net.allow`、中継、plugin API 版 3 の `endpoints`) | 列挙した宛先にだけ plugin から接続できる |
 
 Claude / Codex 使用率は P3 の最初の外部 plugin とする。design.md の collector (Phase 3) は本機構の plugin として実装し、host への組込みは行わない。取得元のログ形式に依存する部分をリポジトリ外へ分離するためである。
 
 ## plugin ごとの留意点
 
 - Claude / Codex 使用率: ログ形式、およびサブスクリプションの残量を取得する公式手段の有無は、着手時に一次情報で確認する
-- 3D プリンタ: LAN 経由の制御・映像取得には公式仕様ではなく第三者の解析に依拠するものがあり、プリンタの firmware 更新により第三者のアクセスが制限される場合もある。利用条件の確認を含め plugin 側の責務とし、本リポジトリにはプリンタ固有のコードを置かない
+- 3D プリンタ: LAN 経由の制御・映像取得には公式仕様ではなく第三者の解析に依拠するものがあり、プリンタの firmware 更新により第三者のアクセスが制限される場合もある。利用条件の確認を含め plugin 側の責務とし、本リポジトリにはプリンタ固有のコードを置かない。最初の対象は状態 (進捗、残り時間、温度) の表示に限る。プリンタの設定を変えずに取得できる範囲にとどめるためであり、カメラと操作は扱わない (2026-10-05)。P6 の最初の利用者とする
 - 通知: OS の通知を横取りする方式は OS ごとの制約が大きいため、第一段階では spool 経由の受付で受ける
 
 ## 決定事項
@@ -343,6 +462,8 @@ Claude / Codex 使用率は P3 の最初の外部 plugin とする。design.md �
 | 項目 | 決定 | 理由 |
 | --- | --- | --- |
 | 隔離 | OS による隔離は必須としない。Linux では起動コマンドの前置きで任意に隔離できるようにする | Windows と Linux に共通する手段を依存なしで用意できない |
+| 隔離 (改定) | コンテナでの運用時は plugin ごとにコンテナを分ける。コンテナはホスト側のスクリプトが起動し、daemon とは Unix socket で接続する (2026-10-05) | secret を扱う plugin を導入するため。daemon にコンテナエンジンの操作権を渡さない |
+| 接続先の許可 | plugin のコンテナはネットワークを持たず、利用者設定に列挙した宛先 (IP アドレスと port) にだけ中継を介して接続できる (2026-10-05) | 許可を列挙方式とし、firewall の規則に依らずに強制する |
 | 形式 | plugin プロトコルは postcard + COBS、利用者設定は自前パーサの簡易形式 | Rust の依存を増やさない |
 | 実行環境 | 実装は Windows ネイティブを対象から外さない。local socket の代わりに spool ディレクトリを用いる | std だけで両 OS に対応できる |
 | 運用環境 | daemon と plugin は Linux 側 (コンテナ、`scripts/container.sh daemon`) で動かす。設定ディレクトリは Windows の `%APPDATA%\stackchan` をマウントし、Windows 側の hook からも spool に書けるようにする (2026-09-26) | Windows の Smart App Control が、利用者の build した署名の無い exe を実行させない。その設定の変更は難しく不可逆である |
@@ -375,3 +496,6 @@ P2 の実機確認で、Forward 状態のタップ後に daemon が送る Card �
 ## 未決事項
 
 1. 実行ファイルと commit SHA の対応を検証する方法 (再現可能な構築、ハッシュの照合)。P3 で扱う
+2. 中継のコンテナから LAN 上の機器へ到達できるネットワークの構成 (Podman machine の既定のネットワークで足りるか)。P6 の着手時に実機で確認する
+3. plugin 用の最小イメージ。開発用のイメージの共用をやめるには、plugin の実行ファイルを Nix store に依存しない形で構築する必要がある
+4. 接続を閉じられても終了しない plugin のコンテナを、daemon の外から停止する方法 (スクリプトによる監視等)
