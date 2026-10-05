@@ -107,7 +107,24 @@ pub fn plan(config: &Config) -> String {
             plugin.dir.as_deref().unwrap_or("")
         ));
     }
+    for plugin in &config.plugins {
+        for (index, addr) in plugin.net_allow.iter().enumerate() {
+            lines.push_str(&format!("relay\t{}\t{index}\t{addr}\n", plugin.id));
+        }
+    }
     lines
+}
+
+/// plugin のコンテナが、当該 plugin の volume をマウントする位置。起動スクリプト
+/// (scripts/container.sh) と揃える。
+#[cfg(unix)]
+pub const PLUGIN_MOUNT: &str = "/run/stackchan";
+
+/// `net.allow` の `index` 番目の宛先へ中継する socket の、plugin の volume 内での位置。
+/// 中継、daemon (`Init` で知らせる path)、起動スクリプトの 3 者で揃える。
+#[cfg(unix)]
+pub fn relay_socket(index: usize) -> String {
+    format!("net/{index}.sock")
 }
 
 #[cfg(test)]
@@ -192,6 +209,19 @@ mod tests {
         assert_eq!(
             plan(&config),
             "plugin\tclock\t\nplugin\text\tC:/Users/a b/release\n"
+        );
+    }
+
+    #[test]
+    fn plan_lists_relay_routes_after_all_plugins() {
+        let config = config(
+            "[plugin a]\ncommand = [\"/plugin/a\"]\nnet.allow = [\"192.168.1.50:8883\", \"[fe80::1]:6000\"]\n\
+             [plugin b]\ncommand = [\"/plugin/b\"]\n",
+        );
+        assert_eq!(
+            plan(&config),
+            "plugin\ta\t\nplugin\tb\t\n\
+             relay\ta\t0\t192.168.1.50:8883\nrelay\ta\t1\t[fe80::1]:6000\n"
         );
     }
 }

@@ -16,6 +16,8 @@ mod launch;
 mod log;
 #[cfg(unix)]
 mod plugin_run;
+#[cfg(unix)]
+mod relay;
 mod spool;
 
 /// Espressif の USB Serial/JTAG が名乗る VID:PID。port の自動検出に使う。
@@ -49,6 +51,12 @@ enum Command {
         /// daemon が待ち受ける Unix socket。
         #[arg(long)]
         socket: PathBuf,
+    },
+    /// 許可した宛先ごとに Unix socket で待ち受け、接続を TCP で転送する (コンテナ分離)。
+    Relay {
+        /// `<socket の path>=<IP アドレス>:<port>`。宛先ごとに指定する。
+        #[arg(long = "route", required = true)]
+        routes: Vec<String>,
     },
     /// port を占有し、設定した plugin を起動して表示を調停する。
     Daemon {
@@ -376,6 +384,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(unix))]
         Command::PluginRun { .. } => {
             Err("plugin-run は Unix socket を使うため、この OS では使えません".into())
+        }
+        #[cfg(unix)]
+        Command::Relay { routes } => {
+            let routes = routes
+                .iter()
+                .map(|route| relay::parse_route(route))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(relay::run(routes)?)
+        }
+        #[cfg(not(unix))]
+        Command::Relay { .. } => {
+            Err("relay は Unix socket を使うため、この OS では使えません".into())
         }
         Command::Input {
             via_daemon: true,

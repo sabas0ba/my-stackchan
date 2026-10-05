@@ -132,6 +132,25 @@ podman exec stackchan-plugin-clock ls -R /run/stackchan   # 自身の plugin.soc
 podman exec stackchan-plugin-clock grep CapEff /proc/1/status   # 0000000000000000
 ```
 
+LAN 上の機器を使う plugin には、利用者設定の `net.allow` で宛先を列挙する。列挙がある場合、中継のコンテナ (`stackchan-relay`) が起動し、ネットワークを持つのはこのコンテナだけになる。中継のネットワークはエンジンの既定値で、`STACKCHAN_RELAY_NETWORK` で変えられる。
+
+```
+[plugin example]
+command = ["/plugin/stackchan-example"]
+dir = "C:/Users/<user>/repos/stackchan-plugin-example/target/release"
+net.allow = ["192.168.1.50:8883"]
+```
+
+接続先の許可は次の手順で確かめる。イメージに含まれる curl で、中継の socket と直接の接続を比べる (宛先が接続時に何かを返す場合。返さない宛先では、中継のログで接続の成否を見る)。
+
+```bash
+podman logs stackchan-relay                               # 中継する socket と宛先、接続の失敗
+podman exec stackchan-plugin-example ls /run/stackchan/net    # 0.sock (net.allow の順)
+podman exec stackchan-plugin-example curl -s --http0.9 --max-time 3 \
+  --unix-socket /run/stackchan/net/0.sock http://relay/   # 宛先の応答
+podman exec stackchan-plugin-example curl -sS --max-time 3 telnet://192.168.1.50:8883 </dev/null   # 接続できない
+```
+
 plugin のコンテナの `/workspace` には、イメージの構築時に複製されたリポジトリの内容がある。マウントではなく、設定や secret を含まない。
 
 daemon の動作中は port を占有するため、通知と活動状態、タップの扱いの切替は spool 経由で渡す ([plugin.md](plugin.md#通知と手動命令の受付-spool))。`scripts/container.sh cli` は daemon と同じ設定ディレクトリ (`STACKCHAN_CONFIG_DIR` または既定値) を `/config` にマウントして CLI を実行するため、要求は動作中の daemon に届く。

@@ -52,7 +52,17 @@ pub fn run(
         spool_dir.display()
     );
     match socket_dir {
-        None => serve(config, device, plugin::OsSpawner, spool_dir),
+        None => {
+            // 子プロセス方式では plugin が daemon と同じ範囲へ接続でき、宛先を制限できない。
+            for plugin in config.plugins.iter().filter(|p| !p.net_allow.is_empty()) {
+                log::warning!(
+                    "daemon",
+                    "plugin {} の net.allow は、コンテナ分離 (--socket-dir) でのみ強制されます",
+                    plugin.id
+                );
+            }
+            serve(config, device, plugin::OsSpawner, spool_dir)
+        }
         #[cfg(unix)]
         Some(dir) => {
             let spawner = socket::SocketSpawner::new(&dir, &config)?;
@@ -114,14 +124,18 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
     pub fn new(config: Config, device: D, spawner: S, now: Instant) -> Self {
         let (sender, events) = mpsc::channel();
         let refresh = Duration::from_secs(u64::from(config.daemon.rotate_s));
+        let plugins = config
+            .plugins
+            .into_iter()
+            .map(|plugin| {
+                let endpoints = spawner.endpoints(&plugin);
+                PluginRuntime::new(plugin, endpoints, now)
+            })
+            .collect();
         Self {
             device,
             spawner,
-            plugins: config
-                .plugins
-                .into_iter()
-                .map(|plugin| PluginRuntime::new(plugin, now))
-                .collect(),
+            plugins,
             scheduler: Scheduler::new(refresh),
             events,
             sender,

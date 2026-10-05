@@ -13,6 +13,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
+use plugin_api::Endpoint;
+
 use super::plugin::{Process, Spawned, Spawner};
 use crate::config::{Config, PluginConfig};
 use crate::launch;
@@ -96,5 +98,18 @@ impl Spawner for SocketSpawner {
 
     fn refuse(&mut self, config: &PluginConfig) {
         self.drain(&config.id);
+    }
+
+    /// 中継の socket を、plugin のコンテナから見た path で知らせる。
+    fn endpoints(&self, config: &PluginConfig) -> Vec<Endpoint> {
+        config
+            .net_allow
+            .iter()
+            .enumerate()
+            .map(|(index, addr)| Endpoint {
+                addr: addr.to_string(),
+                path: format!("{}/{}", launch::PLUGIN_MOUNT, launch::relay_socket(index)),
+            })
+            .collect()
     }
 }

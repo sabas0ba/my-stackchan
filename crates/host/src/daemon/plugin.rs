@@ -11,7 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use plugin_api::{
-    API_VERSION, Capabilities, CardPut, FrameError, FrameReader, HostMessage, Init, PluginMessage,
+    API_VERSION, Capabilities, CardPut, Endpoint, FrameError, FrameReader, HostMessage, Init,
+    PluginMessage,
 };
 
 use super::convert;
@@ -63,6 +64,11 @@ pub trait Spawner {
     /// 起動の時刻に達していない plugin と、動作中または無効化した plugin について呼ばれる。
     /// 接続を待つ方式では、この間に届いた接続を閉じる。
     fn refuse(&mut self, _config: &PluginConfig) {}
+
+    /// 中継を介して接続できる宛先。plugin へ `Init` で知らせる。中継を用いない方式では空。
+    fn endpoints(&self, _config: &PluginConfig) -> Vec<Endpoint> {
+        Vec::new()
+    }
 }
 
 pub struct OsSpawner;
@@ -154,10 +160,11 @@ pub struct PluginRuntime {
     failures: u32,
     window: (Instant, u32),
     last_face: Option<Instant>,
+    endpoints: Vec<Endpoint>,
 }
 
 impl PluginRuntime {
-    pub fn new(config: PluginConfig, now: Instant) -> Self {
+    pub fn new(config: PluginConfig, endpoints: Vec<Endpoint>, now: Instant) -> Self {
         Self {
             config,
             generation: 0,
@@ -165,6 +172,7 @@ impl PluginRuntime {
             failures: 0,
             window: (now, 0),
             last_face: None,
+            endpoints,
         }
     }
 
@@ -455,6 +463,7 @@ impl PluginRuntime {
             granted,
             params: self.config.params.clone(),
             limits: convert::LIMITS,
+            endpoints: self.endpoints.clone(),
         });
         if log::enabled(log::Level::Trace) {
             let source = format!("plugin {}", self.config.id);

@@ -25,6 +25,8 @@
 #     STACKCHAN_CONFIG_DIR     daemon と cli の設定ディレクトリ。コンテナの /config にマウントする。
 #                              既定は Windows では %APPDATA%\stackchan、それ以外では
 #                              ${XDG_CONFIG_HOME:-$HOME/.config}/stackchan
+#     STACKCHAN_RELAY_NETWORK  中継のコンテナのネットワーク。既定はエンジンの既定値。
+#                              daemon と plugin のコンテナは常にネットワークを持たない
 set -euo pipefail
 
 engine=${CONTAINER_ENGINE:-podman}
@@ -209,6 +211,38 @@ case "$cmd" in
         plugin-run --socket /run/stackchan/plugin.sock >/dev/null
       started+=("$container")
     done <<<"$plan"
+
+    # 利用者設定の net.allow に列挙された宛先への中継 (docs/plugin.md の「接続先の許可」)。
+    # ネットワークを持つのはこのコンテナだけである。宛先ごとの socket を、当該 plugin の
+    # volume に置く。宛先は引数で固定し、設定ディレクトリは渡さない。
+    relay_volumes=()
+    relay_routes=()
+    relayed_id=
+    while IFS=$'\t' read -r kind id index addr; do
+      addr=${addr%$'\r'}
+      [ "$kind" = relay ] || continue
+      # 起動計画は同じ plugin の宛先を続けて出力するため、直前の id と比べれば重複しない。
+      if [ "$id" != "$relayed_id" ]; then
+        relay_volumes+=(-v "stackchan-run-$id:/run/stackchan/$id")
+        relayed_id=$id
+      fi
+      relay_routes+=(--route "/run/stackchan/$id/net/$index.sock=$addr")
+    done <<<"$plan"
+    if [ ${#relay_routes[@]} -gt 0 ]; then
+      relay_network=()
+      if [ -n "${STACKCHAN_RELAY_NETWORK:-}" ]; then
+        relay_network=(--network "$STACKCHAN_RELAY_NETWORK")
+      fi
+      "$engine" rm -f -t 0 stackchan-relay >/dev/null 2>&1 || true
+      "$engine" run -d --name stackchan-relay \
+        "${relay_network[@]}" --read-only --cap-drop=all --security-opt no-new-privileges \
+        --pids-limit 64 --memory 256m \
+        "${relay_volumes[@]}" \
+        -v "$stackchan_bin:/stackchan:ro" \
+        --entrypoint /stackchan "$image" \
+        relay "${relay_routes[@]}" >/dev/null
+      started+=(stackchan-relay)
+    fi
 
     # daemon にはネットワークを渡さない。リポジトリは読取り専用とし (ピッチ補正の既定の
     # 保存先を読むため)、git のディレクトリは渡さない。設定ディレクトリも読取り専用とし、

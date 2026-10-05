@@ -757,7 +757,7 @@ mod socket {
                 .join(format!("stackchan-socket-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             let config = crate::config::parse(
-                "[plugin test]\ncommand = [\"/plugin/test\", \"--flag\"]\ncards = 1\nenv.NAME = \"value\"\n",
+                "[plugin test]\ncommand = [\"/plugin/test\", \"--flag\"]\ncards = 1\nenv.NAME = \"value\"\nnet.allow = [\"192.168.1.50:8883\"]\n",
                 None,
             )
             .unwrap();
@@ -814,7 +814,7 @@ mod socket {
             while !connection.is_closed() {
                 let _ = connection.recv_timeout(Duration::from_millis(50));
             }
-            launch
+            (launch, connection.init().endpoints.clone())
         });
         let deadline = Instant::now() + Duration::from_secs(10);
         while !harness
@@ -835,7 +835,15 @@ mod socket {
         harness
             .daemon
             .stop_plugin(0, "試験による停止", Instant::now());
-        let (argv, env) = plugin.join().unwrap();
+        let ((argv, env), endpoints) = plugin.join().unwrap();
+        assert_eq!(
+            endpoints,
+            [api::Endpoint {
+                addr: "192.168.1.50:8883".into(),
+                path: "/run/stackchan/net/0.sock".into(),
+            }],
+            "中継の socket を plugin のコンテナから見た path で知らせる"
+        );
         assert_eq!(argv, ["/plugin/test", "--flag"]);
         assert_eq!(env, [("NAME".to_owned(), "value".to_owned())]);
     }

@@ -129,6 +129,12 @@ impl<W: Write> Connection<W> {
         &self.init
     }
 
+    /// 外部の機器 (`<IP アドレス>:<port>`) へ接続する。利用者設定で許可された宛先には
+    /// 中継を介して、それ以外には直接接続する (`net::connect`)。
+    pub fn connect_to(&self, addr: &str, timeout: Duration) -> io::Result<crate::net::Stream> {
+        crate::net::connect(&self.init.endpoints, addr, timeout)
+    }
+
     /// `Init` の設定値を名前で引く。
     pub fn param(&self, key: &str) -> Option<&str> {
         self.init
@@ -204,6 +210,7 @@ mod tests {
                 image_width: 160,
                 image_height: 120,
             },
+            endpoints: Vec::new(),
         }
     }
 
