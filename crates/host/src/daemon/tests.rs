@@ -874,4 +874,45 @@ mod socket {
             "待ち時間の経過後は受け付ける"
         );
     }
+
+    #[test]
+    fn refused_connections_are_closed_in_bounded_batches() {
+        use std::io::Read;
+
+        use super::super::socket::MAX_DRAIN;
+
+        let mut harness = SocketHarness::new("flood");
+        let start = harness.start;
+        // 再起動までの待ち時間に入れ、届いた接続が拒否される状態にする。
+        let mut silent = harness.connect();
+        harness.daemon.tick(start);
+        harness.daemon.tick(start + Duration::from_secs(6));
+        launch::receive(&mut silent).unwrap();
+
+        // 接続し続ける plugin を、上限の 2 倍を超える数の待ち接続で模擬する。
+        let flood: Vec<UnixStream> = (0..2 * MAX_DRAIN + 4)
+            .map(|_| {
+                let stream = harness.connect();
+                stream.set_nonblocking(true).unwrap();
+                stream
+            })
+            .collect();
+        // 閉じられた接続は終端を返し、待たされている接続は読取りが成立しない。
+        let closed = |flood: &[UnixStream]| {
+            flood
+                .iter()
+                .filter(|stream| {
+                    let mut reader: &UnixStream = stream;
+                    matches!(reader.read(&mut [0u8; 1]), Ok(0))
+                })
+                .count()
+        };
+        // 1 回の周回で閉じるのは上限までで、残りは次の周回に回す。空になるまで閉じ続けると、
+        // 待ち行列を補充され続けた場合にイベントループが戻らない。
+        let during_backoff = start + Duration::from_secs(7);
+        for expected in [MAX_DRAIN, 2 * MAX_DRAIN, flood.len(), flood.len()] {
+            harness.daemon.tick(during_backoff);
+            assert_eq!(closed(&flood), expected);
+        }
+    }
 }
