@@ -12,7 +12,8 @@
 #     scripts/container.sh check            コンテナ内で make check を実行する (--network none)
 #     scripts/container.sh run <cmd...>     コンテナ内で任意のコマンドを実行する
 #     scripts/container.sh device <cmd...>  USB デバイスを渡してコマンドを実行する
-#     scripts/container.sh daemon [args...] daemon と同梱の plugin を build して起動する
+#     scripts/container.sh daemon [args...] daemon と同梱の plugin を build し、plugin ごとの
+#                                           コンテナと daemon を起動する
 #                                           (args は stackchan daemon に渡す。例: --trace)
 #     scripts/container.sh cli <args...>    daemon と同じ設定ディレクトリで stackchan を
 #                                           実行する (例: notify --text done)
@@ -24,8 +25,8 @@
 #     STACKCHAN_CONFIG_DIR     daemon と cli の設定ディレクトリ。コンテナの /config にマウントする。
 #                              既定は Windows では %APPDATA%\stackchan、それ以外では
 #                              ${XDG_CONFIG_HOME:-$HOME/.config}/stackchan
-#     STACKCHAN_DAEMON_NETWORK daemon のコンテナのネットワーク。既定 none。LAN 上の機器を
-#                              使う plugin を動かす場合にだけ明示する (例: bridge)
+#     STACKCHAN_RELAY_NETWORK  中継のコンテナのネットワーク。既定はエンジンの既定値。
+#                              daemon と plugin のコンテナは常にネットワークを持たない
 set -euo pipefail
 
 engine=${CONTAINER_ENGINE:-podman}
@@ -161,23 +162,101 @@ case "$cmd" in
     prepare_workspace_mounts
     "$engine" run --rm --network none "${workspace_mounts[@]}" "$image" \
       cargo build --release --locked --offline -p my-stackchan-host -p stackchan-clock -p stackchan-image-demo
-    # plugin は daemon と同じ uid で動くため、書き換えられて困るものは読取り専用で渡す
-    # (docs/plugin.md の「信頼境界と権限」)。リポジトリは読取り専用とし、git のディレクトリは
-    # 渡さない (.git/hooks の書換えによるホスト側でのコード実行を防ぐ)。設定ディレクトリも
-    # 読取り専用とし、daemon が書く logs と spool だけを書込み可能にする (plugin が設定や
-    # plugin の実行ファイルを書き換えて、次の起動で権限を広げることを防ぐ)。
-    # 開発シェルの初期化はリポジトリに書き込むため通さず、build 済みのバイナリを直接起動する
-    # (バイナリは Nix store の動的リンカを絶対パスで参照するため、イメージ内で動く)。
-    # plugin の外部通信は既定で許可しない。必要な場合だけ STACKCHAN_DAEMON_NETWORK で明示する。
+    # 以降のコンテナは、開発シェルの初期化 (リポジトリに書き込む) を通さず、build 済みの
+    # バイナリを直接起動する (バイナリは Nix store の動的リンカを絶対パスで参照するため、
+    # イメージ内で動く)。
+    stackchan_bin="$root/target/release/stackchan"
+
+    # plugin ごとにコンテナを分ける (docs/plugin.md の「plugin ごとのコンテナ分離」)。
+    # 起動に必要な項目は、設定の構文の解釈をここに重複させないよう stackchan に出力させる。
+    plan=$("$engine" run --rm --network none \
+      -v "$stackchan_bin:/stackchan:ro" -v "$config_dir:/config:ro" \
+      --entrypoint /stackchan "$image" --config-dir /config config --launch-plan)
+
+    started=()
+    volumes=()
+    stop_plugins() {
+      if [ ${#started[@]} -gt 0 ]; then
+        "$engine" rm -f -t 0 "${started[@]}" >/dev/null 2>&1 || true
+      fi
+      if [ ${#volumes[@]} -gt 0 ]; then
+        "$engine" volume rm -f "${volumes[@]}" >/dev/null 2>&1 || true
+      fi
+    }
+    trap stop_plugins EXIT
+
+    daemon_volumes=()
+    while IFS=$'\t' read -r kind id dir; do
+      dir=${dir%$'\r'}
+      [ "$kind" = plugin ] || continue
+      # socket は named volume に置く。設定ディレクトリは Windows 側にあり、その上では
+      # Unix socket を作成できない場合がある。volume は daemon と当該 plugin にだけ渡す。
+      volume="stackchan-run-$id"
+      container="stackchan-plugin-$id"
+      # 前回の起動が異常終了して残したものを取り除く。
+      "$engine" rm -f -t 0 "$container" >/dev/null 2>&1 || true
+      "$engine" volume rm -f "$volume" >/dev/null 2>&1 || true
+      "$engine" volume create "$volume" >/dev/null
+      volumes+=("$volume")
+      daemon_volumes+=(-v "$volume:/run/stackchan/$id")
+      # plugin のコンテナには、ネットワークも設定ディレクトリもリポジトリも渡さない。
+      # 渡すのは自身の実行ファイルのディレクトリ、自身の volume、起動補助だけである。
+      "$engine" run -d --name "$container" \
+        --network none --read-only --cap-drop=all --security-opt no-new-privileges \
+        --pids-limit 64 --memory 256m \
+        -v "${dir:-$root/target/release}:/plugin:ro" \
+        -v "$volume:/run/stackchan" \
+        -v "$stackchan_bin:/stackchan:ro" \
+        --entrypoint /stackchan "$image" \
+        plugin-run --socket /run/stackchan/plugin.sock >/dev/null
+      started+=("$container")
+    done <<<"$plan"
+
+    # 利用者設定の net.allow に列挙された宛先への中継 (docs/plugin.md の「接続先の許可」)。
+    # ネットワークを持つのはこのコンテナだけである。宛先ごとの socket を、当該 plugin の
+    # volume に置く。宛先は引数で固定し、設定ディレクトリは渡さない。
+    relay_volumes=()
+    relay_routes=()
+    relayed_id=
+    while IFS=$'\t' read -r kind id index addr; do
+      addr=${addr%$'\r'}
+      [ "$kind" = relay ] || continue
+      # 起動計画は同じ plugin の宛先を続けて出力するため、直前の id と比べれば重複しない。
+      if [ "$id" != "$relayed_id" ]; then
+        relay_volumes+=(-v "stackchan-run-$id:/run/stackchan/$id")
+        relayed_id=$id
+      fi
+      relay_routes+=(--route "/run/stackchan/$id/net/$index.sock=$addr")
+    done <<<"$plan"
+    if [ ${#relay_routes[@]} -gt 0 ]; then
+      relay_network=()
+      if [ -n "${STACKCHAN_RELAY_NETWORK:-}" ]; then
+        relay_network=(--network "$STACKCHAN_RELAY_NETWORK")
+      fi
+      "$engine" rm -f -t 0 stackchan-relay >/dev/null 2>&1 || true
+      "$engine" run -d --name stackchan-relay \
+        "${relay_network[@]}" --read-only --cap-drop=all --security-opt no-new-privileges \
+        --pids-limit 64 --memory 256m \
+        "${relay_volumes[@]}" \
+        -v "$stackchan_bin:/stackchan:ro" \
+        --entrypoint /stackchan "$image" \
+        relay "${relay_routes[@]}" >/dev/null
+      started+=(stackchan-relay)
+    fi
+
+    # daemon にはネットワークを渡さない。リポジトリは読取り専用とし (ピッチ補正の既定の
+    # 保存先を読むため)、git のディレクトリは渡さない。設定ディレクトリも読取り専用とし、
+    # daemon が書く logs と spool だけを書込み可能にする。
     "$engine" run --rm "${tty_flags[@]}" --name stackchan-daemon \
-      --network "${STACKCHAN_DAEMON_NETWORK:-none}" \
+      --network none \
       -v "$root:/workspace:ro" \
       -v "$config_dir:/config:ro" \
       -v "$config_dir/logs:/config/logs" \
       -v "$config_dir/spool:/config/spool" \
+      "${daemon_volumes[@]}" \
       --device "$serial_device:$serial_device" \
       --entrypoint /workspace/target/release/stackchan \
-      "$image" --config-dir /config daemon "$@"
+      "$image" --config-dir /config daemon --socket-dir /run/stackchan "$@"
     ;;
   cli)
     # daemon のコンテナと同じ設定ディレクトリを /config にマウントし、spool 経由の命令

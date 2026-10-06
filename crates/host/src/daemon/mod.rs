@@ -8,6 +8,8 @@ mod convert;
 mod device;
 mod plugin;
 mod scheduler;
+#[cfg(unix)]
+mod socket;
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -32,10 +34,13 @@ const DEVICE_TTL_MARGIN_S: u16 = 5;
 /// 画像は scheduler が最新の 1 枚だけを保持し、間隔の経過後に送る。
 const MIN_IMAGE_INTERVAL: Duration = Duration::from_millis(500);
 
+/// `socket_dir` を指定した場合、plugin を起動せず、plugin ごとの Unix socket で接続を待つ
+/// (plugin ごとのコンテナ分離)。指定しない場合は plugin を子プロセスとして起動する。
 pub fn run(
     config: Config,
     trim_file: PitchTrimFile,
     spool_dir: PathBuf,
+    socket_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if config.plugins.is_empty() {
         return Err("設定に plugin がありません".into());
@@ -46,8 +51,35 @@ pub fn run(
         "spool を {} から取り込みます",
         spool_dir.display()
     );
-    let mut daemon =
-        Daemon::new(config, device, plugin::OsSpawner, Instant::now()).with_spool(spool_dir);
+    match socket_dir {
+        None => {
+            // 子プロセス方式では plugin が daemon と同じ範囲へ接続でき、宛先を制限できない。
+            for plugin in config.plugins.iter().filter(|p| !p.net_allow.is_empty()) {
+                log::warning!(
+                    "daemon",
+                    "plugin {} の net.allow は、コンテナ分離 (--socket-dir) でのみ強制されます",
+                    plugin.id
+                );
+            }
+            serve(config, device, plugin::OsSpawner, spool_dir)
+        }
+        #[cfg(unix)]
+        Some(dir) => {
+            let spawner = socket::SocketSpawner::new(&dir, &config)?;
+            log::info!(
+                "daemon",
+                "plugin の接続を {} の socket で待ちます",
+                dir.display()
+            );
+            serve(config, device, spawner, spool_dir)
+        }
+        #[cfg(not(unix))]
+        Some(_) => Err("--socket-dir は Unix socket を使うため、この OS では使えません".into()),
+    }
+}
+
+fn serve<D: Device, S: Spawner>(config: Config, device: D, spawner: S, spool_dir: PathBuf) -> ! {
+    let mut daemon = Daemon::new(config, device, spawner, Instant::now()).with_spool(spool_dir);
     loop {
         daemon.step(TICK);
     }
@@ -92,14 +124,18 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
     pub fn new(config: Config, device: D, spawner: S, now: Instant) -> Self {
         let (sender, events) = mpsc::channel();
         let refresh = Duration::from_secs(u64::from(config.daemon.rotate_s));
+        let plugins = config
+            .plugins
+            .into_iter()
+            .map(|plugin| {
+                let endpoints = spawner.endpoints(&plugin);
+                PluginRuntime::new(plugin, endpoints, now)
+            })
+            .collect();
         Self {
             device,
             spawner,
-            plugins: config
-                .plugins
-                .into_iter()
-                .map(|plugin| PluginRuntime::new(plugin, now))
-                .collect(),
+            plugins,
             scheduler: Scheduler::new(refresh),
             events,
             sender,

@@ -85,25 +85,27 @@ daemon と plugin は Linux 側 (コンテナ) で動かす。Windows ホスト�
    usbipd attach --wsl --busid <BUSID> --auto-attach
    ```
 
-2. 設定ディレクトリに `stackchan.conf` を置く。既定は Windows では `%APPDATA%\stackchan`、Linux ホストでは `${XDG_CONFIG_HOME:-$HOME/.config}/stackchan` で、`STACKCHAN_CONFIG_DIR` で変えられる。コンテナ内では `/config` にマウントされる。plugin の `command` にはコンテナ内の path を書く
+2. 設定ディレクトリに `stackchan.conf` を置く。既定は Windows では `%APPDATA%\stackchan`、Linux ホストでは `${XDG_CONFIG_HOME:-$HOME/.config}/stackchan` で、`STACKCHAN_CONFIG_DIR` で変えられる。daemon のコンテナ内では `/config` にマウントされる。plugin は plugin ごとのコンテナで動き、実行ファイルのディレクトリが `/plugin` にマウントされるため、`command` には `/plugin/` 以下の path を書く。同梱の plugin 以外は、実行ファイルを置いたホスト側のディレクトリを `dir` で指定する
 
    ```
    [plugin clock]
-   command = ["/workspace/target/release/stackchan-clock"]
+   command = ["/plugin/stackchan-clock"]
    cards = 1
    param.utc_offset_minutes = "540"
    ```
+
+   2026-10-05 より前の設定は `command` に `/workspace/target/release/` 以下の path を書いている。plugin のコンテナにはリポジトリをマウントしないため、`/plugin/` 以下へ書き換える
 
    画像の表示を確かめる場合は `plugins/image-demo` を加える。帯の `Image demo` の行をタップすると (`input forward` 時) 試験模様を 1 秒ごとに 10 枚表示する。`param.autoplay = "true"` では起動時にも 1 回表示する
 
    ```
    [plugin image-demo]
-   command = ["/workspace/target/release/stackchan-image-demo"]
+   command = ["/plugin/stackchan-image-demo"]
    cards = 1
    image = true
    ```
 
-3. 起動する。daemon と同梱の plugin を release で build してから起動する。引数は `stackchan daemon` に渡る
+3. 起動する。daemon と同梱の plugin を release で build し、plugin ごとのコンテナ (`stackchan-plugin-<id>`) を起動してから、daemon を前面で起動する。引数は `stackchan daemon` に渡る。daemon が終了すると、plugin のコンテナと socket 用の volume (`stackchan-run-<id>`) を取り除く
 
    ```bash
    scripts/container.sh device cargo run -q --locked --offline -p my-stackchan-host -- input forward  # 任意。起動後は cli input --via-daemon forward
@@ -111,7 +113,45 @@ daemon と plugin は Linux 側 (コンテナ) で動かす。Windows ホスト�
    scripts/container.sh daemon --trace          # 送受信も記録する
    ```
 
-コンテナのネットワークは既定で `none` とし、plugin の外部通信を許可しない。LAN 上の機器を使う plugin を動かす場合にだけ、`STACKCHAN_DAEMON_NETWORK=bridge` 等で明示する。
+daemon と plugin のコンテナはネットワークを持たない (`--network none`)。plugin のコンテナには設定ディレクトリもリポジトリも渡さず、渡すのは実行ファイルのディレクトリ (読取り専用)、daemon と接続するための volume、起動補助 (`stackchan plugin-run`) だけである。構成と理由は [plugin.md](plugin.md#plugin-ごとのコンテナ分離) を参照する。
+
+plugin の標準エラーは daemon のログではなく、コンテナエンジンのログに出る。コンテナは daemon の終了時に取り除かれるため、動作中に読む。
+
+```bash
+podman logs stackchan-plugin-clock
+```
+
+分離の状態は次の手順で確かめる。コンテナの起動条件は `make check` では検査できないためである。CoreS3 を接続せずに確かめる場合は `SERIAL_DEVICE=/dev/null` を指定する (daemon はデバイスへの送信に失敗し続けるが、plugin との接続は成立する)。
+
+```bash
+podman ps --format '{{.Names}} {{.Networks}}'             # stackchan-daemon と stackchan-plugin-<id>。ネットワークは空
+podman exec stackchan-plugin-clock ls /config             # 存在しない
+podman exec stackchan-plugin-clock ls /sys/class/net      # lo のみ
+podman exec stackchan-plugin-clock touch /plugin/x        # Read-only file system
+podman exec stackchan-plugin-clock ls -R /run/stackchan   # 自身の plugin.sock のみ
+podman exec stackchan-plugin-clock grep CapEff /proc/1/status   # 0000000000000000
+```
+
+LAN 上の機器を使う plugin には、利用者設定の `net.allow` で宛先を列挙する。列挙がある場合、中継のコンテナ (`stackchan-relay`) が起動し、ネットワークを持つのはこのコンテナだけになる。中継のネットワークはエンジンの既定値で、`STACKCHAN_RELAY_NETWORK` で変えられる。
+
+```
+[plugin example]
+command = ["/plugin/stackchan-example"]
+dir = "C:/Users/<user>/repos/stackchan-plugin-example/target/release"
+net.allow = ["192.168.1.50:8883"]
+```
+
+接続先の許可は次の手順で確かめる。イメージに含まれる curl で、中継の socket と直接の接続を比べる (宛先が接続時に何かを返す場合。返さない宛先では、中継のログで接続の成否を見る)。
+
+```bash
+podman logs stackchan-relay                               # 中継する socket と宛先、接続の失敗
+podman exec stackchan-plugin-example ls /run/stackchan/net    # 0.sock (net.allow の順)
+podman exec stackchan-plugin-example curl -s --http0.9 --max-time 3 \
+  --unix-socket /run/stackchan/net/0.sock http://relay/   # 宛先の応答
+podman exec stackchan-plugin-example curl -sS --max-time 3 telnet://192.168.1.50:8883 </dev/null   # 接続できない
+```
+
+plugin のコンテナの `/workspace` には、イメージの構築時に複製されたリポジトリの内容がある。マウントではなく、設定や secret を含まない。
 
 daemon の動作中は port を占有するため、通知と活動状態、タップの扱いの切替は spool 経由で渡す ([plugin.md](plugin.md#通知と手動命令の受付-spool))。`scripts/container.sh cli` は daemon と同じ設定ディレクトリ (`STACKCHAN_CONFIG_DIR` または既定値) を `/config` にマウントして CLI を実行するため、要求は動作中の daemon に届く。
 

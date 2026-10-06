@@ -4,7 +4,7 @@
 //! 確保量がフレーム長の上限で抑えられることを確認する。
 
 use plugin_api::{
-    API_VERSION, Capabilities, CardPut, Element, Emote, Expression, EyeStyle, FrameError,
+    API_VERSION, Capabilities, CardPut, Element, Emote, Endpoint, Expression, EyeStyle, FrameError,
     FrameReader, Gaze, Hello, HostMessage, Init, Limits, LogLevel, MAX_CARD_ROWS, MAX_FRAME_BYTES,
     MAX_ROW_ELEMENTS, MAX_TEXT_BYTES, Notify, Placement, PluginMessage, Presence, Priority, Row,
     write_frame,
@@ -81,6 +81,10 @@ fn corpus() -> Vec<Vec<u8>> {
             image_width: 160,
             image_height: 120,
         },
+        endpoints: vec![Endpoint {
+            addr: "192.168.1.50:8883".into(),
+            path: "/run/stackchan/net/0.sock".into(),
+        }],
     });
     let mut frames = vec![
         wire(&hello),
