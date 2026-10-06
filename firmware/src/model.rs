@@ -1330,13 +1330,18 @@ mod tests {
             assert_eq!(controller.demo_index, Some(0));
 
             controller.tick(60_000, &mut display).unwrap();
-            assert!(controller.local.card.is_none());
-            assert!(controller.local.panel.is_some());
+            // 完了は Panel ではなく、帯の Card と表情・首の動きで知らせる (顔を隠さない)。
+            assert!(controller.local.card.is_some());
+            assert!(controller.local.panel.is_none());
             assert_ne!(
                 controller.actuator_target(),
                 crate::behavior::ActuatorTarget::NEUTRAL
             );
-            assert_eq!(controller.gesture(press(0), 60_500, &mut display), Ok(None));
+            // 帯の Card のタップで完了の表示を消す。
+            assert_eq!(
+                controller.gesture(Gesture::Tap { x: 160, y: 20 }, 60_500, &mut display),
+                Ok(None)
+            );
             assert_eq!(controller.local, View::default());
         }
     }

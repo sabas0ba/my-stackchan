@@ -543,10 +543,17 @@ fn generate_timer(options: &Options) -> io::Result<()> {
     );
     save_bmp(&options.output_dir.join("30-timer-adjust.bmp"), &screen)?;
     gesture(&mut controller, &mut screen, press(3), elapsed_ms);
-    controller
-        .tick(204 * 60_000, &mut screen)
-        .expect("screen is infallible");
-    save_bmp(&options.output_dir.join("31-timer-done.bmp"), &screen)?;
+    // 残りわずか (残り 3 分) と完了は、操作画面ではなく表情で知らせる。
+    for (name, minutes) in [
+        ("31-timer-almost.bmp", 201),
+        ("32-timer-final.bmp", 203),
+        ("33-timer-done.bmp", 204),
+    ] {
+        controller
+            .tick(minutes * 60_000, &mut screen)
+            .expect("screen is infallible");
+        save_bmp(&options.output_dir.join(name), &screen)?;
+    }
     Ok(())
 }
 
@@ -598,7 +605,9 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="28-timer-setting.bmp" width="320" height="240" alt="タイマーの設定の Panel"><figcaption>28. Timer: setting panel</figcaption></figure>
 <figure><img src="29-timer-running.bmp" width="320" height="240" alt="動作中のタイマーの Card と host の下の帯"><figcaption>29. Timer: running (top banner)</figcaption></figure>
 <figure><img src="30-timer-adjust.bmp" width="320" height="240" alt="タイマーの補正の Panel"><figcaption>30. Timer: adjust panel</figcaption></figure>
-<figure><img src="31-timer-done.bmp" width="320" height="240" alt="タイマーの完了の Panel"><figcaption>31. Timer: done</figcaption></figure>
+<figure><img src="31-timer-almost.bmp" width="320" height="240" alt="残りわずかのタイマーと表情"><figcaption>31. Timer: almost done (Curious)</figcaption></figure>
+<figure><img src="32-timer-final.bmp" width="320" height="240" alt="残り 1 分のタイマーと表情"><figcaption>32. Timer: last minute (Surprised)</figcaption></figure>
+<figure><img src="33-timer-done.bmp" width="320" height="240" alt="完了したタイマーと表情"><figcaption>33. Timer: done (Grin)</figcaption></figure>
 "#
     );
     for index in 1..=my_stackchan_firmware::model::DEMO_FACE_COUNT {
