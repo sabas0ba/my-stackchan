@@ -22,6 +22,8 @@ use crate::launch;
 pub const SOCKET_NAME: &str = "plugin.sock";
 /// 起動情報の書込みを待つ時間。イベントループで書くため、読まない相手で止まらないようにする。
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(1);
+/// 1 回の呼出しで閉じる、待っている接続の数の上限。
+pub(super) const MAX_DRAIN: usize = 8;
 
 struct Peer(UnixStream);
 
@@ -69,9 +71,17 @@ impl SocketSpawner {
         }
     }
 
-    /// 待っている接続をすべて閉じる。
+    /// 待っている接続を、1 回の呼出しにつき `MAX_DRAIN` 本まで閉じる。
+    ///
+    /// 空になるまで閉じ続けると、接続し続ける plugin が待ち行列を補充する限り終わらず、
+    /// daemon のイベントループ (デバイスへの送信、spool、他の plugin) が止まる。残りは
+    /// 次の呼出しで閉じる。待ち行列が埋まった場合に待たされるのは、当該 plugin の
+    /// 接続だけである。
     fn drain(&self, id: &str) {
-        while let Ok(Some(stream)) = self.accept(id) {
+        for _ in 0..MAX_DRAIN {
+            let Ok(Some(stream)) = self.accept(id) else {
+                break;
+            };
             let _ = stream.shutdown(Shutdown::Both);
         }
     }
