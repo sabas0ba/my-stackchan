@@ -577,7 +577,7 @@ C1 の範囲外であり、Host 側の対応する plugin を作る段階で実�
 | P4 | 画像領域 | 外部 plugin からの画像が Overlay に表示される | 実装済み |
 | P5 | plugin ごとのコンテナ分離 (socket での接続、`plugin-run`、起動計画、`container.sh`) | 同梱の plugin が plugin ごとのコンテナで動作する。plugin のコンテナから設定ディレクトリと外部への通信に到達できない | 実装済み |
 | P6 | 接続先の許可 (`net.allow`、中継、plugin API 版 3 の `endpoints`) | 列挙した宛先にだけ plugin から接続できる | 実装済み |
-| C1 | Client 側の plugin の枠組み (登録、Panel、画面と入力の配分、長押し) とタイマー | host を接続せずに、タイマーの設定・開始・補正・完了の表示ができる。host の表示と同時に使っても、互いの内容を壊さない | 実装済み。実機での確認は未実施 |
+| C1 | Client 側の plugin の枠組み (登録、Panel、画面と入力の配分、長押し) とタイマー | host を接続せずに、タイマーの設定・開始・補正・完了の表示ができる。host の表示と同時に使っても、互いの内容を壊さない | 実装済み。host を接続しない状態での動作を実機で確認した (2026-10-06)。daemon との同時使用は未確認 |
 | C2 | host との連携 (plugin 宛てのデータ、Client 側の Card を含めた配分) | Host 側の plugin からタイマーを設定できる。daemon の `Visibility` が実際の表示と一致する | 未着手 |
 
 Claude / Codex 使用率は P3 の最初の外部 plugin とする。design.md の collector (Phase 3) は本機構の plugin として実装し、host への組込みは行わない。取得元のログ形式に依存する部分をリポジトリ外へ分離するためである。
