@@ -1,5 +1,7 @@
 //! Slot の内容と単調時計に基づく表示期限。描画の成功後に状態を確定する。
 
+use crate::client::{Clients, View};
+use crate::touch::Gesture;
 use embedded_graphics::{pixelcolor::Rgb565, prelude::DrawTarget};
 use protocol::{
     Card, Emote, Event, Expression, EyeStyle, Gaze, ImageBegin, InputMode, MAX_IMAGE_REGION_BYTES,
@@ -36,6 +38,8 @@ pub enum Content {
     Card(Card),
     /// 画像領域。画素は Controller の ImagePixels にあり、表示状態には領域だけを持つ。
     Image(ImageRegion),
+    /// Client 側の plugin の操作画面。host からは置けない。
+    Panel(crate::client::Panel),
 }
 
 /// 画面上の画像領域。
@@ -199,6 +203,11 @@ pub struct Controller {
     startup: bool,
     image: ImagePixels,
     pending_image: Option<PendingImage>,
+    clients: Clients,
+    /// 描画済みの Client 側の表示。`state` (host の内容) とは別に持ち、描画時に重ねる。
+    /// host の内容と期限を、Client 側の表示で失わないためである。
+    local: View,
+    next_client_ms: u64,
 }
 
 impl Default for Controller {
@@ -213,8 +222,37 @@ impl Default for Controller {
             startup: true,
             image: ImagePixels::default(),
             pending_image: None,
+            clients: Clients::default(),
+            local: View::default(),
+            next_client_ms: 0,
         }
     }
+}
+
+/// Client 側の plugin を呼び、表示の変化を調べる間隔。表示の最小の刻みは 1 秒であり、
+/// 毎周 (約 1 ms) 調べる必要は無い。
+const CLIENT_POLL_MS: u64 = 100;
+
+/// host の内容に Client 側の表示を重ねた、描画する内容を返す。
+///
+/// Client 側の Card は上の帯に、Panel は Overlay に置く。下の帯は host の通知が出るため
+/// 使わない。Panel を host の Overlay より手前に出すのは、利用者の操作で開くものであり、
+/// 操作中に隠れないようにするためである。
+fn compose(state: &DisplayState, local: &View) -> DisplayState {
+    let mut shown = state.clone();
+    let entry = |content| {
+        Some(Entry {
+            content,
+            deadline_ms: None,
+        })
+    };
+    if let Some((_, card)) = &local.card {
+        shown.slots[slot_index(Slot::BannerTop)] = entry(Content::Card(card.clone()));
+    }
+    if let Some((_, panel)) = &local.panel {
+        shown.slots[slot_index(Slot::Overlay)] = entry(Content::Panel(panel.clone()));
+    }
+    shown
 }
 
 // 固定周期内の間隔を変え、通信が途絶えても顔が静止し続けないようにする。
@@ -393,7 +431,7 @@ impl Controller {
         // Overlay の背後の期限切れも、再表示の前に除去する。
         next.expire(now_ms);
         let blink = blink_at(now_ms);
-        crate::renderer::draw_state_with_image(display, &next, &self.image.pixels, blink)
+        self.draw(display, &next, blink)
             .map_err(HandleError::Draw)?;
         self.state = next;
         self.blink = blink;
@@ -429,7 +467,7 @@ impl Controller {
         );
         next.expire(now_ms);
         let blink = blink_at(now_ms);
-        crate::renderer::draw_state_with_image(display, &next, &self.image.pixels, blink)?;
+        self.draw(display, &next, blink)?;
         self.state = next;
         self.blink = blink;
         self.startup = false;
@@ -442,19 +480,118 @@ impl Controller {
         now_ms: u64,
         display: &mut D,
     ) -> Result<(), D::Error> {
+        let mut clients_changed = false;
+        if now_ms >= self.next_client_ms {
+            self.next_client_ms = now_ms + CLIENT_POLL_MS;
+            self.clients.tick(now_ms);
+            clients_changed = self.sync_clients(now_ms);
+        }
         let blink = blink_at(now_ms);
-        if self.state.has_expired(now_ms) || (self.state.can_blink() && blink != self.blink) {
+        if clients_changed
+            || self.state.has_expired(now_ms)
+            || (self.state.can_blink() && blink != self.blink)
+        {
             let mut next = self.state.clone();
             next.expire(now_ms);
             if self.startup {
                 crate::renderer::draw_startup_with_blink(display, blink)?;
             } else {
-                crate::renderer::draw_state_with_image(display, &next, &self.image.pixels, blink)?;
+                self.draw(display, &next, blink)?;
             }
             self.state = next;
             self.blink = blink;
         }
         Ok(())
+    }
+
+    /// host の内容 `state` に Client 側の表示を重ねて描く。
+    fn draw<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        state: &DisplayState,
+        blink: bool,
+    ) -> Result<(), D::Error> {
+        let shown = compose(state, &self.local);
+        crate::renderer::draw_state_with_image(display, &shown, &self.image.pixels, blink)
+    }
+
+    /// Client 側の plugin が求める表示と表情を取り込む。描き直しが要る場合に真を返す。
+    fn sync_clients(&mut self, now_ms: u64) -> bool {
+        let mut changed = false;
+        if let Some(emote) = self.clients.take_emote()
+            && emote.validate().is_ok()
+        {
+            self.state.set_emote(emote, now_ms);
+            changed = true;
+        }
+        let view = self.clients.view(now_ms);
+        if view != self.local {
+            // 起動確認画面は、最初の表示の要求で終える (host からの表示命令と同じ扱い)。
+            self.startup = false;
+            self.local = view;
+            changed = true;
+        }
+        changed
+    }
+
+    /// Client 側への入力の後、表示を直ちに更新する。次の周期を待つと、操作への反応が
+    /// 最大で `CLIENT_POLL_MS` 遅れる。
+    fn refresh_clients<D: DrawTarget<Color = Rgb565>>(
+        &mut self,
+        now_ms: u64,
+        display: &mut D,
+    ) -> Result<(), D::Error> {
+        if self.sync_clients(now_ms) {
+            self.blink = blink_at(now_ms);
+            self.draw(display, &self.state, self.blink)?;
+        }
+        Ok(())
+    }
+
+    /// タッチの判定を振り分ける。host へ送る Event があれば返す。
+    ///
+    /// Panel と Client 側の Card へのタップは plugin に渡し、host へは送らない。それ以外は
+    /// 従来どおり、`Demo` では表情デモを進め、`Forward` では host へ送る。長押しは
+    /// Client 側の plugin を開く操作であり、host 側の入力 (タップ) と重ならない。
+    pub fn gesture<D: DrawTarget<Color = Rgb565>>(
+        &mut self,
+        gesture: Gesture,
+        now_ms: u64,
+        display: &mut D,
+    ) -> Result<Option<Event>, D::Error> {
+        let (x, y) = match gesture {
+            Gesture::LongPress => {
+                self.clients.open(now_ms);
+                self.refresh_clients(now_ms, display)?;
+                return Ok(None);
+            }
+            Gesture::Tap { x, y } => (x, y),
+        };
+        let panel = self.local.panel.as_ref();
+        if let Some((owner, buttons)) = panel.map(|(owner, panel)| (*owner, panel.buttons.len())) {
+            // Panel は画面全体を占める。ボタンの外のタップも、背後の表示には渡さない。
+            if let Some(index) = crate::client::button_at(x, y, buttons) {
+                self.clients.button(owner, index, now_ms);
+                self.refresh_clients(now_ms, display)?;
+            }
+            return Ok(None);
+        }
+        // host の Overlay が出ている間は帯が隠れているため、Client 側の Card には渡さない。
+        if let Some(plugin) = self.local.card.as_ref().map(|(plugin, _)| *plugin)
+            && y < BANNER_HEIGHT
+            && self.state.get(Slot::Overlay).is_none()
+        {
+            self.clients.card_tap(plugin, now_ms);
+            self.refresh_clients(now_ms, display)?;
+            return Ok(None);
+        }
+        match self.input_mode {
+            InputMode::Demo => {
+                self.tap(now_ms, display)?;
+                Ok(None)
+            }
+            InputMode::Forward => Ok(Some(self.hit(y))),
+        }
     }
 }
 
@@ -1011,5 +1148,201 @@ mod tests {
         invalid(controller.handle(Message::ImageEnd { id: 1 }, 0, &mut display));
         invalid(controller.handle(image_rows(1, 1, 1, 4, 0), 0, &mut display));
         assert_eq!(display.pixels, 0, "開始と行の受信は描画しない");
+    }
+
+    /// Client 側の plugin (タイマー) と host の表示・入力の配分。
+    mod clients {
+        use super::*;
+        use crate::client::button_frame;
+
+        const SETTING_PLUS_1M: usize = 2;
+        const SETTING_START: usize = 4;
+        const SETTING_CLOSE: usize = 5;
+        const RUNNING_STOP: usize = 2;
+        const RUNNING_CLOSE: usize = 3;
+
+        fn press(index: usize) -> Gesture {
+            let center = button_frame(index).center();
+            Gesture::Tap {
+                x: center.x as u16,
+                y: center.y as u16,
+            }
+        }
+
+        /// 描画される内容。host の内容に Client 側の表示を重ねたもの。
+        fn shown(controller: &Controller, slot: Slot) -> Option<Content> {
+            compose(&controller.state, &controller.local)
+                .get(slot)
+                .map(|entry| entry.content.clone())
+        }
+
+        fn host_text(controller: &Controller, slot: Slot) -> Option<&str> {
+            match &controller.state.get(slot)?.content {
+                Content::Text(text) => Some(text.as_str()),
+                _ => None,
+            }
+        }
+
+        /// 長押しから 1 分のタイマーを開始する。
+        fn start_timer(controller: &mut Controller, display: &mut Display, now_ms: u64) {
+            for gesture in [
+                Gesture::LongPress,
+                press(SETTING_PLUS_1M),
+                press(SETTING_START),
+            ] {
+                assert_eq!(controller.gesture(gesture, now_ms, display), Ok(None));
+            }
+        }
+
+        fn tap_event(slot: Slot) -> Option<Event> {
+            Some(Event::Tap {
+                slot: Some(slot),
+                card: None,
+                action: None,
+            })
+        }
+
+        #[test]
+        fn panel_opens_in_front_of_host_overlay_and_keeps_its_content_and_expiry() {
+            let mut controller = Controller::default();
+            let mut display = Display::default();
+            controller
+                .handle(text(Slot::Overlay, 5, "host"), 0, &mut display)
+                .unwrap();
+            controller
+                .handle(Message::InputMode(InputMode::Forward), 0, &mut display)
+                .unwrap();
+
+            assert_eq!(
+                controller.gesture(Gesture::LongPress, 0, &mut display),
+                Ok(None)
+            );
+            assert!(matches!(
+                shown(&controller, Slot::Overlay),
+                Some(Content::Panel(_))
+            ));
+            assert_eq!(host_text(&controller, Slot::Overlay), Some("host"));
+
+            // Panel の上のタップは、ボタンの外でも host へ送らない。
+            assert_eq!(
+                controller.gesture(Gesture::Tap { x: 160, y: 30 }, 0, &mut display),
+                Ok(None)
+            );
+            // host の内容は Panel の背後でも期限で消える。
+            controller.tick(5_000, &mut display).unwrap();
+            assert_eq!(host_text(&controller, Slot::Overlay), None);
+            assert_eq!(
+                controller.gesture(press(SETTING_CLOSE), 5_000, &mut display),
+                Ok(None)
+            );
+            assert_eq!(shown(&controller, Slot::Overlay), None);
+        }
+
+        #[test]
+        fn running_card_takes_the_top_banner_and_host_content_returns() {
+            let mut controller = Controller::default();
+            let mut display = Display::default();
+            for (slot, content) in [(Slot::BannerTop, "top"), (Slot::BannerBottom, "bottom")] {
+                controller
+                    .handle(text(slot, 0, content), 0, &mut display)
+                    .unwrap();
+            }
+            controller
+                .handle(Message::InputMode(InputMode::Forward), 0, &mut display)
+                .unwrap();
+            start_timer(&mut controller, &mut display, 0);
+            controller.tick(100, &mut display).unwrap();
+
+            assert!(matches!(
+                shown(&controller, Slot::BannerTop),
+                Some(Content::Card(_))
+            ));
+            assert!(matches!(
+                shown(&controller, Slot::BannerBottom),
+                Some(Content::Text(_))
+            ));
+            assert_eq!(host_text(&controller, Slot::BannerTop), Some("top"));
+
+            // 上の帯のタップはタイマーに渡り、下の帯のタップは host へ送る。
+            let top = Gesture::Tap { x: 160, y: 20 };
+            assert_eq!(controller.gesture(top, 200, &mut display), Ok(None));
+            assert!(controller.local.panel.is_some());
+            assert_eq!(
+                controller.gesture(press(RUNNING_CLOSE), 200, &mut display),
+                Ok(None)
+            );
+            assert_eq!(
+                controller.gesture(Gesture::Tap { x: 160, y: 200 }, 200, &mut display),
+                Ok(tap_event(Slot::BannerBottom))
+            );
+
+            // host の Overlay が帯を隠している間は、同じ位置のタップを host へ送る。
+            controller
+                .handle(text(Slot::Overlay, 0, "over"), 300, &mut display)
+                .unwrap();
+            assert_eq!(
+                controller.gesture(top, 300, &mut display),
+                Ok(tap_event(Slot::Overlay))
+            );
+            controller
+                .handle(Message::ClearSlot(Slot::Overlay), 300, &mut display)
+                .unwrap();
+
+            // 停止すると、host が上の帯に置いた内容が再び表示される。
+            assert_eq!(controller.gesture(top, 400, &mut display), Ok(None));
+            assert_eq!(
+                controller.gesture(press(RUNNING_STOP), 400, &mut display),
+                Ok(None)
+            );
+            assert!(matches!(
+                shown(&controller, Slot::BannerTop),
+                Some(Content::Text(text)) if text.as_str() == "top"
+            ));
+        }
+
+        #[test]
+        fn host_clear_does_not_stop_the_timer() {
+            let mut controller = Controller::default();
+            let mut display = Display::default();
+            start_timer(&mut controller, &mut display, 0);
+            controller
+                .handle(Message::Clear, 100, &mut display)
+                .unwrap();
+            assert!(matches!(
+                shown(&controller, Slot::BannerTop),
+                Some(Content::Card(_))
+            ));
+        }
+
+        #[test]
+        fn completion_moves_the_head_and_other_taps_keep_the_demo() {
+            let mut controller = Controller::default();
+            let mut display = Display::default();
+            assert!(controller.startup);
+            start_timer(&mut controller, &mut display, 0);
+            assert!(!controller.startup, "plugin の表示で起動確認画面を終える");
+
+            // 顔の領域のタップは、従来どおり表情デモを進める。
+            assert_eq!(
+                controller.gesture(Gesture::Tap { x: 160, y: 120 }, 1_000, &mut display),
+                Ok(None)
+            );
+            assert_eq!(controller.demo_index, Some(0));
+
+            controller.tick(60_000, &mut display).unwrap();
+            // 完了は Panel ではなく、帯の Card と表情・首の動きで知らせる (顔を隠さない)。
+            assert!(controller.local.card.is_some());
+            assert!(controller.local.panel.is_none());
+            assert_ne!(
+                controller.actuator_target(),
+                crate::behavior::ActuatorTarget::NEUTRAL
+            );
+            // 帯の Card のタップで完了の表示を消す。
+            assert_eq!(
+                controller.gesture(Gesture::Tap { x: 160, y: 20 }, 60_500, &mut display),
+                Ok(None)
+            );
+            assert_eq!(controller.local, View::default());
+        }
     }
 }

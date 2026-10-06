@@ -386,7 +386,34 @@ fn draw_content<D: DrawTarget<Color = Rgb565>>(
         Content::Text(text) => draw_text(display, text, area),
         Content::Card(card) => draw_card(display, card, area),
         Content::Image(region) => draw_region_image(display, image, *region),
+        Content::Panel(panel) => draw_panel(display, panel),
     }
+}
+
+/// Client 側の plugin の操作画面を描く。文字の行の下に、枠付きのボタンを並べる。
+/// ボタンの位置は `client::button_frame` で決まり、タップの照合と共用する。
+fn draw_panel<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    panel: &crate::client::Panel,
+) -> Result<(), D::Error> {
+    for (index, line) in panel.lines.iter().enumerate() {
+        draw_cell_label(
+            display,
+            line,
+            Rectangle::new(Point::new(10, 10 + index as i32 * 24), Size::new(300, 20)),
+        )?;
+    }
+    for (index, label) in panel.buttons.iter().enumerate() {
+        let frame = crate::client::button_frame(index);
+        frame
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 2))
+            .draw(display)?;
+        // ラベルを枠の中央に置く。文字は 10×20 px で、ラベルの長さは枠の幅に収まる。
+        let width = label.chars().count() as u32 * 10;
+        let origin = frame.center() - Point::new(width as i32 / 2, 10);
+        draw_cell_label(display, label, Rectangle::new(origin, Size::new(width, 20)))?;
+    }
+    Ok(())
 }
 
 /// 画像領域を描く。画素が領域に足りない場合は描かない (領域は黒のまま)。
