@@ -177,7 +177,7 @@ case "$cmd" in
     volumes=()
     stop_plugins() {
       if [ ${#started[@]} -gt 0 ]; then
-        "$engine" rm -f -t 0 "${started[@]}" >/dev/null 2>&1 || true
+        "$engine" rm -f "${started[@]}" >/dev/null 2>&1 || true
       fi
       if [ ${#volumes[@]} -gt 0 ]; then
         "$engine" volume rm -f "${volumes[@]}" >/dev/null 2>&1 || true
@@ -194,7 +194,7 @@ case "$cmd" in
       volume="stackchan-run-$id"
       container="stackchan-plugin-$id"
       # 前回の起動が異常終了して残したものを取り除く。
-      "$engine" rm -f -t 0 "$container" >/dev/null 2>&1 || true
+      "$engine" rm -f "$container" >/dev/null 2>&1 || true
       "$engine" volume rm -f "$volume" >/dev/null 2>&1 || true
       "$engine" volume create "$volume" >/dev/null
       volumes+=("$volume")
@@ -233,10 +233,15 @@ case "$cmd" in
       if [ -n "${STACKCHAN_RELAY_NETWORK:-}" ]; then
         relay_network=(--network "$STACKCHAN_RELAY_NETWORK")
       fi
-      "$engine" rm -f -t 0 stackchan-relay >/dev/null 2>&1 || true
+      # relay.rs は宛先ごとに待受け 1 本と、最大 4 接続それぞれに 2 本のスレッドを
+      # 使う。main と終了直前のスレッド等の余裕を 16 本取り、最大構成でも起動できる
+      # 上限にする。relay_routes は --route と値の組である。
+      relay_route_count=$((${#relay_routes[@]} / 2))
+      relay_pids=$((16 + relay_route_count * (1 + 2 * 4)))
+      "$engine" rm -f stackchan-relay >/dev/null 2>&1 || true
       "$engine" run -d --name stackchan-relay \
         "${relay_network[@]}" --read-only --cap-drop=all --security-opt no-new-privileges \
-        --pids-limit 64 --memory 256m \
+        --pids-limit "$relay_pids" --memory 256m \
         "${relay_volumes[@]}" \
         -v "$stackchan_bin:/stackchan:ro" \
         --entrypoint /stackchan "$image" \
