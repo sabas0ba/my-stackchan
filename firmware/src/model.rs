@@ -86,9 +86,16 @@ struct PresenceEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum EmoteSource {
+    Host,
+    Client,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct EmoteEntry {
     value: Emote,
     deadline_ms: u64,
+    source: EmoteSource,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -137,10 +144,11 @@ impl DisplayState {
         });
     }
 
-    fn set_emote(&mut self, value: Emote, now_ms: u64) {
+    fn set_emote(&mut self, value: Emote, now_ms: u64, source: EmoteSource) {
         self.emote = Some(EmoteEntry {
             deadline_ms: now_ms.saturating_add(u64::from(value.duration_ms)),
             value,
+            source,
         });
     }
 
@@ -345,7 +353,16 @@ impl Controller {
                     version: protocol::VERSION,
                 });
             }
-            Message::Clear => next = DisplayState::default(),
+            Message::Clear => {
+                // 表情は後着優先のまま、host の Clear では Client の合図を消さない。
+                // 期限も引き継ぎ、Clear の受信によって合図を延長しない。
+                next = DisplayState {
+                    emote: next
+                        .emote
+                        .filter(|entry| entry.source == EmoteSource::Client),
+                    ..DisplayState::default()
+                };
+            }
             Message::ClearSlot(slot) => next.slots[slot_index(slot)] = None,
             Message::InputMode(mode) => {
                 // 表示を変えないため描画せず、PitchTrim と同様に通し番号だけを進める。
@@ -371,7 +388,7 @@ impl Controller {
             Message::Presence(presence) => next.set_presence(presence, now_ms),
             Message::Emote(emote) => {
                 emote.validate().map_err(|_| HandleError::InvalidFace)?;
-                next.set_emote(emote, now_ms);
+                next.set_emote(emote, now_ms, EmoteSource::Host);
             }
             Message::PitchTrim(trim) => {
                 trim.validate().map_err(|_| HandleError::InvalidFace)?;
@@ -521,7 +538,7 @@ impl Controller {
         if let Some(emote) = self.clients.take_emote()
             && emote.validate().is_ok()
         {
-            self.state.set_emote(emote, now_ms);
+            self.state.set_emote(emote, now_ms, EmoteSource::Client);
             changed = true;
         }
         let view = self.clients.view(now_ms);
@@ -1312,6 +1329,70 @@ mod tests {
                 shown(&controller, Slot::BannerTop),
                 Some(Content::Card(_))
             ));
+        }
+
+        #[test]
+        fn host_clear_preserves_completion_emote_without_extending_its_deadline() {
+            let mut controller = Controller::default();
+            let mut display = Display::default();
+            start_timer(&mut controller, &mut display, 0);
+            controller.tick(60_000, &mut display).unwrap();
+            let emote = *controller.state.emote().unwrap();
+            let target = controller.actuator_target();
+            assert_ne!(target, crate::behavior::ActuatorTarget::NEUTRAL);
+            controller
+                .handle(text(Slot::BannerBottom, 0, "host"), 60_100, &mut display)
+                .unwrap();
+            controller
+                .handle(Message::Clear, 60_200, &mut display)
+                .unwrap();
+            assert_eq!(controller.state.emote(), Some(&emote));
+            assert_eq!(controller.actuator_target(), target);
+            assert!(controller.local.card.is_some());
+            assert_eq!(host_text(&controller, Slot::BannerBottom), None);
+
+            // 完了表示を閉じ、plugin による更新を止める。Clear では元の期限を延ばさない。
+            controller
+                .gesture(Gesture::Tap { x: 160, y: 20 }, 60_300, &mut display)
+                .unwrap();
+            controller.tick(61_999, &mut display).unwrap();
+            assert_eq!(controller.state.emote(), Some(&emote));
+            controller.tick(62_000, &mut display).unwrap();
+            assert_eq!(controller.state.emote(), None);
+            assert_eq!(
+                controller.actuator_target(),
+                crate::behavior::ActuatorTarget::NEUTRAL
+            );
+        }
+
+        #[test]
+        fn emotes_keep_last_writer_priority_and_clear_removes_host_emotes() {
+            let mut controller = Controller::default();
+            let mut display = Display::default();
+            start_timer(&mut controller, &mut display, 0);
+            controller.tick(60_000, &mut display).unwrap();
+            let host_emote = Emote {
+                expression: Expression::Calm,
+                gaze: Gaze::Center,
+                eyes: EyeStyle::Auto,
+                intensity: 10,
+                duration_ms: 10_000,
+            };
+            controller
+                .handle(Message::Emote(host_emote), 60_100, &mut display)
+                .unwrap();
+            assert_eq!(controller.state.emote(), Some(&host_emote));
+            controller.tick(61_000, &mut display).unwrap();
+            assert_ne!(controller.state.emote(), Some(&host_emote));
+            assert!(controller.state.emote().is_some());
+            controller
+                .handle(Message::Emote(host_emote), 61_100, &mut display)
+                .unwrap();
+            controller
+                .handle(Message::Clear, 61_200, &mut display)
+                .unwrap();
+            assert_eq!(controller.state.emote(), None);
+            assert!(controller.local.card.is_some());
         }
 
         #[test]

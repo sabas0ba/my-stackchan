@@ -493,7 +493,7 @@ Panel を Card と別に設けるのは、Card の行 (高さ 20 px、画面上�
 | Panel | Overlay に出す。host の Overlay (通知、画像) より手前に出す。利用者の操作で開くものであり、操作中に隠れないようにするためである |
 | 複数の plugin | Card を出す plugin が複数ある場合は、上の帯に 5 秒ごとに順に出す。Panel は同時に 1 つとし、Panel が開いている間の長押しは無視する |
 | 表情 | host の Emote と同じ扱いとし、後から届いたものが置き換える |
-| host の `Clear` | host が置いた内容だけを消す。Client 側の表示と plugin の状態は変えない |
+| host の `Clear` | host が置いた内容だけを消す。Client 側の表示・表情と plugin の状態は変えない。Client 側の表情の期限も延長しない |
 | 起動確認画面 | Client 側の plugin が最初に表示を求めた時点で終える (host の最初の表示命令と同じ扱い) |
 
 C1 では host は Client 側の表示を知らない。Client 側の Card が出ている間、daemon は上の帯に置いた Card が見えていると判断したままになる (`Visibility` が実際と食い違う)。C2 で、Client 側の Card の有無を host に通知し、daemon の scheduler が配分に含めるようにする。
