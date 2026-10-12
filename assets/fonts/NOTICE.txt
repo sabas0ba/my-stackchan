@@ -1,0 +1,29 @@
+my-stackchan Japanese bitmap subset
+
+Source: GNU Unifont JP 16.0.04
+https://unifoundry.com/pub/unifont/unifont-16.0.04/font-builds/unifont_jp_sample-16.0.04.hex.gz
+
+Upstream copyright notice (src/hex2otf.h, version 16.0.04):
+Copyright © 1998-2022 Roman Czyborra, Paul Hardy,
+Qianqian Fang, Andrew Miller, Johnnie Weaver, David Corbett,
+Nils Moskopp, Rebecca Bettencourt, et al.
+
+The font glyphs are distributed under SIL Open Font License 1.1,
+with the jiskan16 portions in the Public Domain, as described in COPYING.
+OFL-1.1.txt and the upstream README are included without modification.
+Upstream also offers GPL-2.0-or-later with the font embedding exception;
+this project uses the OFL distribution option for the font data.
+
+2026-10-12: my-stackchan contributors selected the ranges documented in
+docs/design.md and converted the glyphs to fixed-length bitmap records.
+The resulting subset is named "my-stackchan Japanese bitmap subset".
+Glyph pixels are unchanged; no upstream executable or build script is used.
+The subset remains under the font's license, independently of project code.
+
+Source SHA-256:
+38b9e2888e4ad555dc71fee73676882bffca5b11ed174dacbecb9a5150c3f3fb
+japanese.bin SHA-256:
+13ac11716b95fbad709d4eb4ffee99c1d3f28cf561a59463d492d3a9f6e44e
+
+Regenerate: bash scripts/font.sh generate
+Verify: bash scripts/font.sh check

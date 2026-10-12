@@ -17,6 +17,7 @@ protocol = { path = "../crates/protocol", default-features = false }
 
 embedded-hal = "1.0.0"
 embedded-hal-bus = "0.3.0"
+embedded-sdmmc = { version = "=0.10.0", default-features = false }
 embedded-graphics = "0.8.2"
 mipidsi = "0.10.0"
 static_cell = "2.1.1"

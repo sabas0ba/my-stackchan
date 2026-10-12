@@ -7,13 +7,36 @@ use embedded_graphics::{
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{Circle, Line, PrimitiveStyle, Rectangle},
-    text::{Baseline, Text},
+    primitives::{Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
+    text::Text,
 };
 use protocol::{Activity, Card, Element, Expression, EyeStyle, Gaze, ImageData, Presence, Slot};
 
 const IMAGE_WIDTH: usize = 96;
 const IMAGE_HEIGHT: usize = 16;
+
+/// 顔の下部に短い吹き出しを置く。上下の帯と操作画面の配分は Controller が決める。
+pub fn draw_bubble<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    text: &str,
+) -> Result<(), D::Error> {
+    Rectangle::new(Point::new(24, 166), Size::new(272, 24))
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .stroke_color(Rgb565::WHITE)
+                .stroke_width(1)
+                .fill_color(Rgb565::BLACK)
+                .build(),
+        )
+        .draw(display)?;
+    crate::font::draw(
+        display,
+        text,
+        Rectangle::new(Point::new(32, 168), Size::new(256, 20)),
+        false,
+    )?;
+    Ok(())
+}
 
 // RGB と白の順序から、色順・RGB565 のバイト順を実機で確認できる。
 const fn color_bars() -> [u8; IMAGE_WIDTH * IMAGE_HEIGHT * 2] {
@@ -408,8 +431,8 @@ fn draw_panel<D: DrawTarget<Color = Rgb565>>(
         frame
             .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 2))
             .draw(display)?;
-        // ラベルを枠の中央に置く。文字は 10×20 px で、ラベルの長さは枠の幅に収まる。
-        let width = label.chars().count() as u32 * 10;
+        // 半角と全角の実際の幅で中央に置く。
+        let width = crate::font::text_width(label).min(frame.size.width.saturating_sub(8));
         let origin = frame.center() - Point::new(width as i32 / 2, 10);
         draw_cell_label(display, label, Rectangle::new(origin, Size::new(width, 20)))?;
     }
@@ -505,35 +528,7 @@ fn draw_cell_label<D: DrawTarget<Color = Rgb565>>(
     text: &str,
     cell: Rectangle,
 ) -> Result<(), D::Error> {
-    let mut clipped = display.clipped(&cell);
-    for (column, ch) in text.chars().filter(|ch| !ch.is_control()).enumerate() {
-        if column as u32 >= cell.size.width / 10 {
-            break;
-        }
-        draw_glyph(
-            &mut clipped,
-            ch,
-            cell.top_left + Point::new(column as i32 * 10, 0),
-        )?;
-    }
-    Ok(())
-}
-
-fn draw_glyph<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D,
-    ch: char,
-    point: Point,
-) -> Result<(), D::Error> {
-    let glyph = if ch.is_ascii() { ch as u8 } else { b'?' };
-    let bytes = [glyph];
-    Text::with_baseline(
-        core::str::from_utf8(&bytes).expect("ASCII glyph"),
-        point,
-        MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-        Baseline::Top,
-    )
-    .draw(display)?;
-    Ok(())
+    crate::font::draw(display, text, cell, false)
 }
 
 fn draw_text<D: DrawTarget<Color = Rgb565>>(
@@ -541,36 +536,18 @@ fn draw_text<D: DrawTarget<Color = Rgb565>>(
     text: &str,
     area: Rectangle,
 ) -> Result<(), D::Error> {
-    let mut clipped = display.clipped(&area);
-    let mut column = 0;
-    let mut row = 0;
-    // 10 px の左右余白と 4 px の上下余白。帯は 2 行、Overlay は 11 行。
-    let rows = (area.size.height - 8) / 20;
-    for ch in text.chars() {
-        if ch == '\n' {
-            row += 1;
-            column = 0;
-            continue;
-        }
-        if ch.is_control() {
-            continue;
-        }
-        if column == 30 {
-            row += 1;
-            column = 0;
-        }
-        if row >= rows {
-            break;
-        }
-        // 日本語フォント導入前も UTF-8 のバイト単位で文字を分断しない。
-        draw_glyph(
-            &mut clipped,
-            ch,
-            area.top_left + Point::new(10 + column * 10, 4 + row as i32 * 20),
-        )?;
-        column += 1;
-    }
-    Ok(())
+    crate::font::draw(
+        display,
+        text,
+        Rectangle::new(
+            area.top_left + Point::new(10, 4),
+            Size::new(
+                area.size.width.saturating_sub(20),
+                area.size.height.saturating_sub(8),
+            ),
+        ),
+        true,
+    )
 }
 
 #[cfg(test)]
@@ -871,7 +848,7 @@ mod tests {
         let mut screen = Screen(vec![Rgb565::BLACK; 320 * 240]);
         let mut expected = Screen(vec![Rgb565::BLACK; 320 * 240]);
         draw_text(&mut screen, "A\t\u{1b}日\rB\nC", area).unwrap();
-        draw_text(&mut expected, "A?B\nC", area).unwrap();
+        draw_text(&mut expected, "A日B\nC", area).unwrap();
         assert_eq!(screen.0, expected.0);
         let long = "W".repeat(protocol::MAX_TEXT_BYTES);
         draw_text(&mut screen, &long, area).unwrap();

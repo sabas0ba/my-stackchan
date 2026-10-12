@@ -364,7 +364,7 @@ scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
 ### 表情・視線と PC 状態の実機確認
 
 版 7 の firmware を書き込んでから、次の例で表情・視線と活動状態を送る。
-`status` は PC のジョブやスクリプトから呼び出せる。詳細は ASCII で表示する。
+`status` は PC のジョブやスクリプトから呼び出せる。詳細は日本語も表示できる。
 `status` の既定 TTL は 30 秒、`face` の既定 TTL は無期限である。
 
 ```bash
@@ -393,11 +393,10 @@ scripts/container.sh device target/debug/stackchan pitch-trim --raw-steps -96 --
 `--pitch-trim-file <path>` を付けるか、`STACKCHAN_PITCH_TRIM_FILE` を設定する。
 明示したファイルが存在しない、または値が無効な場合は送信せずエラーにする。
 
-CoreS3 の画面を1回タップするとデモの先頭 `01/12 HAPPY` を表示し、指を離して
-再びタップすると `02/12 FOCUSED` に進む。12番目の後は先頭に戻る。画面下の
-番号と表情名、顔の変化を確認する。PC から `face` / `status` / `text` / `card` /
-`clear` を送るとデモは終了する。タッチデモは USB の Ack 通し番号を増やさない。
-シミュレーションの `demo-01.bmp` から `demo-12.bmp` は同じモデルの順送り描画である。
+CoreS3 の顔をタップすると自律反応を表示し、左右に撫でる操作も区別する。
+長押しで TIMER / SETTINGS のランチャーを開く。タッチ操作は USB の Ack 通し番号を
+増やさない。シミュレーションの `demo-01.bmp` から `demo-12.bmp` は表情一覧の
+描画確認用であり、実機のタップによる順送り操作ではない。
 
 この版は画面上の視線に加え、M5 公式 StackChan K151 のサーボ 2 軸と 12 個の LED を駆動する。
 目標値は X ±30°、Y 30–60°、RGB 各成分 0–63 に制限する。サーボの工場既定ゼロ位置は
@@ -406,7 +405,8 @@ X=460、Y=620、UART は GPIO6/7・1 Mbaud、LED 拡張器は I²C 0x6F を使�
 ボディ側の 5 V は CoreS3 の AW9523B で BOOST_EN (P1_7)、次に BUS_OUT_EN (P0_1) を
 有効化して供給する。この順序は [M5 公式 ESPHome 電源構成](https://docs.m5stack.com/en/homeassistant/devices/stackchan) に従う。
 拡張器が見つからない場合はサーボ・LED を有効にせず、画面と USB 通信は維持する。
-起動直後はサーボを動かさず、最初の Presence / Emote から目標値を送る。
+Presence / Emote または自律反応からサーボ目標値を送る。自律動作が有効な場合は
+host が接続されていなくても首が動く。
 
 ### 静的検査・単体テスト
 
@@ -446,6 +446,59 @@ scripts/container.sh build                                                   # �
 ```
 
 `.work/cargo` に registry の cache が残っても、置き換えが有効な間は参照されない。`make audit` (cargo-deny) は yank の確認に crates.io の index を要するため、置き換えの無い `.work/cargo-online` を `CARGO_HOME` として実行する。
+
+## 本体の自律動作と microSD 設定
+
+顔を長押しし、SETTINGS を選択する。AUTO / TEXT / MOVE / LED を切り替え、NEXT で
+TOUCH / SENSE / DARK と動作頻度を変更する。変更は即時反映され、SAVE で SD に保存する。
+2 ページ目の MORE から表現設定を開く。「表現」は首・LED の反応強度、「発話」は
+吹き出しの最小間隔を切り替える。表現は弱 / 中 / 強、発話は少 / 中 / 多。
+このページでも SAVE できる。既存の SD 設定はそのまま読み込める。
+OFF にした設定は自律動作に適用される。host やタイマーの明示的な通知は対象外。
+
+FAT16 / FAT32 の第 1 パーティションのルートに `STKCN.CFG` を作成し、旧設定を
+`STKCN.BAK` に保持する。exFAT は対象外。SD を挿入していない場合も操作できるが、
+設定は電源を切ると既定値に戻る。保存に成功した場合は `Saved to SD` と表示する。
+起動時の主設定の読込に失敗し、バックアップが有効な場合は `Loaded SD backup / SAVE`
+と表示する。保存中はカードを抜かない。カードのフォーマット機能はない。
+
+PC で編集する際の既定値（全項目を必須とする）:
+
+```ini
+version=2
+enabled=true
+speech=true
+motion=true
+led=true
+touch=true
+sensors=true
+dark_quiet=true
+pace=normal
+expression=lively
+speech_pace=normal
+```
+
+`pace`、`expression`、`speech_pace` は `quiet` / `normal` / `lively`。
+`expression` は強度 10 / 20 / 30、`speech_pace` は発話最小間隔 30 / 8 / 3.5 秒に対応する。
+発話は日本語の吹き出し表示であり、音声は出さない。
+実機の受入確認は次の順に行う。
+
+1. host の送信を止め、待機中の表情・視線・首と吹き出しを確認する。
+2. 顔のタップ・撫で・長押しが区別され、設定画面を開けることを確認する。
+3. 各出力と入力の OFF、動作頻度、近接と暗所の反応を確認する。
+4. 設定を SAVE し、再起動後に維持されることを確認する。
+5. SD を抜いた状態でも起動・設定変更でき、SAVE の失敗表示後も操作できることを確認する。
+
+`make simulate` は自律反応と設定画面の BMP も `.work/simulation/` に出力する。
+
+日本語の Text / Card は既存の CLI から UTF-8 のまま送れる。
+例: `scripts/container.sh device target/debug/stackchan text --slot overlay 'こんにちは。日本語の表示確認です。'`。
+収録外の文字（絵文字や一部の人名漢字など）は `□` で表示する。全文が領域に収まらない
+場合は省略記号を付ける。日本語フォントに microSD は不要。
+2026-10-12 に承認を受けて `f09eb6a` を CoreS3 へ書き込み、USB 実機結合テスト
+5 件が成功した。日本語の上下帯への表示要求も Ack を確認した。
+利用者の実機操作により、日本語の字形、タップ・撫での表情遷移と吹き出し、
+新しい表現・発話設定の保存と再起動後の復元も確認済み。
 
 ## 固定の更新
 

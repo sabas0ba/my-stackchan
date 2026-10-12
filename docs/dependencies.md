@@ -108,8 +108,46 @@ host CLI を `x86_64-pc-windows-gnu` 向けに cross build するため ([plugin
 - windows_x86_64_gnu は構築済みの import library `lib/libwindows.0.52.0.a` (12.7 MB) を同梱する。ソースから再生成できない配布物であり、crate の checksum による固定のみが同一性の根拠となる。Windows の API への import 記述だけを含む想定であるが、内容の独立した検証は行っていない
 - 生成された `stackchan.exe` の import table は Windows 標準の DLL (KERNEL32、msvcrt、advapi32、cfgmgr32、ntdll、setupapi、bcryptprimitives、api-ms-win-core-synch) のみを参照することを `x86_64-w64-mingw32-objdump -p` で確認した
 
+## microSD 設定保存の追加調査 (2026-10-12)
+
+利用者の承認を得て `embedded-sdmmc =0.10.0` を追加した。`default-features = false` とし、
+SD の SPI 転送と FAT16 / FAT32 の短いファイル名だけを使用する。既存依存の版変更は無い。
+
+| crate | 版 | 公開日 | 用途 |
+| --- | --- | --- | --- |
+| embedded-sdmmc | 0.10.0 | 2026-08-10 | SD / FAT |
+| embedded-sdmmc-types | 0.1.0 | 2026-08-10 | SD レジスタ等の型 |
+| arbitrary-int | 2.2.0 | 2026-08-19 | ビット幅を限定した整数 |
+| bitbybit | 2.0.1 | 2026-07-31 | ビットフィールドの proc macro |
+| hex-literal | 1.1.0 | 2025-10-29 | 定数のバイト表現 |
+
+crates.io の公式 sparse index で公開日・yank なし・`firmware/Cargo.lock` の checksum 一致を
+確認した（通常の crates.io API は 403 のため索引を使用）。すべて公開後 7 日を経過している。
+GitHub Advisory API (`ecosystem=rust`, `affects=<crate>`) は追加 5 crate とも該当なし。
+公開情報の検索ではこれらの配布経路の侵害報告は確認されなかった。
+`make audit` は host / firmware とも advisories・bans・licenses・sources を通過した。
+既存の複数バージョンの警告と `paste` の保守停止に対する既存の例外は維持している。
+追加 5 crate は build script を持たず、bitbybit のみ proc macro を含む。
+
+参照: [上流 v0.10.0](https://github.com/rust-embedded-community/embedded-sdmmc-rs/tree/v0.10.0)、
+[公式索引](https://index.crates.io/em/be/embedded-sdmmc)、
+[GitHub Advisory API](https://api.github.com/advisories?ecosystem=rust&affects=embedded-sdmmc)。
+
 ## 未調査・保留の項目
 
-- GNU Unifont の版と sha256 (Phase 4 で固定する)
 - `cargo fuzz` 用の toolchain (Phase 2)
 - 推移的依存の個別調査は `make audit` の結果に基づいて行う
+
+## 日本語フォントの追加調査 (2026-10-12)
+
+利用者の承認を得て GNU Unifont JP 16.0.04 のフォントデータを追加した。
+新規 crate・外部変換ツールは追加せず、既存の `fontgen` と Nix 環境内の gzip を使用する。
+公式配布元の公開日は 2025-05-31 で、7 日のクールダウンを満たす。
+採用版は最新追従ではなく、今回必要な BMP の日本語字形を備えた固定版とする。
+
+- [原本](https://unifoundry.com/pub/unifont/unifont-16.0.04/font-builds/unifont_jp_sample-16.0.04.hex.gz): SHA-256 `38b9e2888e4ad555dc71fee73676882bffca5b11ed174dacbecb9a5150c3f3fb`
+- 生成物 `assets/fonts/japanese.bin`: 21,696 字、802,752 byte、SHA-256 `13ac11716b95fbad709d4eb4ffee99c1d3f28cf561a59463d492d3a9f6e44e`
+- [同版の配布アーカイブ](https://unifoundry.com/pub/unifont/unifont-16.0.04/unifont-16.0.04.tar.gz) の COPYING / OFL-1.1.txt / README と著作権表示を同梱した。フォントは OFL-1.1 の選択肢で利用し、jiskan16 部分は配布元の記載どおり Public Domain とする。生成サブセットは別名とし、字形自体は変更しない
+- 原本はデータとして解析するだけで、上流スクリプトやバイナリを実行しない。文字コード・長さ・16進文字・重複を検証してから生成する
+- RustSec / GHSA の crate 対象ではない。公開情報の検索では当該フォント配布物の侵害報告は確認されなかった。HTTPS で取得し、その取得物をハッシュ固定したものであり、上流署名の検証は未実施
+- 原本ハッシュと再生成結果の一致を `make check` に含める。Cargo.lock / Nix 環境の変更はない

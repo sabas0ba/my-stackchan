@@ -490,6 +490,7 @@ fn generate(options: &Options) -> io::Result<()> {
         )?;
     }
     generate_timer(options)?;
+    generate_autonomy(options)?;
 
     fs::write(
         options.output_dir.join("index.html"),
@@ -502,6 +503,66 @@ fn gesture(controller: &mut Controller, screen: &mut Screen, gesture: Gesture, n
     controller
         .gesture(gesture, now_ms, screen)
         .expect("screen is infallible");
+}
+
+fn generate_autonomy(options: &Options) -> io::Result<()> {
+    let mut screen = Screen::default();
+    let mut controller = Controller::default();
+    controller.tick(0, &mut screen).unwrap();
+    controller.tick(3_000, &mut screen).unwrap();
+    save_bmp(&options.output_dir.join("34-idle.bmp"), &screen)?;
+    gesture(
+        &mut controller,
+        &mut screen,
+        Gesture::Stroke {
+            x: 80,
+            y: 120,
+            right: true,
+        },
+        4_000,
+    );
+    save_bmp(&options.output_dir.join("35-stroke.bmp"), &screen)?;
+    controller.tick(4_500, &mut screen).unwrap();
+    save_bmp(&options.output_dir.join("39-stroke-settle.bmp"), &screen)?;
+    gesture(&mut controller, &mut screen, Gesture::LongPress, 5_000);
+    save_bmp(&options.output_dir.join("36-launcher.bmp"), &screen)?;
+    for (index, name) in [
+        (1, "37-settings.bmp"),
+        (4, "38-settings-sensors.bmp"),
+        (5, "40-expression-settings.bmp"),
+    ] {
+        let center = client::button_frame(index).center();
+        gesture(
+            &mut controller,
+            &mut screen,
+            Gesture::Tap {
+                x: center.x as u16,
+                y: center.y as u16,
+            },
+            5_000,
+        );
+        save_bmp(&options.output_dir.join(name), &screen)?;
+    }
+    let mut controller = Controller::default();
+    apply(
+        &mut controller,
+        &mut screen,
+        text(
+            Slot::Overlay,
+            "日本語の表示確認\nひらがな・カタカナ・漢字\n半角ABC 123／全角ＡＢＣ\n句読点を行頭に置かず、「括弧の中」も折り返します。\n未収録の絵文字：😀\n長い通知も文字単位で折り返し、表示領域を越える場合は末尾を省略します。",
+            0,
+        ),
+    );
+    save_bmp(&options.output_dir.join("41-japanese-overlay.bmp"), &screen)?;
+    let mut controller = Controller::default();
+    gesture(
+        &mut controller,
+        &mut screen,
+        Gesture::Tap { x: 80, y: 100 },
+        0,
+    );
+    save_bmp(&options.output_dir.join("42-japanese-tap.bmp"), &screen)?;
+    Ok(())
 }
 
 /// Client 側のタイマーの各状態。host の帯と同時に表示し、配分を確かめる。
@@ -525,6 +586,7 @@ fn generate_timer(options: &Options) -> io::Result<()> {
     }
     // 長押しで開き、3 時間 24 分を設定する (+1h を 3 回、+10m を 2 回、+1m を 4 回)。
     gesture(&mut controller, &mut screen, Gesture::LongPress, 0);
+    gesture(&mut controller, &mut screen, press(0), 0);
     for button in [0, 0, 0, 1, 1, 2, 2, 2, 2] {
         gesture(&mut controller, &mut screen, press(button), 0);
     }
@@ -608,6 +670,15 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="31-timer-almost.bmp" width="320" height="240" alt="残りわずかのタイマーと表情"><figcaption>31. Timer: almost done (Curious)</figcaption></figure>
 <figure><img src="32-timer-final.bmp" width="320" height="240" alt="残り 1 分のタイマーと表情"><figcaption>32. Timer: last minute (Surprised)</figcaption></figure>
 <figure><img src="33-timer-done.bmp" width="320" height="240" alt="完了したタイマーと表情"><figcaption>33. Timer: done (Grin)</figcaption></figure>
+<figure><img src="34-idle.bmp" width="320" height="240" alt="自律動作と吹き出し"><figcaption>34. Autonomous idle</figcaption></figure>
+<figure><img src="35-stroke.bmp" width="320" height="240" alt="撫でへの反応"><figcaption>35. Stroke reaction</figcaption></figure>
+<figure><img src="36-launcher.bmp" width="320" height="240" alt="機能選択"><figcaption>36. Launcher</figcaption></figure>
+<figure><img src="37-settings.bmp" width="320" height="240" alt="表現の設定"><figcaption>37. Settings</figcaption></figure>
+<figure><img src="38-settings-sensors.bmp" width="320" height="240" alt="入力と頻度の設定"><figcaption>38. Sensor settings</figcaption></figure>
+<figure><img src="39-stroke-settle.bmp" width="320" height="240" alt="撫でた後の表情"><figcaption>39. 撫でた後の表情</figcaption></figure>
+<figure><img src="40-expression-settings.bmp" width="320" height="240" alt="表現の設定"><figcaption>40. 表現の設定</figcaption></figure>
+<figure><img src="41-japanese-overlay.bmp" width="320" height="240" alt="日本語通知"><figcaption>41. 日本語通知</figcaption></figure>
+<figure><img src="42-japanese-tap.bmp" width="320" height="240" alt="日本語の反応"><figcaption>42. 日本語の反応</figcaption></figure>
 "#
     );
     for index in 1..=my_stackchan_firmware::model::DEMO_FACE_COUNT {
