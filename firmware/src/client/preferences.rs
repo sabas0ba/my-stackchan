@@ -37,7 +37,7 @@ pub struct Preferences {
     pub settings: Settings,
     pub status: StorageStatus,
     pub save_requested: bool,
-    page: bool,
+    page: u8,
     open_until_ms: Option<u64>,
 }
 
@@ -51,7 +51,7 @@ impl Plugin for Preferences {
         }
     }
     fn open(&mut self, now_ms: u64) {
-        self.page = false;
+        self.page = 0;
         self.open_until_ms = Some(now_ms.saturating_add(60_000));
     }
     fn card_tap(&mut self, _now_ms: u64) {}
@@ -62,21 +62,26 @@ impl Plugin for Preferences {
         self.open_until_ms = Some(now_ms.saturating_add(60_000));
         let before = self.settings;
         match (self.page, index) {
-            (false, 0) => self.settings.enabled = !self.settings.enabled,
-            (false, 1) => self.settings.speech = !self.settings.speech,
-            (false, 2) => self.settings.motion = !self.settings.motion,
-            (false, 3) => self.settings.led = !self.settings.led,
-            (false, 4) => self.page = true,
-            (false, 5) => self.open_until_ms = None,
-            (true, 0) => self.settings.touch = !self.settings.touch,
-            (true, 1) => self.settings.sensors = !self.settings.sensors,
-            (true, 2) => self.settings.dark_quiet = !self.settings.dark_quiet,
-            (true, 3) => self.settings.pace = self.settings.pace.next(),
-            (true, 4) => {
+            (0, 0) => self.settings.enabled = !self.settings.enabled,
+            (0, 1) => self.settings.speech = !self.settings.speech,
+            (0, 2) => self.settings.motion = !self.settings.motion,
+            (0, 3) => self.settings.led = !self.settings.led,
+            (0, 4) => self.page = 1,
+            (0, 5) => self.open_until_ms = None,
+            (1, 0) => self.settings.touch = !self.settings.touch,
+            (1, 1) => self.settings.sensors = !self.settings.sensors,
+            (1, 2) => self.settings.dark_quiet = !self.settings.dark_quiet,
+            (1, 3) => self.settings.pace = self.settings.pace.next(),
+            (1 | 2, 4) => {
                 self.save_requested = true;
                 self.status = StorageStatus::Saving;
             }
-            (true, 5) => self.page = false,
+            (1, 5) => self.page = 2,
+            (2, 0) => self.settings.expression = self.settings.expression.next(),
+            (2, 1) => self.settings.speech_pace = self.settings.speech_pace.next(),
+            (2, 2) => self.page = 0,
+            (2, 3) => self.page = 1,
+            (2, 5) => self.open_until_ms = None,
             _ => {}
         }
         if self.settings != before {
@@ -89,14 +94,32 @@ impl Plugin for Preferences {
     fn panel(&self, _now_ms: u64) -> Option<Panel> {
         self.open_until_ms?;
         let s = self.settings;
-        let buttons = if self.page {
+        let buttons = if self.page == 1 {
             [
                 if s.touch { "TOUCH ON" } else { "TOUCH OFF" },
                 if s.sensors { "SENSE ON" } else { "SENSE OFF" },
                 if s.dark_quiet { "DARK ON" } else { "DARK OFF" },
                 s.pace.label(),
                 "SAVE",
+                "MORE",
+            ]
+        } else if self.page == 2 {
+            use crate::settings::Pace;
+            [
+                match s.expression {
+                    Pace::Quiet => "表現：弱",
+                    Pace::Normal => "表現：中",
+                    Pace::Lively => "表現：強",
+                },
+                match s.speech_pace {
+                    Pace::Quiet => "発話：少",
+                    Pace::Normal => "発話：中",
+                    Pace::Lively => "発話：多",
+                },
+                "FIRST",
                 "BACK",
+                "SAVE",
+                "CLOSE",
             ]
         } else {
             [
@@ -110,10 +133,10 @@ impl Plugin for Preferences {
         };
         Some(Panel::new(
             [
-                if self.page {
-                    "SETTINGS 2/2"
-                } else {
-                    "SETTINGS 1/2"
+                match self.page {
+                    0 => "SETTINGS 1/3",
+                    1 => "SETTINGS 2/3",
+                    _ => "表現の設定 3/3",
                 },
                 self.status.label(),
             ],

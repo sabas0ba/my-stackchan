@@ -55,6 +55,7 @@ check: ## すべての検査を実行する (nix flake check + 環境 + Rust の
 
 .PHONY: check-rust
 check-rust: ## Rust の検査 (fmt --check, clippy, test, firmware の build)
+	bash scripts/font.sh check
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 	cargo test --workspace --locked --offline

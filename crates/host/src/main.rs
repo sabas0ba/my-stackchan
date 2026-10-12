@@ -167,7 +167,7 @@ enum Command {
         #[arg(long)]
         port: Option<String>,
     },
-    /// 指定した領域へテキストを表示する（非 ASCII 文字は ? として表示）
+    /// 指定した領域へ UTF-8 テキストを表示する（日本語対応、未収録文字は □）
     Text {
         #[arg(long)]
         port: Option<String>,

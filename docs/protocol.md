@@ -79,12 +79,14 @@ Text と Card は指定 Slot だけを置き換え、他の Slot は保持する
 
 | Slot | 領域 (x, y, width, height) | 表示量 |
 | --- | --- | --- |
-| BannerTop | (0, 0, 320, 48) | 30 文字 × 2 行 |
-| BannerBottom | (0, 192, 320, 48) | 30 文字 × 2 行 |
-| Overlay | (0, 0, 320, 240) | 30 文字 × 11 行 |
+| BannerTop | (0, 0, 320, 48) | ASCII 30 文字 / 全角 18 文字 × 2 行 |
+| BannerBottom | (0, 192, 320, 48) | ASCII 30 文字 / 全角 18 文字 × 2 行 |
+| Overlay | (0, 0, 320, 240) | ASCII 30 文字 / 全角 18 文字 × 11 行 |
 
-フォントは既存の 10×20 px ASCII を使用する。改行と 30 文字で折り返し、行数を超える部分は
-描画しない。改行以外の制御文字は無視し、非 ASCII 文字は Unicode 文字単位で `?` に置換する。
+ASCII は既存の 10×20 px、日本語は Unifont JP の幅 8 / 16 px・高さ 16 px を用いる。
+UTF-8 の文字と画素幅で折り返し、主な句読点・括弧・小書きかなの禁則を適用するため、
+実際の行あたり文字数は文面による。収まらない部分は最終行に省略記号を付ける。
+改行以外の制御文字は無視し、収録外の文字は `□` に置換する。
 入力は UTF-8 の 512 byte までで、host は超過を送信前に拒否する。
 
 Overlay は顔と帯を隠すが、帯の内容と期限は保持する。`ttl_s` は受信時の単調時計から数え、
@@ -97,7 +99,7 @@ Card は最大 4 行で、各行には最大 2 要素を左から等幅で配置
 `Spacer { height }` (1〜32 px)、`Image` を使う。Text、Bar、Image の行高は 20 px、Spacer の行高は指定値とし、
 複数要素の行高は最大値を使う。上下 4 px の余白を含む合計が Slot の高さ (帯 48 px、
 Overlay 240 px) を超える Card、空の Card・行は拒否する。Bar はラベルと比率の白いバーを描く。
-Card の文字も既存の 10×20 px ASCII フォントを用い、非 ASCII は `?` で表示する。
+Card も同じ日本語フォントを使う。各セルは単行で、幅を超える文字は省略記号で示す。
 
 Image は Card あたり 1 枚のみとし、Card の `image` フィールドに幅・高さと RGB565 の
 big-endian 画素列を同梱する。縦横とも 1〜16 px、画素列は `width × height × 2` byte
@@ -114,7 +116,7 @@ Grin / Calm / Curious / Playful / Wink / Sad / Determined を指定する。
 `gaze` は Center / Left / Right / Up / Down、`eyes` は Auto / Open / Wide / Closed /
 HalfLidded を指定する。Auto は表情ごとの目の形を使う。視線は白い目の位置で示し、
 黒目は描かない。`detail` は最大 20 UTF-8 byte で、
-画面中央下部に活動状態とともに表示する。表示フォントの制約から非 ASCII 文字は `?` になる。
+画面中央下部に活動状態とともに表示する。日本語も表示できるが、20 byte の上限は変わらない。
 `ttl_s` は受信からの秒数で、0 は期限なし。期限満了時は活動状態と詳細を消し、既定の顔に戻る。
 Overlay 中も期限は進み、Overlay が消えると有効な Presence だけを再表示する。
 `Clear` は Presence、Emote、Slot をすべて消す。

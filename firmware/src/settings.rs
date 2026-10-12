@@ -48,6 +48,8 @@ pub struct Settings {
     pub sensors: bool,
     pub dark_quiet: bool,
     pub pace: Pace,
+    pub expression: Pace,
+    pub speech_pace: Pace,
 }
 
 impl Default for Settings {
@@ -61,6 +63,8 @@ impl Default for Settings {
             sensors: true,
             dark_quiet: true,
             pace: Pace::Normal,
+            expression: Pace::Lively,
+            speech_pace: Pace::Normal,
         }
     }
 }
@@ -81,6 +85,7 @@ impl Settings {
         }
         let mut value = Self::default();
         let mut seen = 0u16;
+        let mut version = "";
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -96,9 +101,10 @@ impl Settings {
             };
             let bit = match key {
                 "version" => {
-                    if item != "1" {
+                    if !matches!(item, "1" | "2") {
                         return Err(ConfigError::Version);
                     }
+                    version = item;
                     0
                 }
                 "enabled" => {
@@ -138,6 +144,21 @@ impl Settings {
                     };
                     8
                 }
+                "expression" | "speech_pace" => {
+                    let pace = match item {
+                        "quiet" => Pace::Quiet,
+                        "normal" => Pace::Normal,
+                        "lively" => Pace::Lively,
+                        _ => return Err(ConfigError::Invalid),
+                    };
+                    if key == "expression" {
+                        value.expression = pace;
+                        9
+                    } else {
+                        value.speech_pace = pace;
+                        10
+                    }
+                }
                 _ => return Err(ConfigError::Invalid),
             };
             if seen & (1 << bit) != 0 {
@@ -148,7 +169,7 @@ impl Settings {
         if seen & 1 == 0 {
             return Err(ConfigError::Version);
         }
-        if seen != 0x1ff {
+        if seen != if version == "1" { 0x1ff } else { 0x7ff } {
             return Err(ConfigError::Invalid);
         }
         Ok(value)
@@ -158,9 +179,9 @@ impl Settings {
         let mut text = heapless::String::new();
         // 項目名と値の最大長は固定で、256 byte に収まる。
         write!(text,
-            "version=1\nenabled={}\nspeech={}\nmotion={}\nled={}\ntouch={}\nsensors={}\ndark_quiet={}\npace={}\n",
+            "version=2\nenabled={}\nspeech={}\nmotion={}\nled={}\ntouch={}\nsensors={}\ndark_quiet={}\npace={}\nexpression={}\nspeech_pace={}\n",
             self.enabled, self.speech, self.motion, self.led, self.touch,
-            self.sensors, self.dark_quiet, self.pace.label()
+            self.sensors, self.dark_quiet, self.pace.label(), self.expression.label(), self.speech_pace.label()
         ).expect("bounded settings encoding");
         text
     }
@@ -183,6 +204,7 @@ mod tests {
                     sensors: mask & 32 != 0,
                     dark_quiet: mask & 64 != 0,
                     pace,
+                    ..Settings::default()
                 };
                 assert_eq!(Settings::parse(&value.encode()), Ok(value));
             }
@@ -195,6 +217,26 @@ mod tests {
         for length in 0..text.len() - 1 {
             assert!(Settings::parse(&text[..length]).is_err(), "prefix {length}");
         }
+    }
+
+    #[test]
+    fn version_one_migrates_without_losing_existing_preferences() {
+        let legacy = "version=1\nenabled=true\nspeech=false\nmotion=false\nled=true\ntouch=true\nsensors=true\ndark_quiet=true\npace=quiet\n";
+        let settings = Settings::parse(legacy).unwrap();
+        assert!(!settings.speech && !settings.motion);
+        assert_eq!(settings.pace, Pace::Quiet);
+        assert_eq!(settings.expression, Pace::Lively);
+        for expression in [Pace::Quiet, Pace::Normal, Pace::Lively] {
+            for speech_pace in [Pace::Quiet, Pace::Normal, Pace::Lively] {
+                let settings = Settings {
+                    expression,
+                    speech_pace,
+                    ..settings
+                };
+                assert_eq!(Settings::parse(&settings.encode()), Ok(settings));
+            }
+        }
+        assert!(Settings::parse(&legacy.replace("version=1", "version=2")).is_err());
     }
 
     #[test]

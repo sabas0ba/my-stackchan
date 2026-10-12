@@ -364,7 +364,7 @@ scripts/container.sh device env STACKCHAN_TEST_PORT=/dev/ttyACM0 \
 ### 表情・視線と PC 状態の実機確認
 
 版 7 の firmware を書き込んでから、次の例で表情・視線と活動状態を送る。
-`status` は PC のジョブやスクリプトから呼び出せる。詳細は ASCII で表示する。
+`status` は PC のジョブやスクリプトから呼び出せる。詳細は日本語も表示できる。
 `status` の既定 TTL は 30 秒、`face` の既定 TTL は無期限である。
 
 ```bash
@@ -451,6 +451,9 @@ scripts/container.sh build                                                   # �
 
 顔を長押しし、SETTINGS を選択する。AUTO / TEXT / MOVE / LED を切り替え、NEXT で
 TOUCH / SENSE / DARK と動作頻度を変更する。変更は即時反映され、SAVE で SD に保存する。
+2 ページ目の MORE から表現設定を開く。「表現」は首・LED の反応強度、「発話」は
+吹き出しの最小間隔を切り替える。表現は弱 / 中 / 強、発話は少 / 中 / 多。
+このページでも SAVE できる。既存の SD 設定はそのまま読み込める。
 OFF にした設定は自律動作に適用される。host やタイマーの明示的な通知は対象外。
 
 FAT16 / FAT32 の第 1 パーティションのルートに `STKCN.CFG` を作成し、旧設定を
@@ -462,7 +465,7 @@ FAT16 / FAT32 の第 1 パーティションのルートに `STKCN.CFG` を作�
 PC で編集する際の既定値（全項目を必須とする）:
 
 ```ini
-version=1
+version=2
 enabled=true
 speech=true
 motion=true
@@ -471,9 +474,13 @@ touch=true
 sensors=true
 dark_quiet=true
 pace=normal
+expression=lively
+speech_pace=normal
 ```
 
-`pace` は `quiet` / `normal` / `lively`。発話は現在 ASCII の吹き出し表示であり、音声は出さない。
+`pace`、`expression`、`speech_pace` は `quiet` / `normal` / `lively`。
+`expression` は強度 10 / 20 / 30、`speech_pace` は発話最小間隔 30 / 8 / 3.5 秒に対応する。
+発話は日本語の吹き出し表示であり、音声は出さない。
 実機の受入確認は次の順に行う。
 
 1. host の送信を止め、待機中の表情・視線・首と吹き出しを確認する。
@@ -483,6 +490,12 @@ pace=normal
 5. SD を抜いた状態でも起動・設定変更でき、SAVE の失敗表示後も操作できることを確認する。
 
 `make simulate` は自律反応と設定画面の BMP も `.work/simulation/` に出力する。
+
+日本語の Text / Card は既存の CLI から UTF-8 のまま送れる。
+例: `scripts/container.sh device target/debug/stackchan text --slot overlay 'こんにちは。日本語の表示確認です。'`。
+収録外の文字（絵文字や一部の人名漢字など）は `□` で表示する。全文が領域に収まらない
+場合は省略記号を付ける。日本語フォントに microSD は不要。
+新しい表現設定・日本語描画の実機受入確認は未実施。
 
 ## 固定の更新
 

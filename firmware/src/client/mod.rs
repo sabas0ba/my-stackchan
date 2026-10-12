@@ -17,8 +17,8 @@ pub const PANEL_LINES: usize = 2;
 /// Panel の文字の行の長さ。10 px の文字で画面の幅 (左右 10 px の余白を除く) に収まる。
 pub const PANEL_LINE_BYTES: usize = 30;
 pub const PANEL_BUTTONS: usize = 6;
-/// ボタンのラベルの長さ。10 px の文字でボタンの幅に収まる。
-pub const BUTTON_LABEL_BYTES: usize = 9;
+/// 日本語の短いラベルを保持するバイト上限。描画時は枠の画素幅で省略する。
+pub const BUTTON_LABEL_BYTES: usize = 24;
 /// 登録できる plugin の数。一覧の Panel に 1 画面で並ぶ数とする。
 pub const MAX_PLUGINS: usize = PANEL_BUTTONS;
 
@@ -389,11 +389,11 @@ mod tests {
     fn long_text_is_cut_to_the_capacity() {
         let panel = Panel::new(
             ["0123456789012345678901234567890123", ""],
-            &["0123456789", "a", "b", "c", "d", "e", "f"],
+            &["012345678901234567890123456", "a", "b", "c", "d", "e", "f"],
         );
         assert_eq!(panel.lines[0].len(), PANEL_LINE_BYTES);
         assert_eq!(panel.buttons.len(), PANEL_BUTTONS);
-        assert_eq!(panel.buttons[0], "012345678");
+        assert_eq!(panel.buttons[0], "012345678901234567890123");
     }
 
     #[test]

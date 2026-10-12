@@ -135,6 +135,19 @@ GitHub Advisory API (`ecosystem=rust`, `affects=<crate>`) は追加 5 crate と�
 
 ## 未調査・保留の項目
 
-- GNU Unifont の版と sha256 (Phase 4 で固定する)
 - `cargo fuzz` 用の toolchain (Phase 2)
 - 推移的依存の個別調査は `make audit` の結果に基づいて行う
+
+## 日本語フォントの追加調査 (2026-10-12)
+
+利用者の承認を得て GNU Unifont JP 16.0.04 のフォントデータを追加した。
+新規 crate・外部変換ツールは追加せず、既存の `fontgen` と Nix 環境内の gzip を使用する。
+公式配布元の公開日は 2025-05-31 で、7 日のクールダウンを満たす。
+採用版は最新追従ではなく、今回必要な BMP の日本語字形を備えた固定版とする。
+
+- [原本](https://unifoundry.com/pub/unifont/unifont-16.0.04/font-builds/unifont_jp_sample-16.0.04.hex.gz): SHA-256 `38b9e2888e4ad555dc71fee73676882bffca5b11ed174dacbecb9a5150c3f3fb`
+- 生成物 `assets/fonts/japanese.bin`: 21,696 字、802,752 byte、SHA-256 `13ac11716b95fbad709d4eb4ffee99c1d3f28cf561a59463d492d3a9f6e44e`
+- [同版の配布アーカイブ](https://unifoundry.com/pub/unifont/unifont-16.0.04/unifont-16.0.04.tar.gz) の COPYING / OFL-1.1.txt / README と著作権表示を同梱した。フォントは OFL-1.1 の選択肢で利用し、jiskan16 部分は配布元の記載どおり Public Domain とする。生成サブセットは別名とし、字形自体は変更しない
+- 原本はデータとして解析するだけで、上流スクリプトやバイナリを実行しない。文字コード・長さ・16進文字・重複を検証してから生成する
+- RustSec / GHSA の crate 対象ではない。公開情報の検索では当該フォント配布物の侵害報告は確認されなかった。HTTPS で取得し、その取得物をハッシュ固定したものであり、上流署名の検証は未実施
+- 原本ハッシュと再生成結果の一致を `make check` に含める。Cargo.lock / Nix 環境の変更はない
