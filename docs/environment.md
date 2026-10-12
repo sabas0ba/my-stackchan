@@ -393,11 +393,10 @@ scripts/container.sh device target/debug/stackchan pitch-trim --raw-steps -96 --
 `--pitch-trim-file <path>` を付けるか、`STACKCHAN_PITCH_TRIM_FILE` を設定する。
 明示したファイルが存在しない、または値が無効な場合は送信せずエラーにする。
 
-CoreS3 の画面を1回タップするとデモの先頭 `01/12 HAPPY` を表示し、指を離して
-再びタップすると `02/12 FOCUSED` に進む。12番目の後は先頭に戻る。画面下の
-番号と表情名、顔の変化を確認する。PC から `face` / `status` / `text` / `card` /
-`clear` を送るとデモは終了する。タッチデモは USB の Ack 通し番号を増やさない。
-シミュレーションの `demo-01.bmp` から `demo-12.bmp` は同じモデルの順送り描画である。
+CoreS3 の顔をタップすると自律反応を表示し、左右に撫でる操作も区別する。
+長押しで TIMER / SETTINGS のランチャーを開く。タッチ操作は USB の Ack 通し番号を
+増やさない。シミュレーションの `demo-01.bmp` から `demo-12.bmp` は表情一覧の
+描画確認用であり、実機のタップによる順送り操作ではない。
 
 この版は画面上の視線に加え、M5 公式 StackChan K151 のサーボ 2 軸と 12 個の LED を駆動する。
 目標値は X ±30°、Y 30–60°、RGB 各成分 0–63 に制限する。サーボの工場既定ゼロ位置は
@@ -406,7 +405,8 @@ X=460、Y=620、UART は GPIO6/7・1 Mbaud、LED 拡張器は I²C 0x6F を使�
 ボディ側の 5 V は CoreS3 の AW9523B で BOOST_EN (P1_7)、次に BUS_OUT_EN (P0_1) を
 有効化して供給する。この順序は [M5 公式 ESPHome 電源構成](https://docs.m5stack.com/en/homeassistant/devices/stackchan) に従う。
 拡張器が見つからない場合はサーボ・LED を有効にせず、画面と USB 通信は維持する。
-起動直後はサーボを動かさず、最初の Presence / Emote から目標値を送る。
+Presence / Emote または自律反応からサーボ目標値を送る。自律動作が有効な場合は
+host が接続されていなくても首が動く。
 
 ### 静的検査・単体テスト
 
