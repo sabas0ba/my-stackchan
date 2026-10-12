@@ -12,13 +12,14 @@
 
 pub mod client;
 mod frame;
+pub mod net;
 
 pub use frame::{FrameError, FrameReader, write_frame};
 
 use serde::{Deserialize, Serialize};
 
 /// plugin API の版。互換性の無い変更を行った場合に増やす。
-pub const API_VERSION: u16 = 2;
+pub const API_VERSION: u16 = 3;
 
 /// COBS 符号化後のフレームの最大バイト数。受信側はこれを超える入力を確保せずに破棄する。
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -39,6 +40,11 @@ pub const MAX_PARAM_VALUE_BYTES: usize = 1024;
 /// 画像の一般的な上限。デバイスが表示できる大きさは `Limits` で別に通知する。
 pub const MAX_IMAGE_WIDTH: u16 = 160;
 pub const MAX_IMAGE_HEIGHT: u16 = 120;
+/// 1 plugin に許可できる接続先の数の上限。
+pub const MAX_ENDPOINTS: usize = 4;
+/// 接続先の表記 (`<IP アドレス>:<port>`) の上限。IPv6 の最長の表記が収まる。
+pub const MAX_ENDPOINT_ADDR_BYTES: usize = 64;
+pub const MAX_ENDPOINT_PATH_BYTES: usize = 256;
 
 /// plugin が要求し、利用者設定が許可する権限。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +266,19 @@ pub struct Limits {
     pub image_height: u16,
 }
 
+/// 利用者設定が許可した接続先と、そこへ中継される Unix socket。
+///
+/// plugin ごとのコンテナ分離では plugin のコンテナがネットワークを持たないため、許可した
+/// 接続先へは、この socket を介してだけ接続できる。`client::Connection::connect_to` が
+/// 切替えを行うため、plugin が直接扱う必要は無い。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Endpoint {
+    /// 利用者設定の `net.allow` の表記を正規化したもの (`<IP アドレス>:<port>`)。
+    pub addr: String,
+    /// plugin から見た Unix socket の path。
+    pub path: String,
+}
+
 /// Debug は params の値を出さない (下の impl)。secret を含み得るため、plugin 作者が
 /// `{:?}` でログに出しても漏れないようにする。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,6 +289,9 @@ pub struct Init {
     /// 利用者設定の `param.*` (secret を含む)。path 等の環境依存の値はここから受け取る。
     pub params: Vec<(String, String)>,
     pub limits: Limits,
+    /// 中継を介して接続できる宛先。コンテナ分離をしていない場合は空で、plugin は
+    /// 直接接続する。
+    pub endpoints: Vec<Endpoint>,
 }
 
 impl std::fmt::Debug for Init {
@@ -280,6 +302,7 @@ impl std::fmt::Debug for Init {
             .field("granted", &self.granted)
             .field("params", &format_args!("{names:?} (値は伏せる)"))
             .field("limits", &self.limits)
+            .field("endpoints", &self.endpoints)
             .finish()
     }
 }
@@ -412,6 +435,21 @@ impl HostMessage {
                     check_len(key, MAX_PARAM_KEY_BYTES, "設定値の名前が長すぎます")?;
                     check_len(value, MAX_PARAM_VALUE_BYTES, "設定値が長すぎます")?;
                 }
+                if init.endpoints.len() > MAX_ENDPOINTS {
+                    return Err("接続先の数が上限を超えます");
+                }
+                for endpoint in &init.endpoints {
+                    check_len(
+                        &endpoint.addr,
+                        MAX_ENDPOINT_ADDR_BYTES,
+                        "接続先が長すぎます",
+                    )?;
+                    check_len(
+                        &endpoint.path,
+                        MAX_ENDPOINT_PATH_BYTES,
+                        "接続先の socket の path が長すぎます",
+                    )?;
+                }
             }
             Self::Rejected { reason } => {
                 check_len(reason, MAX_REASON_BYTES, "拒否理由が長すぎます")?
@@ -543,6 +581,7 @@ mod tests {
                 image_width: 160,
                 image_height: 120,
             },
+            endpoints: Vec::new(),
         };
         for text in [
             format!("{init:?}"),

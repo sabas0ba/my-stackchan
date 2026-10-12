@@ -51,6 +51,7 @@ check: ## すべての検査を実行する (nix flake check + 環境 + Rust の
 	$(NIX) flake check
 	scripts/check-env.sh
 	$(MAKE) check-rust
+	bash scripts/test-container.sh
 
 .PHONY: check-rust
 check-rust: ## Rust の検査 (fmt --check, clippy, test, firmware の build)

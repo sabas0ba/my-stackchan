@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = "stackchan.conf";
@@ -20,6 +21,7 @@ const MAX_LINE_BYTES: usize = 4096;
 const MAX_PLUGINS: usize = 16;
 const MAX_ARGV: usize = 64;
 const MAX_ID_BYTES: usize = 32;
+const MAX_DIR_BYTES: usize = 1024;
 const DEFAULT_ROTATE_S: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +52,9 @@ pub struct PluginConfig {
     pub id: String,
     /// 起動する argv。先頭が実行ファイル。隔離コマンドを前置きしてもよい。
     pub command: Vec<String>,
+    /// plugin の実行ファイルを置いたホスト側のディレクトリ。コンテナ分離時に plugin の
+    /// コンテナへマウントする (起動スクリプトが起動計画から読む)。daemon は使わない。
+    pub dir: Option<String>,
     /// 取得・確認した commit SHA。ログへの記録に用いる。
     pub rev: Option<String>,
     pub allowed: plugin_api::Capabilities,
@@ -58,6 +63,9 @@ pub struct PluginConfig {
     /// `env.*`。plugin に追加で渡す環境変数。daemon の環境変数は許可したものしか渡さない
     /// (daemon/plugin.rs)。環境変数はプロセスの情報から見え得るため、secret は `param` で渡す。
     pub env: Vec<(String, String)>,
+    /// `net.allow`。コンテナ分離時に、中継を介して接続を許可する宛先。名前解決を
+    /// 扱わないため、IP アドレスと port の組で持つ。
+    pub net_allow: Vec<SocketAddr>,
 }
 
 /// Debug は params と env の値を出さない。secret を含み得るため。
@@ -69,10 +77,12 @@ impl std::fmt::Debug for PluginConfig {
         f.debug_struct("PluginConfig")
             .field("id", &self.id)
             .field("command", &self.command)
+            .field("dir", &self.dir)
             .field("rev", &self.rev)
             .field("allowed", &self.allowed)
             .field("params", &names(&self.params))
             .field("env", &names(&self.env))
+            .field("net_allow", &self.net_allow)
             .finish()
     }
 }
@@ -102,13 +112,42 @@ pub fn summary(dir: &Path, config: &Config) -> String {
         let names = |pairs: &[(String, String)]| -> Vec<String> {
             pairs.iter().map(|(name, _)| name.clone()).collect()
         };
+        if let Some(dir) = &plugin.dir {
+            lines.push(format!("  dir: {dir}"));
+        }
         lines.push(format!("  params: {:?}", names(&plugin.params)));
         lines.push(format!("  env: {:?}", names(&plugin.env)));
+        if !plugin.net_allow.is_empty() {
+            let allowed: Vec<String> = plugin.net_allow.iter().map(ToString::to_string).collect();
+            lines.push(format!("  net.allow: {allowed:?}"));
+        }
     }
     lines.join("\n")
 }
 
 const MAX_ENV: usize = 16;
+
+/// `net.allow` を解析する。名前は受け付けない (plugin から解決先を変えられる経路を
+/// 作らないため)。
+fn parse_net_allow(items: &[String]) -> Result<Vec<SocketAddr>, &'static str> {
+    if items.len() > plugin_api::MAX_ENDPOINTS {
+        return Err("net.allow の宛先が多すぎます");
+    }
+    let mut allowed = Vec::new();
+    for item in items {
+        let addr: SocketAddr = item
+            .parse()
+            .map_err(|_| "net.allow の宛先は \"<IP アドレス>:<port>\" で書きます")?;
+        if addr.port() == 0 {
+            return Err("net.allow の port は 1 以上にしてください");
+        }
+        if allowed.contains(&addr) {
+            return Err("net.allow の宛先が重複しています");
+        }
+        allowed.push(addr);
+    }
+    Ok(allowed)
+}
 
 fn push_env(plugin: &mut PluginConfig, key: &str, value: String) -> Result<(), &'static str> {
     let name = &key["env.".len()..];
@@ -279,10 +318,12 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
     let mut plugin = PluginConfig {
         id: id.into(),
         command: Vec::new(),
+        dir: None,
         rev: None,
         allowed: plugin_api::Capabilities::default(),
         params: Vec::new(),
         env: Vec::new(),
+        net_allow: Vec::new(),
     };
     for (key, (line, value)) in section.entries {
         match (key.as_str(), value) {
@@ -290,6 +331,14 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
                 if !argv.is_empty() && argv.len() <= MAX_ARGV && !argv[0].is_empty() =>
             {
                 plugin.command = argv;
+            }
+            // 起動計画の 1 行に載せるため、行を分ける文字と区切りのタブを許さない。
+            ("dir", Value::String(dir))
+                if !dir.is_empty()
+                    && dir.len() <= MAX_DIR_BYTES
+                    && !dir.chars().any(char::is_control) =>
+            {
+                plugin.dir = Some(dir);
             }
             ("rev", Value::String(rev))
                 if rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()) =>
@@ -303,13 +352,21 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
             ("presence", Value::Bool(value)) => plugin.allowed.presence = value,
             ("motion", Value::Bool(value)) => plugin.allowed.motion = value,
             ("image", Value::Bool(value)) => plugin.allowed.image = value,
+            ("net.allow", Value::Strings(items)) => {
+                plugin.net_allow =
+                    parse_net_allow(&items).map_err(|reason| error(line, reason.into()))?;
+            }
             (key, Value::String(value)) if key.starts_with("env.") => {
                 push_env(&mut plugin, key, value).map_err(|reason| error(line, reason.into()))?;
             }
             (key, Value::String(value)) if key.starts_with("param.") => {
                 push_param(&mut plugin, key, value).map_err(|reason| error(line, reason.into()))?;
             }
-            ("command" | "rev" | "cards" | "notify" | "presence" | "motion" | "image", _) => {
+            (
+                "command" | "dir" | "rev" | "cards" | "notify" | "presence" | "motion" | "image"
+                | "net.allow",
+                _,
+            ) => {
                 return Err(error(line, format!("{key} の値が不正です")));
             }
             _ => return Err(error(line, format!("未知の key です: {key}"))),
@@ -580,6 +637,64 @@ motion = false
         assert_eq!(usage.command.len(), 5);
         assert!(usage.allowed.notify && usage.allowed.presence && !usage.allowed.motion);
         assert_eq!(usage.params, [("token".into(), "s\"ecret".into())]);
+    }
+
+    #[test]
+    fn net_allow_accepts_only_literal_addresses_with_ports() {
+        let base = "[plugin p]\ncommand = [\"/plugin/x\"]\n";
+        assert!(parse(base, None).unwrap().plugins[0].net_allow.is_empty());
+        let config = parse(
+            &format!("{base}net.allow = [\"192.168.1.50:8883\", \"[fe80::1]:6000\"]\n"),
+            None,
+        )
+        .unwrap();
+        let allowed: Vec<String> = config.plugins[0]
+            .net_allow
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(allowed, ["192.168.1.50:8883", "[fe80::1]:6000"]);
+        assert!(
+            summary(Path::new("/config"), &config).contains("192.168.1.50:8883"),
+            "許可した宛先は要約で確認できる"
+        );
+        for bad in [
+            "net.allow = [\"printer.local:8883\"]",
+            "net.allow = [\"192.168.1.50\"]",
+            "net.allow = [\"192.168.1.50:0\"]",
+            "net.allow = [\"192.168.1.50:8883\", \"192.168.1.50:8883\"]",
+            "net.allow = [\"10.0.0.1:1\", \"10.0.0.2:1\", \"10.0.0.3:1\", \"10.0.0.4:1\", \"10.0.0.5:1\"]",
+            "net.allow = \"192.168.1.50:8883\"",
+        ] {
+            assert!(parse(&format!("{base}{bad}\n"), None).is_err(), "{bad}");
+        }
+        assert!(
+            parse(
+                base,
+                Some("[plugin p]\nnet.allow = [\"192.168.1.50:8883\"]\n")
+            )
+            .is_err(),
+            "secrets.conf から宛先を追加できない"
+        );
+    }
+
+    #[test]
+    fn plugin_dir_is_optional_and_rejects_control_characters() {
+        let base = "[plugin p]\ncommand = [\"/plugin/x\"]\n";
+        assert_eq!(parse(base, None).unwrap().plugins[0].dir, None);
+        let config = parse(&format!("{base}dir = \"C:/Users/a b/release\"\n"), None).unwrap();
+        assert_eq!(
+            config.plugins[0].dir.as_deref(),
+            Some("C:/Users/a b/release")
+        );
+        for bad in [
+            "dir = \"\"".to_owned(),
+            "dir = \"a\tb\"".to_owned(),
+            format!("dir = \"{}\"", "x".repeat(MAX_DIR_BYTES + 1)),
+            "dir = 1".to_owned(),
+        ] {
+            assert!(parse(&format!("{base}{bad}\n"), None).is_err(), "{bad}");
+        }
     }
 
     #[test]

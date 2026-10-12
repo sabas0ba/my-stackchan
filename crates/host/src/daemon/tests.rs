@@ -56,19 +56,19 @@ struct PipeSpawner {
 }
 
 impl Spawner for PipeSpawner {
-    fn spawn(&mut self, _config: &PluginConfig) -> io::Result<Spawned> {
+    fn spawn(&mut self, _config: &PluginConfig) -> io::Result<Option<Spawned>> {
         let (daemon_reader, plugin_writer) = io::pipe()?;
         let (plugin_reader, daemon_writer) = io::pipe()?;
         self.spawned.fetch_add(1, Ordering::SeqCst);
         self.plugin_ends
             .send((plugin_reader, plugin_writer))
             .map_err(|_| io::Error::other("試験側が終了しています"))?;
-        Ok(Spawned {
+        Ok(Some(Spawned {
             stdin: Box::new(daemon_writer),
             stdout: Box::new(daemon_reader),
             stderr: None,
             process: Box::new(FakeProcess),
-        })
+        }))
     }
 }
 
@@ -443,17 +443,17 @@ struct StalledSpawner {
 }
 
 impl Spawner for StalledSpawner {
-    fn spawn(&mut self, _config: &PluginConfig) -> io::Result<Spawned> {
+    fn spawn(&mut self, _config: &PluginConfig) -> io::Result<Option<Spawned>> {
         let stdout = self
             .plugin_stdout
             .take()
             .ok_or_else(|| io::Error::other("再起動は試験の対象外"))?;
-        Ok(Spawned {
+        Ok(Some(Spawned {
             stdin: Box::new(StalledStdin),
             stdout: Box::new(stdout),
             stderr: None,
             process: Box::new(KillFlag(self.killed.clone())),
-        })
+        }))
     }
 }
 
@@ -731,4 +731,188 @@ fn image_frame_without_capability_is_rejected() {
             .iter()
             .any(|message| matches!(message, protocol::Message::ImageBegin(_)))
     );
+}
+
+/// plugin ごとのコンテナ分離で用いる、Unix socket での待受けの試験。plugin 側は
+/// `plugin-run` の代わりに、起動情報を読んでから plugin_api::client で接続する。
+#[cfg(unix)]
+mod socket {
+    use std::os::unix::net::UnixStream;
+    use std::path::PathBuf;
+
+    use super::super::socket::{SOCKET_NAME, SocketSpawner};
+    use super::*;
+    use crate::launch;
+
+    struct SocketHarness {
+        daemon: Daemon<FakeDevice, SocketSpawner>,
+        device: FakeDevice,
+        dir: PathBuf,
+        start: Instant,
+    }
+
+    impl SocketHarness {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("stackchan-socket-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let config = crate::config::parse(
+                "[plugin test]\ncommand = [\"/plugin/test\", \"--flag\"]\ncards = 1\nenv.NAME = \"value\"\nnet.allow = [\"192.168.1.50:8883\"]\n",
+                None,
+            )
+            .unwrap();
+            let spawner = SocketSpawner::new(&dir, &config).unwrap();
+            let device = FakeDevice::default();
+            let start = Instant::now();
+            Self {
+                daemon: Daemon::new(config, device.clone(), spawner, start),
+                device,
+                dir,
+                start,
+            }
+        }
+
+        fn connect(&self) -> UnixStream {
+            UnixStream::connect(self.dir.join("test").join(SOCKET_NAME)).unwrap()
+        }
+    }
+
+    impl Drop for SocketHarness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// daemon が接続を閉じたこと (起動情報を送らずに終端に達すること) を確かめる。
+    fn assert_refused(mut stream: UnixStream, what: &str) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert!(
+            matches!(
+                launch::receive(&mut stream),
+                Err(api::FrameError::Truncated)
+            ),
+            "{what}"
+        );
+    }
+
+    #[test]
+    fn connected_plugin_receives_launch_and_shows_a_card() {
+        let mut harness = SocketHarness::new("card");
+        let mut stream = harness.connect();
+        let plugin = thread::spawn(move || {
+            let launch = launch::receive(&mut stream).unwrap();
+            let capabilities = api::Capabilities {
+                cards: 1,
+                ..api::Capabilities::default()
+            };
+            let mut connection =
+                client::connect(stream.try_clone().unwrap(), stream, hello(capabilities)).unwrap();
+            connection.send(&banner(0, "socket")).unwrap();
+            // daemon が閉じるまで接続を保つ。
+            while !connection.is_closed() {
+                let _ = connection.recv_timeout(Duration::from_millis(50));
+            }
+            (launch, connection.init().endpoints.clone())
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !harness
+            .device
+            .messages()
+            .iter()
+            .any(|message| card_text(message).is_some_and(|(_, _, text)| text == "socket"))
+        {
+            assert!(Instant::now() < deadline, "Card がデバイスに届きません");
+            harness.daemon.step(Duration::from_millis(20));
+        }
+
+        // 動作中に届いた同じ plugin の 2 本目の接続は閉じる。
+        let second = harness.connect();
+        harness.daemon.step(Duration::ZERO);
+        assert_refused(second, "2 本目の接続");
+
+        harness
+            .daemon
+            .stop_plugin(0, "試験による停止", Instant::now());
+        let ((argv, env), endpoints) = plugin.join().unwrap();
+        assert_eq!(
+            endpoints,
+            [api::Endpoint {
+                addr: "192.168.1.50:8883".into(),
+                path: "/run/stackchan/net/0.sock".into(),
+            }],
+            "中継の socket を plugin のコンテナから見た path で知らせる"
+        );
+        assert_eq!(argv, ["/plugin/test", "--flag"]);
+        assert_eq!(env, [("NAME".to_owned(), "value".to_owned())]);
+    }
+
+    #[test]
+    fn connection_during_backoff_is_closed_and_accepted_afterwards() {
+        let mut harness = SocketHarness::new("backoff");
+        let start = harness.start;
+        // Hello を送らない接続は時間切れで停止され、再起動までの待ち時間に入る。
+        let mut silent = harness.connect();
+        harness.daemon.tick(start);
+        harness.daemon.tick(start + Duration::from_secs(6));
+        silent
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        launch::receive(&mut silent).expect("受け付けた接続には起動情報を送る");
+        assert_refused(silent, "Hello を送らない接続");
+
+        let early = harness.connect();
+        harness.daemon.tick(start + Duration::from_secs(7));
+        assert_refused(early, "待ち時間内の接続");
+
+        let mut late = harness.connect();
+        harness.daemon.tick(start + Duration::from_secs(600));
+        late.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert!(
+            launch::receive(&mut late).is_ok(),
+            "待ち時間の経過後は受け付ける"
+        );
+    }
+
+    #[test]
+    fn refused_connections_are_closed_in_bounded_batches() {
+        use std::io::Read;
+
+        use super::super::socket::MAX_DRAIN;
+
+        let mut harness = SocketHarness::new("flood");
+        let start = harness.start;
+        // 再起動までの待ち時間に入れ、届いた接続が拒否される状態にする。
+        let mut silent = harness.connect();
+        harness.daemon.tick(start);
+        harness.daemon.tick(start + Duration::from_secs(6));
+        launch::receive(&mut silent).unwrap();
+
+        // 接続し続ける plugin を、上限の 2 倍を超える数の待ち接続で模擬する。
+        let flood: Vec<UnixStream> = (0..2 * MAX_DRAIN + 4)
+            .map(|_| {
+                let stream = harness.connect();
+                stream.set_nonblocking(true).unwrap();
+                stream
+            })
+            .collect();
+        // 閉じられた接続は終端を返し、待たされている接続は読取りが成立しない。
+        let closed = |flood: &[UnixStream]| {
+            flood
+                .iter()
+                .filter(|stream| {
+                    let mut reader: &UnixStream = stream;
+                    matches!(reader.read(&mut [0u8; 1]), Ok(0))
+                })
+                .count()
+        };
+        // 1 回の周回で閉じるのは上限までで、残りは次の周回に回す。空になるまで閉じ続けると、
+        // 待ち行列を補充され続けた場合にイベントループが戻らない。
+        let during_backoff = start + Duration::from_secs(7);
+        for expected in [MAX_DRAIN, 2 * MAX_DRAIN, flood.len(), flood.len()] {
+            harness.daemon.tick(during_backoff);
+            assert_eq!(closed(&flood), expected);
+        }
+    }
 }

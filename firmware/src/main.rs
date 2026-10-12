@@ -238,21 +238,19 @@ fn main() -> ! {
                 tap_detector = touch::TapDetector::default();
             } else {
                 match touch::read_point(&mut i2c) {
-                    Ok(point) if tap_detector.sample(point.is_some()) => {
-                        let (_, y) = point.unwrap_or_default();
-                        match controller.input_mode() {
-                            protocol::InputMode::Demo => {
-                                let Ok(()) = controller.tap(now_ms, frame);
-                                if frame.flush(&mut display).is_err() {
-                                    esp_println::println!("touch demo drawing failed");
-                                }
+                    Ok(point) => {
+                        if let Some(gesture) = tap_detector.sample(point, now_ms) {
+                            // Client 側の plugin が受けた入力は host へ送らない。振分けは
+                            // Controller が行う。
+                            let Ok(event) = controller.gesture(gesture, now_ms, frame);
+                            if event.is_some() {
+                                pending_event = event;
                             }
-                            protocol::InputMode::Forward => {
-                                pending_event = Some(controller.hit(y));
+                            if frame.flush(&mut display).is_err() {
+                                esp_println::println!("touch drawing failed");
                             }
                         }
                     }
-                    Ok(_) => {}
                     Err(_) => {
                         touch_enabled = false;
                         esp_println::println!("touch read failed; USB display remains active");
