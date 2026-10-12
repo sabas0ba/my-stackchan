@@ -447,6 +447,43 @@ scripts/container.sh build                                                   # �
 
 `.work/cargo` に registry の cache が残っても、置き換えが有効な間は参照されない。`make audit` (cargo-deny) は yank の確認に crates.io の index を要するため、置き換えの無い `.work/cargo-online` を `CARGO_HOME` として実行する。
 
+## 本体の自律動作と microSD 設定
+
+顔を長押しし、SETTINGS を選択する。AUTO / TEXT / MOVE / LED を切り替え、NEXT で
+TOUCH / SENSE / DARK と動作頻度を変更する。変更は即時反映され、SAVE で SD に保存する。
+OFF にした設定は自律動作に適用される。host やタイマーの明示的な通知は対象外。
+
+FAT16 / FAT32 の第 1 パーティションのルートに `STKCN.CFG` を作成し、旧設定を
+`STKCN.BAK` に保持する。exFAT は対象外。SD を挿入していない場合も操作できるが、
+設定は電源を切ると既定値に戻る。保存に成功した場合は `Saved to SD` と表示する。
+起動時の主設定の読込に失敗し、バックアップが有効な場合は `Loaded SD backup / SAVE`
+と表示する。保存中はカードを抜かない。カードのフォーマット機能はない。
+
+PC で編集する際の既定値（全項目を必須とする）:
+
+```ini
+version=1
+enabled=true
+speech=true
+motion=true
+led=true
+touch=true
+sensors=true
+dark_quiet=true
+pace=normal
+```
+
+`pace` は `quiet` / `normal` / `lively`。発話は現在 ASCII の吹き出し表示であり、音声は出さない。
+実機の受入確認は次の順に行う。
+
+1. host の送信を止め、待機中の表情・視線・首と吹き出しを確認する。
+2. 顔のタップ・撫で・長押しが区別され、設定画面を開けることを確認する。
+3. 各出力と入力の OFF、動作頻度、近接と暗所の反応を確認する。
+4. 設定を SAVE し、再起動後に維持されることを確認する。
+5. SD を抜いた状態でも起動・設定変更でき、SAVE の失敗表示後も操作できることを確認する。
+
+`make simulate` は自律反応と設定画面の BMP も `.work/simulation/` に出力する。
+
 ## 固定の更新
 
 - nixpkgs: `flake.nix` の rev を変更し、`scripts/container.sh lock` で `flake.lock` を再生成する

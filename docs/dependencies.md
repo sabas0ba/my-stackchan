@@ -108,6 +108,31 @@ host CLI を `x86_64-pc-windows-gnu` 向けに cross build するため ([plugin
 - windows_x86_64_gnu は構築済みの import library `lib/libwindows.0.52.0.a` (12.7 MB) を同梱する。ソースから再生成できない配布物であり、crate の checksum による固定のみが同一性の根拠となる。Windows の API への import 記述だけを含む想定であるが、内容の独立した検証は行っていない
 - 生成された `stackchan.exe` の import table は Windows 標準の DLL (KERNEL32、msvcrt、advapi32、cfgmgr32、ntdll、setupapi、bcryptprimitives、api-ms-win-core-synch) のみを参照することを `x86_64-w64-mingw32-objdump -p` で確認した
 
+## microSD 設定保存の追加調査 (2026-10-12)
+
+利用者の承認を得て `embedded-sdmmc =0.10.0` を追加した。`default-features = false` とし、
+SD の SPI 転送と FAT16 / FAT32 の短いファイル名だけを使用する。既存依存の版変更は無い。
+
+| crate | 版 | 公開日 | 用途 |
+| --- | --- | --- | --- |
+| embedded-sdmmc | 0.10.0 | 2026-08-10 | SD / FAT |
+| embedded-sdmmc-types | 0.1.0 | 2026-08-10 | SD レジスタ等の型 |
+| arbitrary-int | 2.2.0 | 2026-08-19 | ビット幅を限定した整数 |
+| bitbybit | 2.0.1 | 2026-07-31 | ビットフィールドの proc macro |
+| hex-literal | 1.1.0 | 2025-10-29 | 定数のバイト表現 |
+
+crates.io の公式 sparse index で公開日・yank なし・`firmware/Cargo.lock` の checksum 一致を
+確認した（通常の crates.io API は 403 のため索引を使用）。すべて公開後 7 日を経過している。
+GitHub Advisory API (`ecosystem=rust`, `affects=<crate>`) は追加 5 crate とも該当なし。
+公開情報の検索ではこれらの配布経路の侵害報告は確認されなかった。
+`make audit` は host / firmware とも advisories・bans・licenses・sources を通過した。
+既存の複数バージョンの警告と `paste` の保守停止に対する既存の例外は維持している。
+追加 5 crate は build script を持たず、bitbybit のみ proc macro を含む。
+
+参照: [上流 v0.10.0](https://github.com/rust-embedded-community/embedded-sdmmc-rs/tree/v0.10.0)、
+[公式索引](https://index.crates.io/em/be/embedded-sdmmc)、
+[GitHub Advisory API](https://api.github.com/advisories?ecosystem=rust&affects=embedded-sdmmc)。
+
 ## 未調査・保留の項目
 
 - GNU Unifont の版と sha256 (Phase 4 で固定する)

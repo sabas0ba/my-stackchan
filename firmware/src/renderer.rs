@@ -7,13 +7,39 @@ use embedded_graphics::{
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{Circle, Line, PrimitiveStyle, Rectangle},
+    primitives::{Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
     text::{Baseline, Text},
 };
 use protocol::{Activity, Card, Element, Expression, EyeStyle, Gaze, ImageData, Presence, Slot};
 
 const IMAGE_WIDTH: usize = 96;
 const IMAGE_HEIGHT: usize = 16;
+
+/// 顔の下部に短い吹き出しを置く。上下の帯と操作画面の配分は Controller が決める。
+pub fn draw_bubble<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    text: &str,
+) -> Result<(), D::Error> {
+    Rectangle::new(Point::new(24, 166), Size::new(272, 24))
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .stroke_color(Rgb565::WHITE)
+                .stroke_width(1)
+                .fill_color(Rgb565::BLACK)
+                .build(),
+        )
+        .draw(display)?;
+    Text::new(
+        text,
+        Point::new(32, 182),
+        MonoTextStyle::new(
+            &embedded_graphics::mono_font::ascii::FONT_6X10,
+            Rgb565::WHITE,
+        ),
+    )
+    .draw(display)?;
+    Ok(())
+}
 
 // RGB と白の順序から、色順・RGB565 のバイト順を実機で確認できる。
 const fn color_bars() -> [u8; IMAGE_WIDTH * IMAGE_HEIGHT * 2] {

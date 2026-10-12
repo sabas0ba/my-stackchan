@@ -6,11 +6,15 @@
 extern crate std;
 
 pub mod actuators;
+pub mod autonomy;
 pub mod behavior;
 pub mod client;
 pub mod framebuffer;
 pub mod model;
 pub mod power;
 pub mod renderer;
+pub mod sensors;
+pub mod settings;
+pub mod storage;
 pub mod touch;
 pub mod transport;

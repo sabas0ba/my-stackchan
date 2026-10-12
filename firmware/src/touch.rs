@@ -45,6 +45,8 @@ pub const LONG_PRESS_MS: u64 = 600;
 pub enum Gesture {
     /// 短い接触。位置は接触を始めた点 (指を離す直前の点より安定しているため)。
     Tap { x: u16, y: u16 },
+    /// 指を動かした接触。操作画面のボタンではなく、顔を撫でる入力に使う。
+    Stroke { x: u16, y: u16, right: bool },
     /// `LONG_PRESS_MS` 以上の接触。接触が続いている間に 1 回だけ通知する。
     LongPress,
 }
@@ -55,6 +57,10 @@ struct Press {
     y: u16,
     started_ms: u64,
     long_fired: bool,
+    last_x: u16,
+    last_y: u16,
+    distance: u32,
+    excursion: u16,
 }
 
 /// 接触の有無の列から、タップと長押しを判定する。
@@ -79,15 +85,41 @@ impl TapDetector {
             }
             self.armed = true;
             let press = self.press.take()?;
+            if !press.long_fired
+                && press.distance >= 80
+                && press.excursion >= 24
+                && now_ms.saturating_sub(press.started_ms) >= 150
+            {
+                return Some(Gesture::Stroke {
+                    x: press.x,
+                    y: press.y,
+                    right: press.last_x >= press.x,
+                });
+            }
+            if press.excursion >= 24 {
+                return None;
+            }
             return (!press.long_fired).then_some(Gesture::Tap {
                 x: press.x,
                 y: press.y,
             });
         };
         self.released_polls = 0;
+        if let Some(press) = &mut self.press {
+            // 累積距離だけでは、静止した指の座標揺れも長押しを妨げる。
+            press.excursion = press
+                .excursion
+                .max(x.abs_diff(press.x) + y.abs_diff(press.y));
+            press.distance = press.distance.saturating_add(
+                u32::from(x.abs_diff(press.last_x)) + u32::from(y.abs_diff(press.last_y)),
+            );
+            press.last_x = x;
+            press.last_y = y;
+        }
         match &mut self.press {
             Some(press)
                 if !press.long_fired
+                    && press.excursion < 24
                     && now_ms.saturating_sub(press.started_ms) >= LONG_PRESS_MS =>
             {
                 press.long_fired = true;
@@ -102,6 +134,10 @@ impl TapDetector {
                         y,
                         started_ms: now_ms,
                         long_fired: false,
+                        last_x: x,
+                        last_y: y,
+                        distance: 0,
+                        excursion: 0,
                     });
                 }
                 None
@@ -140,6 +176,32 @@ mod tests {
     }
 
     const DOWN: Option<(u16, u16)> = Some((100, 50));
+
+    #[test]
+    fn stationary_jitter_preserves_long_press() {
+        let mut samples = std::vec![None, None];
+        samples.extend((0..40).map(|step| Some((100 + step % 3, 120))));
+        samples.extend([None, None]);
+        assert_eq!(run(&samples), [(640, Gesture::LongPress)]);
+    }
+
+    #[test]
+    fn moving_contact_is_a_stroke_not_a_long_press_or_button_tap() {
+        let mut samples = std::vec![None, None];
+        samples.extend((0..40).map(|step| Some((50 + step * 4, 120))));
+        samples.extend([None, None]);
+        assert_eq!(
+            run(&samples),
+            [(
+                860,
+                Gesture::Stroke {
+                    x: 50,
+                    y: 120,
+                    right: true
+                }
+            )]
+        );
+    }
 
     #[test]
     fn tap_is_reported_once_after_release_at_the_first_contact_point() {

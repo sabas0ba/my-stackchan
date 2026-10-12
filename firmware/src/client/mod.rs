@@ -7,6 +7,7 @@
 //! plugin は firmware と同じアドレス空間で動き、隔離できない。firmware の一部として
 //! 信頼するコードだけを登録する。設計は docs/plugin.md の「Client 側の plugin」を参照する。
 
+pub mod preferences;
 pub mod timer;
 
 use embedded_graphics::{prelude::*, primitives::Rectangle};
@@ -117,19 +118,32 @@ pub trait Registry {
 #[derive(Default)]
 pub struct Builtin {
     timer: timer::Timer,
+    preferences: preferences::Preferences,
 }
 
 impl Registry for Builtin {
     fn plugins(&self) -> heapless::Vec<&dyn Plugin, MAX_PLUGINS> {
-        heapless::Vec::from_iter([&self.timer as &dyn Plugin])
+        heapless::Vec::from_iter([&self.timer as &dyn Plugin, &self.preferences as &dyn Plugin])
     }
 
     fn plugins_mut(&mut self) -> heapless::Vec<&mut dyn Plugin, MAX_PLUGINS> {
-        heapless::Vec::from_iter([&mut self.timer as &mut dyn Plugin])
+        heapless::Vec::from_iter([
+            &mut self.timer as &mut dyn Plugin,
+            &mut self.preferences as &mut dyn Plugin,
+        ])
     }
 }
 
 pub type Clients = Manager<Builtin>;
+
+impl Manager<Builtin> {
+    pub fn preferences(&self) -> &preferences::Preferences {
+        &self.registry.preferences
+    }
+    pub fn preferences_mut(&mut self) -> &mut preferences::Preferences {
+        &mut self.registry.preferences
+    }
+}
 
 /// Panel を出しているもの。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -6,7 +6,7 @@
 #![no_main]
 
 use core::cell::RefCell;
-use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_hal_bus::spi::RefCellDevice;
 use esp_backtrace as _;
 use esp_hal::delay::Delay;
 use esp_hal::main;
@@ -28,7 +28,7 @@ use mipidsi::{
 
 mod board;
 use my_stackchan_firmware::{
-    actuators, framebuffer::FrameBuffer, model::Controller, power, renderer, touch,
+    actuators, framebuffer::FrameBuffer, model::Controller, power, renderer, sensors, touch,
     transport::Receiver,
 };
 use static_cell::{ConstStaticCell, StaticCell};
@@ -132,9 +132,10 @@ fn main() -> ! {
     .with_sda(peripherals.GPIO12);
     power::prepare_display(&mut i2c, &mut delay).expect("display power/reset");
 
-    // microSD を選択しない。カードの使用には別途バスの仲裁と初期化が必要。
-    let _sd_cs = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
+    // LCD の初期化中は microSD を選択しない。
+    let mut sd_cs = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
     let dc = RefCell::new(Flex::new(peripherals.GPIO35));
+    let miso = dc.borrow().peripheral_input();
     let cs = board::CsPin {
         pin: Output::new(peripherals.GPIO3, Level::High, OutputConfig::default()),
         dc: &dc,
@@ -145,8 +146,10 @@ fn main() -> ! {
     )
     .expect("SPI configuration")
     .with_sck(peripherals.GPIO36)
-    .with_mosi(peripherals.GPIO37);
-    let device = ExclusiveDevice::new(spi, cs, Delay::new()).expect("LCD chip select");
+    .with_mosi(peripherals.GPIO37)
+    .with_miso(miso);
+    let spi = RefCell::new(spi);
+    let device = RefCellDevice::new(&spi, cs, Delay::new()).expect("LCD chip select");
     let mut buffer = [0u8; 512];
     let interface = SpiInterface::new(device, board::DcPin(&dc), &mut buffer);
     let mut display = Builder::new(ILI9342CRgb565, interface)
@@ -214,12 +217,66 @@ fn main() -> ! {
     // Card を含む表示状態と受信バッファは大きいため、main のスタックから分離する。
     let receiver = RECEIVER.init_with(Receiver::default);
     let controller = CONTROLLER.init_with(Controller::default);
+    use my_stackchan_firmware::{client::preferences::StorageStatus, storage};
+    match board::with_sd(&spi, &mut sd_cs, storage::load) {
+        Ok(Some(loaded)) => {
+            controller.load_settings(loaded.settings);
+            controller.storage_status(if loaded.recovered {
+                StorageStatus::Recovered
+            } else {
+                StorageStatus::Loaded
+            });
+        }
+        Ok(None) => controller.storage_status(StorageStatus::Ready),
+        Err(error) => {
+            esp_println::println!("SD settings load failed: {}", error);
+            controller.storage_status(if matches!(error, board::SdError::Filesystem(_)) {
+                StorageStatus::Failed
+            } else {
+                StorageStatus::Unavailable
+            });
+        }
+    }
+    let mut sensor_ready = false;
+    let mut sensor_filter = sensors::Filter::default();
+    let mut next_sensor_ms = 1000u64;
     let mut tx = [0u8; 64];
     let mut tx_len = 0;
     let mut tx_sent = 0;
     let mut tx_started_ms = 0u64;
     loop {
         let now_ms = Instant::now().duration_since_epoch().as_millis();
+        if let Some(settings) = controller.take_settings_save() {
+            controller.storage_status(
+                match board::with_sd(&spi, &mut sd_cs, |card| storage::save(card, settings)) {
+                    Ok(()) => StorageStatus::Saved,
+                    Err(error) => {
+                        esp_println::println!("SD settings save failed: {}", error);
+                        StorageStatus::Failed
+                    }
+                },
+            );
+        }
+        if now_ms >= next_sensor_ms {
+            if !sensor_ready {
+                sensor_ready = sensors::init(&mut i2c).unwrap_or(false);
+                next_sensor_ms = now_ms.saturating_add(if sensor_ready { 200 } else { 5_000 });
+            } else {
+                next_sensor_ms = now_ms.saturating_add(100);
+                match sensors::read(&mut i2c) {
+                    Ok(sample) => {
+                        let (near, dark) = sensor_filter.update(sample);
+                        controller.sensor_sample(near, dark, now_ms);
+                    }
+                    Err(_) => {
+                        sensor_ready = false;
+                        sensor_filter = sensors::Filter::default();
+                        controller.sensor_sample(false, false, now_ms);
+                        next_sensor_ms = now_ms.saturating_add(5_000);
+                    }
+                }
+            }
+        }
         // 切断中の USB で応答 FIFO が詰まっても、新しい接続を受信できるようにする。
         if tx_len != 0 && now_ms.saturating_sub(tx_started_ms) >= 2_000 {
             tx_len = 0;

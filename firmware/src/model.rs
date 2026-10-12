@@ -216,6 +216,8 @@ pub struct Controller {
     /// host の内容と期限を、Client 側の表示で失わないためである。
     local: View,
     next_client_ms: u64,
+    autonomy: crate::autonomy::Autonomy,
+    autonomy_dirty: bool,
 }
 
 impl Default for Controller {
@@ -233,6 +235,8 @@ impl Default for Controller {
             clients: Clients::default(),
             local: View::default(),
             next_client_ms: 0,
+            autonomy: crate::autonomy::Autonomy::default(),
+            autonomy_dirty: false,
         }
     }
 }
@@ -336,7 +340,49 @@ impl Controller {
     }
 
     pub fn actuator_target(&self) -> crate::behavior::ActuatorTarget {
-        crate::behavior::target(self.state.presence(), self.state.emote())
+        if self.state.presence().is_some() || self.state.emote().is_some() {
+            return crate::behavior::target(self.state.presence(), self.state.emote());
+        }
+        let settings = self.clients.preferences().settings;
+        let mut target = crate::behavior::target(None, self.autonomy.emote());
+        if !settings.enabled || !settings.motion || self.local.panel.is_some() {
+            target.x_tenth_deg = crate::behavior::ActuatorTarget::NEUTRAL.x_tenth_deg;
+            target.y_tenth_deg = crate::behavior::ActuatorTarget::NEUTRAL.y_tenth_deg;
+        }
+        if !settings.enabled || !settings.led {
+            target.rgb = [0; 3];
+        }
+        target
+    }
+
+    pub fn settings(&self) -> crate::settings::Settings {
+        self.clients.preferences().settings
+    }
+
+    pub fn load_settings(&mut self, settings: crate::settings::Settings) {
+        self.clients.preferences_mut().settings = settings;
+        self.startup = false;
+        self.autonomy_dirty = true;
+        self.next_client_ms = 0;
+    }
+
+    pub fn storage_status(&mut self, status: crate::client::preferences::StorageStatus) {
+        self.clients.preferences_mut().status = status;
+    }
+
+    pub fn take_settings_save(&mut self) -> Option<crate::settings::Settings> {
+        let preferences = self.clients.preferences_mut();
+        if core::mem::take(&mut preferences.save_requested) {
+            Some(preferences.settings)
+        } else {
+            None
+        }
+    }
+
+    pub fn sensor_sample(&mut self, near: bool, dark: bool, now_ms: u64) {
+        self.autonomy_dirty |= self.autonomy.sensors(near, dark, now_ms, self.settings());
+        // センサ更新は次の描画周期に反映する。
+        self.next_client_ms = 0;
     }
 
     pub fn handle<D: DrawTarget<Color = Rgb565>>(
@@ -502,6 +548,12 @@ impl Controller {
             self.next_client_ms = now_ms + CLIENT_POLL_MS;
             self.clients.tick(now_ms);
             clients_changed = self.sync_clients(now_ms);
+            clients_changed |= self.autonomy.tick(now_ms, self.settings());
+            clients_changed |= core::mem::take(&mut self.autonomy_dirty);
+            if self.startup && self.autonomy.emote().is_some() {
+                self.startup = false;
+                clients_changed = true;
+            }
         }
         let blink = blink_at(now_ms);
         if clients_changed
@@ -528,8 +580,24 @@ impl Controller {
         state: &DisplayState,
         blink: bool,
     ) -> Result<(), D::Error> {
-        let shown = compose(state, &self.local);
-        crate::renderer::draw_state_with_image(display, &shown, &self.image.pixels, blink)
+        let mut shown = compose(state, &self.local);
+        let autonomous =
+            state.presence().is_none() && state.emote().is_none() && self.local.panel.is_none();
+        if autonomous && let Some(emote) = self.autonomy.emote() {
+            shown.emote = Some(EmoteEntry {
+                value: *emote,
+                deadline_ms: u64::MAX,
+                source: EmoteSource::Client,
+            });
+        }
+        crate::renderer::draw_state_with_image(display, &shown, &self.image.pixels, blink)?;
+        if autonomous
+            && shown.get(Slot::Overlay).is_none()
+            && let Some(text) = self.autonomy.speech()
+        {
+            crate::renderer::draw_bubble(display, text)?;
+        }
+        Ok(())
     }
 
     /// Client 側の plugin が求める表示と表情を取り込む。描き直しが要る場合に真を返す。
@@ -568,7 +636,8 @@ impl Controller {
     /// タッチの判定を振り分ける。host へ送る Event があれば返す。
     ///
     /// Panel と Client 側の Card へのタップは plugin に渡し、host へは送らない。それ以外は
-    /// 従来どおり、`Demo` では表情デモを進め、`Forward` では host へ送る。長押しは
+    /// `Demo` では自律反応し、`Forward` では host へ送る。顔へのタップは Forward
+    /// でも自律反応できるため、host の切断後も入力を失わない。長押しは
     /// Client 側の plugin を開く操作であり、host 側の入力 (タップ) と重ならない。
     pub fn gesture<D: DrawTarget<Color = Rgb565>>(
         &mut self,
@@ -583,6 +652,21 @@ impl Controller {
                 return Ok(None);
             }
             Gesture::Tap { x, y } => (x, y),
+            Gesture::Stroke { x: _, y, right } => {
+                if self.local.panel.is_none()
+                    && self.state.get(Slot::Overlay).is_none()
+                    && (BANNER_HEIGHT..BOTTOM_BANNER_Y).contains(&y)
+                {
+                    self.autonomy.react(
+                        crate::autonomy::Trigger::Stroke { right },
+                        now_ms,
+                        self.settings(),
+                    );
+                    self.startup = false;
+                    self.draw(display, &self.state, self.blink)?;
+                }
+                return Ok(None);
+            }
         };
         let panel = self.local.panel.as_ref();
         if let Some((owner, buttons)) = panel.map(|(owner, panel)| (*owner, panel.buttons.len())) {
@@ -602,13 +686,19 @@ impl Controller {
             self.refresh_clients(now_ms, display)?;
             return Ok(None);
         }
-        match self.input_mode {
-            InputMode::Demo => {
-                self.tap(now_ms, display)?;
-                Ok(None)
-            }
-            InputMode::Forward => Ok(Some(self.hit(y))),
+        if self.input_mode == InputMode::Demo
+            || (self.state.get(Slot::Overlay).is_none()
+                && (BANNER_HEIGHT..BOTTOM_BANNER_Y).contains(&y))
+        {
+            self.autonomy.react(
+                crate::autonomy::Trigger::Tap { x, y },
+                now_ms,
+                self.settings(),
+            );
+            self.startup = false;
+            self.draw(display, &self.state, self.blink)?;
         }
+        Ok((self.input_mode == InputMode::Forward).then(|| self.hit(y)))
     }
 }
 
@@ -616,6 +706,66 @@ impl Controller {
 mod tests {
     use super::*;
     use embedded_graphics::prelude::*;
+
+    #[test]
+    fn autonomous_outputs_respect_settings_but_explicit_host_emote_wins() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        controller
+            .gesture(
+                Gesture::Stroke {
+                    x: 80,
+                    y: 120,
+                    right: true,
+                },
+                100,
+                &mut display,
+            )
+            .unwrap();
+        assert_ne!(
+            controller.actuator_target(),
+            crate::behavior::ActuatorTarget::NEUTRAL
+        );
+        controller.load_settings(crate::settings::Settings {
+            motion: false,
+            led: false,
+            ..crate::settings::Settings::default()
+        });
+        assert_eq!(
+            controller.actuator_target(),
+            crate::behavior::ActuatorTarget::NEUTRAL
+        );
+        let emote = Emote {
+            expression: Expression::Happy,
+            gaze: Gaze::Right,
+            eyes: EyeStyle::Auto,
+            intensity: 30,
+            duration_ms: 1000,
+        };
+        controller
+            .handle(Message::Emote(emote), 200, &mut display)
+            .unwrap();
+        assert_eq!(
+            controller.actuator_target(),
+            crate::behavior::target(None, Some(&emote))
+        );
+    }
+
+    #[test]
+    fn forward_mode_keeps_face_reaction_without_host_responses() {
+        let mut controller = Controller {
+            input_mode: InputMode::Forward,
+            ..Controller::default()
+        };
+        let mut display = Display::default();
+        assert!(
+            controller
+                .gesture(Gesture::Tap { x: 160, y: 120 }, 100, &mut display)
+                .unwrap()
+                .is_some()
+        );
+        assert!(controller.autonomy.emote().is_some());
+    }
 
     #[derive(Default)]
     struct Display {
@@ -902,6 +1052,10 @@ mod tests {
     #[test]
     fn replacing_slot_restarts_ttl_and_clear_removes_every_slot() {
         let mut controller = Controller::default();
+        controller.load_settings(crate::settings::Settings {
+            enabled: false,
+            ..crate::settings::Settings::default()
+        });
         let mut display = Display::default();
         controller
             .handle(text(Slot::BannerTop, 1, "old"), 0, &mut display)
@@ -1204,6 +1358,7 @@ mod tests {
         fn start_timer(controller: &mut Controller, display: &mut Display, now_ms: u64) {
             for gesture in [
                 Gesture::LongPress,
+                press(0),
                 press(SETTING_PLUS_1M),
                 press(SETTING_START),
             ] {
@@ -1234,6 +1389,7 @@ mod tests {
                 controller.gesture(Gesture::LongPress, 0, &mut display),
                 Ok(None)
             );
+            controller.gesture(press(0), 0, &mut display).unwrap();
             assert!(matches!(
                 shown(&controller, Slot::Overlay),
                 Some(Content::Panel(_))
@@ -1408,7 +1564,7 @@ mod tests {
                 controller.gesture(Gesture::Tap { x: 160, y: 120 }, 1_000, &mut display),
                 Ok(None)
             );
-            assert_eq!(controller.demo_index, Some(0));
+            assert!(controller.autonomy.emote().is_some());
 
             controller.tick(60_000, &mut display).unwrap();
             // 完了は Panel ではなく、帯の Card と表情・首の動きで知らせる (顔を隠さない)。
