@@ -1,3 +1,8 @@
 # 改行コードを LF に統一する。Windows の core.autocrlf=true でチェックアウトすると
 # シェルスクリプトや Nix の定義が CRLF になり、コンテナ内で実行できなくなるため。
 * text=auto eol=lf
+
+# 上流のライセンス・著作者文書は配布原本の改行と空白を保持する。
+assets/fonts/COPYING -text -whitespace
+assets/fonts/OFL-1.1.txt -text -whitespace
+assets/fonts/UPSTREAM-README -text -whitespace
