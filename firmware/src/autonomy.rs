@@ -67,7 +67,7 @@ pub struct Autonomy {
     started_ms: u64,
     stage: u8,
     settle: Option<Emote>,
-    next_speech_ms: u64,
+    last_speech_ms: Option<u64>,
     last_text: Option<&'static str>,
     last_touch: Option<(u8, u64)>,
     last_idle: Option<usize>,
@@ -153,12 +153,12 @@ impl Autonomy {
                 _ => (Expression::Grin, Gaze::Right),
             };
             let text = self.choose(IDLE, now_ms);
-            let previous_speech = (self.next_speech_ms, self.last_text);
+            let previous_speech = (self.last_speech_ms, self.last_text);
             self.show(expression, gaze, text, now_ms, settings);
             // 待機中は半分を無言の仕草とし、毎回吹き出しで画面を占めない。
             if choice.is_multiple_of(2) {
                 self.speech = None;
-                (self.next_speech_ms, self.last_text) = previous_speech;
+                (self.last_speech_ms, self.last_text) = previous_speech;
             }
             changed = true;
         }
@@ -223,16 +223,21 @@ impl Autonomy {
             };
             emote
         });
-        if settings.speech && now_ms >= self.next_speech_ms {
+        let interval = match settings.speech_pace {
+            Pace::Quiet => 30_000,
+            Pace::Normal => 8_000,
+            Pace::Lively => 3_500,
+        };
+        // 設定変更直後も現在の頻度を使う。無言の動作は発話時刻を更新しない。
+        if settings.speech
+            && self
+                .last_speech_ms
+                .is_none_or(|last| now_ms.saturating_sub(last) >= interval)
+        {
             self.speech = Some(text);
             self.last_text = Some(text);
             self.speech_until_ms = now_ms.saturating_add(3_500);
-            let interval = match settings.speech_pace {
-                Pace::Quiet => 30_000,
-                Pace::Normal => 8_000,
-                Pace::Lively => 3_500,
-            };
-            self.next_speech_ms = now_ms.saturating_add(interval);
+            self.last_speech_ms = Some(now_ms);
         } else if !settings.speech {
             self.speech = None;
         }
@@ -287,6 +292,31 @@ impl Autonomy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_speech_pace_changes_apply_to_the_current_wait() {
+        for (before, after, deadline) in [
+            (Pace::Lively, Pace::Quiet, 30_000),
+            (Pace::Quiet, Pace::Lively, 3_500),
+        ] {
+            let mut model = Autonomy::default();
+            let mut settings = Settings {
+                speech_pace: before,
+                ..Settings::default()
+            };
+            model.show(Expression::Happy, Gaze::Center, "最初", 0, settings);
+            settings.speech_pace = after;
+            model.show(
+                Expression::Happy,
+                Gaze::Center,
+                "早すぎる",
+                deadline - 1,
+                settings,
+            );
+            assert_eq!(model.speech(), Some("最初"));
+            model.show(Expression::Happy, Gaze::Center, "次", deadline, settings);
+            assert_eq!(model.speech(), Some("次"));
+        }
+    }
 
     #[test]
     fn expressions_transition_and_cancel_without_late_reappearance() {

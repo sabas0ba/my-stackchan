@@ -134,6 +134,12 @@ pub fn draw<D: DrawTarget<Color = Rgb565>>(
             .size
             .width
             .saturating_sub(if truncated { width('…') } else { 0 });
+        // 省略記号の予約で折返し位置が変わるため、禁則も残り幅で再評価する。
+        let end = if truncated {
+            line_end(rest, limit).0
+        } else {
+            end
+        };
         let mut x = 0;
         for ch in rest[..end].chars() {
             if x + width(ch) > limit {
@@ -161,6 +167,34 @@ pub fn draw<D: DrawTarget<Color = Rgb565>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_truncated_lines_keep_opening_brackets_with_the_following_text() {
+        use embedded_graphics::mock_display::MockDisplay;
+        for (text, wrap, rows) in [("日（本語", false, 1), ("ABC\n日（本語", true, 2)] {
+            let mut actual = MockDisplay::<Rgb565>::new();
+            draw(
+                &mut actual,
+                text,
+                Rectangle::new(Point::zero(), Size::new(48, rows * 20)),
+                wrap,
+            )
+            .unwrap();
+            let mut expected = MockDisplay::<Rgb565>::new();
+            if rows == 2 {
+                draw(
+                    &mut expected,
+                    "ABC",
+                    Rectangle::new(Point::zero(), Size::new(48, 20)),
+                    false,
+                )
+                .unwrap();
+            }
+            let y = (rows as i32 - 1) * 20;
+            glyph(&mut expected, '日', Point::new(0, y)).unwrap();
+            glyph(&mut expected, '…', Point::new(16, y)).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
     #[test]
     fn embedded_table_is_sorted_and_contains_japanese() {
         assert_eq!(DATA.len() % RECORD, 0);
