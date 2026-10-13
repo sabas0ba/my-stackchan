@@ -57,6 +57,8 @@ pub enum Incoming {
         width: u16,
         height: u16,
         ttl_s: u16,
+        /// 顔を隠さず、顔の右下に重ねる。
+        inset: bool,
         /// 同じディレクトリ内の画素ファイルの名前。
         data: String,
     },
@@ -64,6 +66,8 @@ pub enum Incoming {
 
 type Entries = BTreeMap<String, (usize, Value)>;
 
+/// `[image]` の `placement`。値は「顔に重ねる (inset) か」。
+const IMAGE_PLACEMENTS: [(&str, bool); 2] = [("overlay", false), ("inset", true)];
 const PLACEMENTS: [(&str, Placement); 2] = [
     ("banner", Placement::Banner),
     ("overlay", Placement::Overlay),
@@ -76,9 +80,139 @@ const PRIORITIES: [(&str, Priority); 3] = [
 
 fn validate_header(header: &str) -> Result<(), &'static str> {
     match header {
-        "card" | "card-remove" | "image" | "log" => Ok(()),
-        _ => Err("要求は [card]、[card-remove]、[image]、[log] のいずれかです"),
+        "card" | "card-remove" | "image" | "log" | "panel" | "presence" | "emote" => Ok(()),
+        _ => Err(
+            "要求は [card]、[card-remove]、[image]、[log]、[panel]、[presence]、[emote] のいずれかです",
+        ),
     }
+}
+
+const EXPRESSIONS: [(&str, plugin_api::Expression); 12] = [
+    ("happy", plugin_api::Expression::Happy),
+    ("focused", plugin_api::Expression::Focused),
+    ("sleepy", plugin_api::Expression::Sleepy),
+    ("worried", plugin_api::Expression::Worried),
+    ("surprised", plugin_api::Expression::Surprised),
+    ("grin", plugin_api::Expression::Grin),
+    ("calm", plugin_api::Expression::Calm),
+    ("curious", plugin_api::Expression::Curious),
+    ("playful", plugin_api::Expression::Playful),
+    ("wink", plugin_api::Expression::Wink),
+    ("sad", plugin_api::Expression::Sad),
+    ("determined", plugin_api::Expression::Determined),
+];
+const GAZES: [(&str, plugin_api::Gaze); 5] = [
+    ("center", plugin_api::Gaze::Center),
+    ("left", plugin_api::Gaze::Left),
+    ("right", plugin_api::Gaze::Right),
+    ("up", plugin_api::Gaze::Up),
+    ("down", plugin_api::Gaze::Down),
+];
+const EYES: [(&str, plugin_api::EyeStyle); 5] = [
+    ("auto", plugin_api::EyeStyle::Auto),
+    ("open", plugin_api::EyeStyle::Open),
+    ("wide", plugin_api::EyeStyle::Wide),
+    ("closed", plugin_api::EyeStyle::Closed),
+    ("half-lidded", plugin_api::EyeStyle::HalfLidded),
+];
+const ACCESSORIES: [(&str, plugin_api::Accessory); 2] = [
+    ("none", plugin_api::Accessory::None),
+    ("headphones", plugin_api::Accessory::Headphones),
+];
+const ACTIVITIES: [(&str, plugin_api::Activity); 5] = [
+    ("idle", plugin_api::Activity::Idle),
+    ("working", plugin_api::Activity::Working),
+    ("waiting", plugin_api::Activity::Waiting),
+    ("done", plugin_api::Activity::Done),
+    ("error", plugin_api::Activity::Error),
+];
+const ICONS: [(&str, plugin_api::Icon); 28] = [
+    ("none", plugin_api::Icon::None),
+    ("play", plugin_api::Icon::Play),
+    ("pause", plugin_api::Icon::Pause),
+    ("stop", plugin_api::Icon::Stop),
+    ("next", plugin_api::Icon::Next),
+    ("previous", plugin_api::Icon::Previous),
+    ("shuffle", plugin_api::Icon::Shuffle),
+    ("repeat", plugin_api::Icon::Repeat),
+    ("repeat-one", plugin_api::Icon::RepeatOne),
+    ("close", plugin_api::Icon::Close),
+    ("back", plugin_api::Icon::Back),
+    ("forward", plugin_api::Icon::Forward),
+    ("first", plugin_api::Icon::First),
+    ("plus", plugin_api::Icon::Plus),
+    ("minus", plugin_api::Icon::Minus),
+    ("reset", plugin_api::Icon::Reset),
+    ("save", plugin_api::Icon::Save),
+    ("gear", plugin_api::Icon::Gear),
+    ("timer", plugin_api::Icon::Timer),
+    ("power", plugin_api::Icon::Power),
+    ("face", plugin_api::Icon::Face),
+    ("speech", plugin_api::Icon::Speech),
+    ("motion", plugin_api::Icon::Motion),
+    ("light", plugin_api::Icon::Light),
+    ("touch", plugin_api::Icon::Touch),
+    ("sense", plugin_api::Icon::Sense),
+    ("dark", plugin_api::Icon::Dark),
+    ("pace", plugin_api::Icon::Pace),
+];
+
+fn take_bool(entries: &mut Entries, key: &str) -> Result<Option<bool>, ConfigError> {
+    match entries.remove(key) {
+        None => Ok(None),
+        Some((_, Value::Bool(value))) => Ok(Some(value)),
+        Some((line, _)) => Err(error(line, format!("{key} は true / false です"))),
+    }
+}
+
+/// `button<N>.*` の key から Panel のボタンを組み立てる。番号は 1 から連続していなければならない。
+fn take_buttons(
+    entries: &mut Entries,
+    line: usize,
+) -> Result<Vec<plugin_api::Button>, ConfigError> {
+    let mut buttons = Vec::new();
+    for number in 1..=plugin_api::MAX_PANEL_BUTTONS {
+        let key = |name: &str| format!("button{number}.{name}");
+        let icon = take_choice(entries, &key("icon"), &ICONS)?;
+        let label = take_string(entries, &key("label"))?;
+        let active = take_bool(entries, &key("active"))?;
+        if icon.is_none() && label.is_none() {
+            if active.is_some() {
+                return Err(error(
+                    line,
+                    format!("button{number} には icon か label が必要です"),
+                ));
+            }
+            break;
+        }
+        buttons.push(plugin_api::Button {
+            icon: icon.unwrap_or_default(),
+            label: label.unwrap_or_default(),
+            active: active.unwrap_or(false),
+        });
+    }
+    if buttons.is_empty() {
+        return Err(error(line, "button1 が必要です".into()));
+    }
+    Ok(buttons)
+}
+
+/// 表情の要求に共通の key (expression、gaze、eyes) を読む。
+fn take_face(
+    entries: &mut Entries,
+) -> Result<
+    (
+        plugin_api::Expression,
+        plugin_api::Gaze,
+        plugin_api::EyeStyle,
+    ),
+    ConfigError,
+> {
+    Ok((
+        take_choice(entries, "expression", &EXPRESSIONS)?.unwrap_or(plugin_api::Expression::Happy),
+        take_choice(entries, "gaze", &GAZES)?.unwrap_or(plugin_api::Gaze::Center),
+        take_choice(entries, "eyes", &EYES)?.unwrap_or(plugin_api::EyeStyle::Auto),
+    ))
 }
 
 fn error(line: usize, reason: String) -> ConfigError {
@@ -232,6 +366,61 @@ pub fn parse(text: &str) -> Result<Incoming, ConfigError> {
             let card = require(take_integer(&mut entries, "card", 0..=255)?, line, "card")?;
             Incoming::Message(PluginMessage::CardRemove { card: card as u8 })
         }
+        "panel" => {
+            let card = require(take_integer(&mut entries, "card", 0..=255)?, line, "card")?;
+            let priority =
+                take_choice(&mut entries, "priority", &PRIORITIES)?.unwrap_or(Priority::High);
+            let ttl_s = require(
+                take_integer(&mut entries, "ttl_s", 1..=u32::from(u16::MAX))?,
+                line,
+                "ttl_s",
+            )?;
+            let mut lines = Vec::new();
+            for number in 1..=plugin_api::MAX_PANEL_LINES {
+                match take_string(&mut entries, &format!("line{number}"))? {
+                    Some(text) => lines.push(text),
+                    None => break,
+                }
+            }
+            let buttons = take_buttons(&mut entries, line)?;
+            Incoming::Message(PluginMessage::PanelPut(plugin_api::PanelPut {
+                card: card as u8,
+                priority,
+                ttl_s: ttl_s as u16,
+                lines,
+                buttons,
+            }))
+        }
+        "presence" => {
+            let activity = take_choice(&mut entries, "activity", &ACTIVITIES)?;
+            let detail = take_string(&mut entries, "detail")?.unwrap_or_default();
+            let (expression, gaze, eyes) = take_face(&mut entries)?;
+            let accessory = take_choice(&mut entries, "accessory", &ACCESSORIES)?
+                .unwrap_or(plugin_api::Accessory::None);
+            let ttl_s = take_integer(&mut entries, "ttl_s", 0..=u32::from(u16::MAX))?.unwrap_or(0);
+            Incoming::Message(PluginMessage::Presence(plugin_api::Presence {
+                activity,
+                detail,
+                expression,
+                gaze,
+                eyes,
+                ttl_s: ttl_s as u16,
+                accessory,
+            }))
+        }
+        "emote" => {
+            let (expression, gaze, eyes) = take_face(&mut entries)?;
+            let intensity = take_integer(&mut entries, "intensity", 0..=100)?.unwrap_or(0);
+            let duration_ms =
+                take_integer(&mut entries, "duration_ms", 100..=10_000)?.unwrap_or(1_000);
+            Incoming::Message(PluginMessage::Emote(plugin_api::Emote {
+                expression,
+                gaze,
+                eyes,
+                intensity: intensity as u8,
+                duration_ms: duration_ms as u16,
+            }))
+        }
         "image" => {
             let width = require(
                 take_integer(
@@ -252,12 +441,14 @@ pub fn parse(text: &str) -> Result<Incoming, ConfigError> {
                 "height",
             )?;
             let ttl_s = take_integer(&mut entries, "ttl_s", 0..=u32::from(u16::MAX))?.unwrap_or(0);
+            let inset = take_choice(&mut entries, "placement", &IMAGE_PLACEMENTS)?.unwrap_or(false);
             let data = require(take_string(&mut entries, "data")?, line, "data")?;
             validate_data_name(&data).map_err(|reason| error(line, reason.into()))?;
             Incoming::Image {
                 width: width as u16,
                 height: height as u16,
                 ttl_s: ttl_s as u16,
+                inset,
                 data,
             }
         }
@@ -302,6 +493,7 @@ fn read_request(path: &Path) -> Result<PluginMessage, String> {
             width,
             height,
             ttl_s,
+            inset,
             data,
         } => {
             // data は検証済みのファイル名であり、要求と同じディレクトリでだけ探す。
@@ -313,6 +505,7 @@ fn read_request(path: &Path) -> Result<PluginMessage, String> {
                 width,
                 height,
                 ttl_s,
+                inset,
                 pixels: result?,
             }))
         }
@@ -601,6 +794,71 @@ mod tests {
     }
 
     #[test]
+    fn panel_presence_and_emote_requests_are_parsed() {
+        let text = "[panel]\ncard = 1\nttl_s = 10\nline1 = \"再生中\"\n\
+                    button1.icon = \"play\"\nbutton2.icon = \"shuffle\"\nbutton2.label = \"ON\"\n\
+                    button2.active = true\nbutton3.label = \"text only\"\n";
+        let Incoming::Message(PluginMessage::PanelPut(panel)) = parse(text).unwrap() else {
+            panic!("PanelPut になる");
+        };
+        assert_eq!(
+            (panel.card, panel.ttl_s, panel.priority),
+            (1, 10, Priority::High)
+        );
+        assert_eq!(panel.lines, ["再生中"]);
+        assert_eq!(panel.buttons.len(), 3);
+        assert_eq!(panel.buttons[0].icon, plugin_api::Icon::Play);
+        assert!(panel.buttons[1].active && panel.buttons[1].label == "ON");
+        assert_eq!(panel.buttons[2].icon, plugin_api::Icon::None);
+        assert!(PluginMessage::PanelPut(panel).validate().is_ok());
+        for bad in [
+            // ttl_s が必須
+            "[panel]\ncard = 1\nbutton1.icon = \"play\"\n",
+            // ボタンが無い
+            "[panel]\ncard = 1\nttl_s = 10\n",
+            // 番号が連続していない、未知の icon、active だけ
+            "[panel]\ncard = 1\nttl_s = 10\nbutton2.icon = \"play\"\n",
+            "[panel]\ncard = 1\nttl_s = 10\nbutton1.icon = \"cat\"\n",
+            "[panel]\ncard = 1\nttl_s = 10\nbutton1.active = true\n",
+            "[panel]\ncard = 1\nttl_s = 10\nbutton1.icon = \"play\"\nline3 = \"x\"\n",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+
+        let text = "[presence]\nexpression = \"playful\"\naccessory = \"headphones\"\nttl_s = 20\n";
+        let Incoming::Message(PluginMessage::Presence(presence)) = parse(text).unwrap() else {
+            panic!("Presence になる");
+        };
+        assert_eq!(presence.expression, plugin_api::Expression::Playful);
+        assert_eq!(presence.accessory, plugin_api::Accessory::Headphones);
+        assert_eq!((presence.activity, presence.ttl_s), (None, 20));
+        assert_eq!(presence.gaze, plugin_api::Gaze::Center);
+
+        let text =
+            "[emote]\nexpression = \"wink\"\ngaze = \"left\"\nintensity = 40\nduration_ms = 800\n";
+        let Incoming::Message(PluginMessage::Emote(emote)) = parse(text).unwrap() else {
+            panic!("Emote になる");
+        };
+        assert_eq!(
+            (
+                emote.expression,
+                emote.gaze,
+                emote.intensity,
+                emote.duration_ms
+            ),
+            (
+                plugin_api::Expression::Wink,
+                plugin_api::Gaze::Left,
+                40,
+                800
+            )
+        );
+        assert!(parse("[emote]\nintensity = 101\n").is_err());
+        assert!(parse("[emote]\nduration_ms = 50\n").is_err());
+        assert!(parse("[presence]\naccessory = \"hat\"\n").is_err());
+    }
+
+    #[test]
     fn remove_log_and_image_requests_are_parsed() {
         assert_eq!(
             parse("[card-remove]\ncard = 7\n").unwrap(),
@@ -620,6 +878,7 @@ mod tests {
                 width: 120,
                 height: 120,
                 ttl_s: 10,
+                inset: false,
                 data: "cover-1.rgb565".into()
             }
         );

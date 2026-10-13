@@ -69,6 +69,18 @@ pub enum Content {
     Card(Box<Rows>),
     Text(String),
     Image(Arc<Image>),
+    /// 操作画面。識別子と TTL は送信時に daemon が付ける。
+    Panel(Box<protocol::Panel>),
+}
+
+/// plugin の Card の中身。Panel は Overlay にだけ置く。
+#[derive(Debug, Clone, PartialEq, Eq)]
+// どちらも Card 1 枚につき 1 つだけ持ち、数は plugin 数 × 8 以下である。Box にして確保を
+// 増やすほどの差ではない。
+#[allow(clippy::large_enum_variant)]
+pub enum Body {
+    Rows(Rows),
+    Panel(protocol::Panel),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +96,8 @@ pub struct Plan {
     pub top: Option<Shown>,
     pub bottom: Option<Shown>,
     pub overlay: Option<Shown>,
+    /// 顔に重ねる画像。slot ではなく、顔の領域に置く。
+    pub inset: Option<Shown>,
 }
 
 impl Plan {
@@ -105,6 +119,8 @@ struct ImageEntry {
     id: u64,
     image: Arc<Image>,
     deadline: Instant,
+    /// 顔を隠さず、顔に重ねて表示する。Overlay の候補にはしない。
+    inset: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +128,7 @@ struct CardEntry {
     key: CardKey,
     placement: Placement,
     priority: Priority,
-    rows: Rows,
+    body: Body,
     deadline: Option<Instant>,
     revision: u64,
 }
@@ -165,7 +181,7 @@ impl Scheduler {
         placement: Placement,
         priority: Priority,
         ttl_s: u16,
-        rows: Rows,
+        body: Body,
         limit: u8,
         now: Instant,
     ) -> Result<(), &'static str> {
@@ -173,6 +189,9 @@ impl Scheduler {
         if placement == Placement::Overlay && ttl_s == 0 {
             // 期限の無い Overlay は顔を隠し続けるため受け付けない。
             return Err("Overlay の Card には TTL を指定してください");
+        }
+        if matches!(body, Body::Panel(_)) && placement != Placement::Overlay {
+            return Err("Panel は Overlay にだけ置けます");
         }
         let held = self
             .cards
@@ -187,7 +206,7 @@ impl Scheduler {
             key,
             placement,
             priority,
-            rows,
+            body,
             deadline: (ttl_s != 0).then(|| now + Duration::from_secs(u64::from(ttl_s))),
             revision,
         };
@@ -215,7 +234,7 @@ impl Scheduler {
     }
 
     /// 画像を表示する。表示中の画像は置き換える。
-    pub fn image(&mut self, plugin: usize, image: Image, ttl_s: u16, now: Instant) {
+    pub fn image(&mut self, plugin: usize, image: Image, ttl_s: u16, inset: bool, now: Instant) {
         let duration = match ttl_s {
             0 => DEFAULT_IMAGE,
             seconds => Duration::from_secs(u64::from(seconds)),
@@ -226,6 +245,7 @@ impl Scheduler {
             id,
             image: Arc::new(image),
             deadline: now + duration,
+            inset,
         });
     }
 
@@ -277,7 +297,10 @@ impl Scheduler {
                 key: entry.key,
                 revision: entry.revision,
             },
-            content: Content::Card(Box::new(entry.rows.clone())),
+            content: match &entry.body {
+                Body::Rows(rows) => Content::Card(Box::new(rows.clone())),
+                Body::Panel(panel) => Content::Panel(Box::new(panel.clone())),
+            },
             remaining: entry.deadline.map(|deadline| deadline - now),
         }
     }
@@ -348,12 +371,16 @@ impl Scheduler {
                     .then(a.revision.cmp(&b.revision))
             });
         // 画像は通常優先度の Card と同順位とし、同順位では新しい方を出す。
-        let image = self.image.as_ref().filter(|image| {
-            overlay_card.is_none_or(|card| {
-                card.priority < Priority::Normal
-                    || (card.priority == Priority::Normal && card.revision < image.id)
-            })
-        });
+        let image = self
+            .image
+            .as_ref()
+            .filter(|image| !image.inset)
+            .filter(|image| {
+                overlay_card.is_none_or(|card| {
+                    card.priority < Priority::Normal
+                        || (card.priority == Priority::Normal && card.revision < image.id)
+                })
+            });
         plan.overlay = match (notice, image, overlay_card) {
             (Some((Priority::High, shown)), _, _) => Some(shown),
             (_, Some(image), _) => Some(Shown {
@@ -367,6 +394,19 @@ impl Scheduler {
             (_, None, Some(entry)) => Some(Self::shown_card(entry, now)),
             _ => None,
         };
+        // 顔に重ねる画像は Overlay と競合しない。Overlay が出ている間は隠れるだけである。
+        plan.inset = self
+            .image
+            .as_ref()
+            .filter(|image| image.inset)
+            .map(|image| Shown {
+                source: Source::Image {
+                    plugin: image.plugin,
+                    id: image.id,
+                },
+                content: Content::Image(Arc::clone(&image.image)),
+                remaining: Some(image.deadline - now),
+            });
         plan
     }
 }
@@ -420,12 +460,12 @@ mod tests {
                 Placement::Overlay,
                 Priority::Normal,
                 30,
-                rows("card"),
+                Body::Rows(rows("card")),
                 8,
                 now,
             )
             .unwrap();
-        scheduler.image(1, image(2), 0, now);
+        scheduler.image(1, image(2), 0, false, now);
         let plan = scheduler.plan(now);
         assert!(matches!(
             plan.overlay.unwrap().source,
@@ -439,13 +479,13 @@ mod tests {
                 Placement::Overlay,
                 Priority::Normal,
                 30,
-                rows("card"),
+                Body::Rows(rows("card")),
                 8,
                 now,
             )
             .unwrap();
         assert_eq!(card_key(&scheduler.plan(now).overlay), Some(key(0, 0)));
-        scheduler.image(1, image(3), 0, now);
+        scheduler.image(1, image(3), 0, false, now);
         assert!(card_key(&scheduler.plan(now).overlay).is_none());
         scheduler
             .put(
@@ -453,7 +493,7 @@ mod tests {
                 Placement::Overlay,
                 Priority::High,
                 30,
-                rows("high"),
+                Body::Rows(rows("high")),
                 8,
                 now,
             )
@@ -477,7 +517,7 @@ mod tests {
     fn stopping_a_plugin_removes_its_image_only() {
         let now = Instant::now();
         let mut scheduler = Scheduler::new(Duration::from_secs(5));
-        scheduler.image(1, image(2), 5, now);
+        scheduler.image(1, image(2), 5, false, now);
         scheduler.remove_plugin(0);
         assert!(scheduler.plan(now).overlay.is_some());
         scheduler.remove_plugin(1);
@@ -486,7 +526,15 @@ mod tests {
 
     fn put(scheduler: &mut Scheduler, key: CardKey, priority: Priority, now: Instant) {
         scheduler
-            .put(key, Placement::Banner, priority, 0, rows("x"), 8, now)
+            .put(
+                key,
+                Placement::Banner,
+                priority,
+                0,
+                Body::Rows(rows("x")),
+                8,
+                now,
+            )
             .unwrap();
     }
 
@@ -536,7 +584,7 @@ mod tests {
                 Placement::Banner,
                 Priority::Normal,
                 0,
-                rows("x"),
+                Body::Rows(rows("x")),
                 2,
                 now,
             )
@@ -552,7 +600,7 @@ mod tests {
                     Placement::Banner,
                     Priority::Normal,
                     0,
-                    rows("x"),
+                    Body::Rows(rows("x")),
                     1,
                     now
                 )
@@ -571,7 +619,7 @@ mod tests {
                     Placement::Overlay,
                     Priority::Normal,
                     0,
-                    rows("x"),
+                    Body::Rows(rows("x")),
                     8,
                     now
                 )
@@ -583,7 +631,7 @@ mod tests {
                 Placement::Overlay,
                 Priority::Normal,
                 5,
-                rows("x"),
+                Body::Rows(rows("x")),
                 8,
                 now,
             )

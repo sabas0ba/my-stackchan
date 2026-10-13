@@ -42,8 +42,29 @@ const DONE_KEEP_MS: u64 = 30 * MINUTE_MS;
 const CUE_EMOTE_MS: u16 = 2_000;
 const CUE_RENEW_MS: u64 = SECOND_MS;
 
-const SETTING_BUTTONS: [&str; 6] = ["+1h", "+10m", "+1m", "CLEAR", "START", "CLOSE"];
-const RUNNING_BUTTONS: [&str; 4] = ["+10m", "-10m", "STOP", "CLOSE"];
+/// 設定の Panel のボタン。番号は `setting_button` と揃える。
+fn setting_buttons() -> [super::Button; 6] {
+    use super::{Icon, icon_button, labeled_button};
+    [
+        labeled_button(Icon::Plus, "1h", false),
+        labeled_button(Icon::Plus, "10m", false),
+        labeled_button(Icon::Plus, "1m", false),
+        icon_button(Icon::Reset),
+        icon_button(Icon::Play),
+        icon_button(Icon::Close),
+    ]
+}
+
+/// 動作中の補正の Panel のボタン。番号は `running_button` と揃える。
+fn running_buttons() -> [super::Button; 4] {
+    use super::{Icon, icon_button, labeled_button};
+    [
+        labeled_button(Icon::Plus, "10m", false),
+        labeled_button(Icon::Minus, "10m", false),
+        icon_button(Icon::Stop),
+        icon_button(Icon::Close),
+    ]
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum State {
@@ -255,6 +276,10 @@ impl Plugin for Timer {
         "TIMER"
     }
 
+    fn icon(&self) -> super::Icon {
+        super::Icon::Timer
+    }
+
     fn tick(&mut self, now_ms: u64) {
         self.state = match self.state {
             State::Setting { close_at_ms, .. } if now_ms >= close_at_ms => State::Idle,
@@ -379,9 +404,9 @@ impl Plugin for Timer {
         match self.state {
             // 完了は Panel で知らせない。Panel は顔を隠し、表情で知らせられなくなる。
             State::Idle | State::Done { .. } => None,
-            State::Setting { minutes, .. } => Some(Panel::new(
+            State::Setting { minutes, .. } => Some(super::panel(
                 ["TIMER  set duration", minutes_label(minutes).as_str()],
-                &SETTING_BUTTONS,
+                &setting_buttons(),
             )),
             State::Running {
                 started_ms,
@@ -396,7 +421,7 @@ impl Plugin for Timer {
                     remaining_label(Self::remaining_ms(started_ms, total_ms, now_ms)),
                     minutes_label(total_ms / MINUTE_MS)
                 );
-                Panel::new(["TIMER  running", line.as_str()], &RUNNING_BUTTONS)
+                super::panel(["TIMER  running", line.as_str()], &running_buttons())
             }),
         }
     }

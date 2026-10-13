@@ -290,6 +290,7 @@ fn presence_with_eyes(
         gaze,
         eyes,
         ttl_s,
+        accessory: protocol::Accessory::None,
     })
 }
 
@@ -301,17 +302,30 @@ fn apply(controller: &mut Controller, screen: &mut Screen, message: Message) {
 }
 
 /// 画像領域の試験模様 (色相の横方向の変化と縦方向の明度) を ImageBegin/Rows/End で送る。
-fn apply_image_region(controller: &mut Controller, screen: &mut Screen, width: u16, height: u16) {
+fn apply_image_region(
+    controller: &mut Controller,
+    screen: &mut Screen,
+    width: u16,
+    height: u16,
+    inset: bool,
+) {
+    // 顔に重ねる場合は、daemon と同じく顔の領域の右下 (余白 8 px) に置く。
+    let (x, y) = if inset {
+        (WIDTH as u16 - 8 - width, 192 - 8 - height)
+    } else {
+        ((WIDTH as u16 - width) / 2, (HEIGHT as u16 - height) / 2)
+    };
     apply(
         controller,
         screen,
         Message::ImageBegin(ImageBegin {
             id: 1,
-            x: (WIDTH as u16 - width) / 2,
-            y: (HEIGHT as u16 - height) / 2,
+            x,
+            y,
             width,
             height,
             ttl_s: 0,
+            inset,
         }),
     );
     let mut pixels = Vec::new();
@@ -471,7 +485,7 @@ fn generate(options: &Options) -> io::Result<()> {
         .tick(800, &mut screen)
         .expect("screen is infallible");
     save_bmp(&options.output_dir.join("26-emote-expired.bmp"), &screen)?;
-    apply_image_region(&mut controller, &mut screen, 160, 120);
+    apply_image_region(&mut controller, &mut screen, 160, 120, false);
     save_bmp(&options.output_dir.join("27-image-region.bmp"), &screen)?;
     apply(
         &mut controller,
@@ -491,6 +505,7 @@ fn generate(options: &Options) -> io::Result<()> {
     }
     generate_timer(options)?;
     generate_autonomy(options)?;
+    generate_decorations(options)?;
 
     fs::write(
         options.output_dir.join("index.html"),
@@ -503,6 +518,125 @@ fn gesture(controller: &mut Controller, screen: &mut Screen, gesture: Gesture, n
     controller
         .gesture(gesture, now_ms, screen)
         .expect("screen is infallible");
+}
+
+/// 装飾 (ヘッドフォン) と、host の Panel、ピクトグラムの一覧。
+fn generate_decorations(options: &Options) -> io::Result<()> {
+    use protocol::{Accessory, Button, Icon, Panel};
+
+    let mut screen = Screen::default();
+    let mut controller = Controller::default();
+    apply(
+        &mut controller,
+        &mut screen,
+        Message::Presence(Presence {
+            activity: None,
+            detail: "".try_into().expect("empty detail fits"),
+            expression: Expression::Playful,
+            gaze: Gaze::Center,
+            eyes: EyeStyle::Auto,
+            ttl_s: 0,
+            accessory: Accessory::Headphones,
+        }),
+    );
+    apply(
+        &mut controller,
+        &mut screen,
+        text(Slot::BannerBottom, "DEMON'S SHOT / Aiobahn +81", 0),
+    );
+    save_bmp(&options.output_dir.join("43-headphones.bmp"), &screen)?;
+    apply(
+        &mut controller,
+        &mut screen,
+        Message::Emote(Emote {
+            expression: Expression::Wink,
+            gaze: Gaze::Point { x: 60, y: -30 },
+            eyes: EyeStyle::Auto,
+            intensity: 0,
+            duration_ms: 1000,
+        }),
+    );
+    save_bmp(&options.output_dir.join("44-headphones-emote.bmp"), &screen)?;
+    // カバー画像は顔を隠さず、顔の右下に重ねる。
+    apply_image_region(&mut controller, &mut screen, 64, 64, true);
+    save_bmp(&options.output_dir.join("51-inset-cover.bmp"), &screen)?;
+
+    let panel = |lines: &[&str], buttons: &[Button]| {
+        Message::Panel(Panel {
+            id: 9,
+            ttl_s: 10,
+            lines: lines
+                .iter()
+                .map(|line| (*line).try_into().expect("line fits"))
+                .collect(),
+            buttons: buttons.iter().cloned().collect(),
+        })
+    };
+    apply(
+        &mut controller,
+        &mut screen,
+        panel(
+            &["DEMON'S SHOT", "Aiobahn +81"],
+            &[
+                Button::new(Icon::Previous, "", false),
+                Button::new(Icon::Pause, "", false),
+                Button::new(Icon::Next, "", false),
+                Button::new(Icon::Shuffle, "ON", true),
+                Button::new(Icon::RepeatOne, "ONE", false),
+                Button::new(Icon::Close, "", false),
+            ],
+        ),
+    );
+    save_bmp(&options.output_dir.join("45-host-panel.bmp"), &screen)?;
+
+    // 一覧: 6 個ずつ 5 画面。ピクトグラムの名前をラベルにする。
+    let icons = [
+        (Icon::Play, "play"),
+        (Icon::Pause, "pause"),
+        (Icon::Stop, "stop"),
+        (Icon::Next, "next"),
+        (Icon::Previous, "previous"),
+        (Icon::Shuffle, "shuffle"),
+        (Icon::Repeat, "repeat"),
+        (Icon::RepeatOne, "repeat-one"),
+        (Icon::Close, "close"),
+        (Icon::Back, "back"),
+        (Icon::Forward, "forward"),
+        (Icon::First, "first"),
+        (Icon::Plus, "plus"),
+        (Icon::Minus, "minus"),
+        (Icon::Reset, "reset"),
+        (Icon::Save, "save"),
+        (Icon::Gear, "gear"),
+        (Icon::Timer, "timer"),
+        (Icon::Power, "power"),
+        (Icon::Face, "face"),
+        (Icon::Speech, "speech"),
+        (Icon::Motion, "motion"),
+        (Icon::Light, "light"),
+        (Icon::Touch, "touch"),
+        (Icon::Sense, "sense"),
+        (Icon::Dark, "dark"),
+        (Icon::Pace, "pace"),
+        (Icon::None, "none"),
+    ];
+    for (page, chunk) in icons.chunks(6).enumerate() {
+        let buttons: Vec<Button> = chunk
+            .iter()
+            .enumerate()
+            .map(|(index, (icon, name))| Button::new(*icon, name, index == 1))
+            .collect();
+        apply(
+            &mut controller,
+            &mut screen,
+            panel(&[&format!("ICONS {}/5", page + 1)], &buttons),
+        );
+        save_bmp(
+            &options.output_dir.join(format!("{}-icons.bmp", 46 + page)),
+            &screen,
+        )?;
+    }
+    Ok(())
 }
 
 fn generate_autonomy(options: &Options) -> io::Result<()> {
@@ -679,6 +813,15 @@ figcaption {{ margin-top: .5rem; font-weight: 600; }}
 <figure><img src="40-expression-settings.bmp" width="320" height="240" alt="表現の設定"><figcaption>40. 表現の設定</figcaption></figure>
 <figure><img src="41-japanese-overlay.bmp" width="320" height="240" alt="日本語通知"><figcaption>41. 日本語通知</figcaption></figure>
 <figure><img src="42-japanese-tap.bmp" width="320" height="240" alt="日本語の反応"><figcaption>42. 日本語の反応</figcaption></figure>
+<figure><img src="43-headphones.bmp" width="320" height="240" alt="ヘッドフォンを付けた表情"><figcaption>43. Playful + headphones</figcaption></figure>
+<figure><img src="44-headphones-emote.bmp" width="320" height="240" alt="ヘッドフォンを保ったままの Emote"><figcaption>44. Emote keeps headphones</figcaption></figure>
+<figure><img src="45-host-panel.bmp" width="320" height="240" alt="host の操作画面"><figcaption>45. Host panel (pictograms)</figcaption></figure>
+<figure><img src="46-icons.bmp" width="320" height="240" alt="ピクトグラムの一覧 1"><figcaption>46. Icons 1/5</figcaption></figure>
+<figure><img src="47-icons.bmp" width="320" height="240" alt="ピクトグラムの一覧 2"><figcaption>47. Icons 2/5</figcaption></figure>
+<figure><img src="48-icons.bmp" width="320" height="240" alt="ピクトグラムの一覧 3"><figcaption>48. Icons 3/5</figcaption></figure>
+<figure><img src="49-icons.bmp" width="320" height="240" alt="ピクトグラムの一覧 4"><figcaption>49. Icons 4/5</figcaption></figure>
+<figure><img src="50-icons.bmp" width="320" height="240" alt="ピクトグラムの一覧 5"><figcaption>50. Icons 5/5</figcaption></figure>
+<figure><img src="51-inset-cover.bmp" width="320" height="240" alt="顔の右下に重ねたカバー画像"><figcaption>51. Inset cover (64x64)</figcaption></figure>
 "#
     );
     for index in 1..=my_stackchan_firmware::model::DEMO_FACE_COUNT {

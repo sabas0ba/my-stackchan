@@ -70,6 +70,38 @@ fn largest_card() -> Message {
     Message::Card(card)
 }
 
+/// 行とボタンを上限まで埋めた Panel。
+fn largest_panel() -> Message {
+    let mut panel = protocol::Panel {
+        id: u16::MAX,
+        ttl_s: u16::MAX,
+        ..protocol::Panel::default()
+    };
+    for _ in 0..protocol::MAX_PANEL_LINES {
+        panel
+            .lines
+            .push(
+                "x".repeat(protocol::MAX_PANEL_LINE_BYTES)
+                    .as_str()
+                    .try_into()
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    for _ in 0..protocol::MAX_PANEL_BUTTONS {
+        panel
+            .buttons
+            .push(protocol::Button::new(
+                protocol::Icon::Pace,
+                &"x".repeat(protocol::MAX_BUTTON_LABEL_BYTES),
+                true,
+            ))
+            .unwrap();
+    }
+    panel.validate().unwrap();
+    Message::Panel(panel)
+}
+
 fn corpus() -> Vec<Vec<u8>> {
     let mut frames = vec![
         wire(&Message::Ping { nonce: u32::MAX }),
@@ -87,7 +119,9 @@ fn corpus() -> Vec<Vec<u8>> {
             gaze: Gaze::Right,
             eyes: EyeStyle::HalfLidded,
             ttl_s: 30,
+            accessory: protocol::Accessory::Headphones,
         })),
+        wire(&largest_panel()),
         wire(&Reply::Pong {
             nonce: 0,
             version: protocol::VERSION,

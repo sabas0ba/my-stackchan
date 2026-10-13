@@ -11,6 +11,7 @@ pub mod behavior;
 pub mod client;
 pub mod font;
 pub mod framebuffer;
+pub mod icons;
 pub mod model;
 pub mod power;
 pub mod renderer;

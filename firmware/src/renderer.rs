@@ -7,10 +7,14 @@ use embedded_graphics::{
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
+    primitives::{
+        Circle, Line, Polyline, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
+    },
     text::Text,
 };
-use protocol::{Activity, Card, Element, Expression, EyeStyle, Gaze, ImageData, Presence, Slot};
+use protocol::{
+    Accessory, Activity, Card, Element, Expression, EyeStyle, Gaze, ImageData, Presence, Slot,
+};
 
 const IMAGE_WIDTH: usize = 96;
 const IMAGE_HEIGHT: usize = 16;
@@ -78,6 +82,7 @@ pub fn draw_startup_with_blink<D: DrawTarget<Color = Rgb565>>(
         Expression::Happy,
         Gaze::Center,
         EyeStyle::Auto,
+        Accessory::None,
         blink,
     )?;
 
@@ -103,8 +108,11 @@ fn draw_face<D: DrawTarget<Color = Rgb565>>(
     expression: Expression,
     gaze: Gaze,
     eyes: EyeStyle,
+    accessory: Accessory,
     blink: bool,
 ) -> Result<(), D::Error> {
+    // 装飾は顔の奥に描き、目や眉に重ならないようにする。
+    draw_accessory(display, accessory)?;
     let eyes = match eyes {
         EyeStyle::Auto if blink => EyeStyle::Closed,
         value => value,
@@ -218,6 +226,42 @@ fn draw_face<D: DrawTarget<Color = Rgb565>>(
         )?,
     }
     Ok(())
+}
+
+/// 顔に重ねる装飾。画面全体を顔と見なし、ヘッドフォンは上端に沿う帯と、両端の耳当てで表す。
+fn draw_accessory<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    accessory: Accessory,
+) -> Result<(), D::Error> {
+    match accessory {
+        Accessory::None => Ok(()),
+        Accessory::Headphones => {
+            // 帯: 両耳当ての上端を結ぶ浅い弧。上の帯 (高さ 48 px) と目 (上端 72 px) の間に
+            // 収める。円弧ではなく折れ線で描くのは、半径の大きい円弧は描画のたびに外接する
+            // 正方形の全画素を走査し、再描画が遅くなるためである。
+            Polyline::new(&[
+                Point::new(43, 63),
+                Point::new(80, 56),
+                Point::new(120, 52),
+                Point::new(160, 51),
+                Point::new(200, 52),
+                Point::new(240, 56),
+                Point::new(277, 63),
+            ])
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 5))
+            .draw(display)?;
+            // 耳当て: 目の外側に置く、塗りつぶした角の丸い長方形。目 (x 90..118、202..230) に重ねない。
+            for x in [30, 266] {
+                RoundedRectangle::with_equal_corners(
+                    Rectangle::new(Point::new(x, 62), Size::new(24, 60)),
+                    Size::new(8, 8),
+                )
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                .draw(display)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn draw_eye<D: DrawTarget<Color = Rgb565>>(
@@ -352,7 +396,11 @@ pub fn draw_state_with_image<D: DrawTarget<Color = Rgb565>>(
                     .map(|presence| (presence.expression, presence.gaze, presence.eyes))
             })
             .unwrap_or((Expression::Happy, Gaze::Center, EyeStyle::Auto));
-        draw_face(display, face.0, face.1, face.2, blink)?;
+        // 装飾は Presence が持ち、Emote で顔が上書きされている間も保つ。
+        let accessory = state
+            .presence()
+            .map_or(Accessory::None, |presence| presence.accessory);
+        draw_face(display, face.0, face.1, face.2, accessory, blink)?;
         if let Some(presence) = state.presence() {
             draw_presence_status(display, presence)?;
         }
@@ -365,6 +413,22 @@ pub fn draw_state_with_image<D: DrawTarget<Color = Rgb565>>(
                     Rectangle::new(Point::new(0, y), Size::new(320, 48)),
                 )?;
             }
+        }
+        // 顔に重ねる画像。顔と帯の後に描き、白い枠で顔の線と区別する。
+        if let Some(region) = state.inset() {
+            Rectangle::new(
+                Point::new(i32::from(region.x) - 2, i32::from(region.y) - 2),
+                Size::new(u32::from(region.width) + 4, u32::from(region.height) + 4),
+            )
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(Rgb565::WHITE)
+                    .stroke_width(1)
+                    .fill_color(Rgb565::BLACK)
+                    .build(),
+            )
+            .draw(display)?;
+            draw_region_image(display, image, region)?;
         }
     }
     Ok(())
@@ -413,11 +477,12 @@ fn draw_content<D: DrawTarget<Color = Rgb565>>(
     }
 }
 
-/// Client 側の plugin の操作画面を描く。文字の行の下に、枠付きのボタンを並べる。
+/// 操作画面を描く。文字の行の下に、枠付きのボタンを並べる。ボタンにはピクトグラムと
+/// ラベルを置き、`active` のボタンは枠を塗って色を反転する (ON の状態を示す)。
 /// ボタンの位置は `client::button_frame` で決まり、タップの照合と共用する。
 fn draw_panel<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
-    panel: &crate::client::Panel,
+    panel: &protocol::Panel,
 ) -> Result<(), D::Error> {
     for (index, line) in panel.lines.iter().enumerate() {
         draw_cell_label(
@@ -426,17 +491,88 @@ fn draw_panel<D: DrawTarget<Color = Rgb565>>(
             Rectangle::new(Point::new(10, 10 + index as i32 * 24), Size::new(300, 20)),
         )?;
     }
-    for (index, label) in panel.buttons.iter().enumerate() {
+    for (index, button) in panel.buttons.iter().enumerate() {
         let frame = crate::client::button_frame(index);
+        let (fg, bg) = if button.active {
+            (Rgb565::BLACK, Rgb565::WHITE)
+        } else {
+            (Rgb565::WHITE, Rgb565::BLACK)
+        };
         frame
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 2))
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(Rgb565::WHITE)
+                    .stroke_width(2)
+                    .fill_color(bg)
+                    .build(),
+            )
             .draw(display)?;
-        // 半角と全角の実際の幅で中央に置く。
-        let width = crate::font::text_width(label).min(frame.size.width.saturating_sub(8));
-        let origin = frame.center() - Point::new(width as i32 / 2, 10);
-        draw_cell_label(display, label, Rectangle::new(origin, Size::new(width, 20)))?;
+        let has_label = !button.label.is_empty();
+        if button.icon != protocol::Icon::None {
+            // ラベルがあれば上寄せの 36 px、無ければ中央の 44 px。
+            let side = if has_label { 36 } else { 44 };
+            let top = if has_label {
+                frame.top_left.y + 6
+            } else {
+                frame.center().y - side / 2
+            };
+            let area = Rectangle::new(
+                Point::new(frame.center().x - side / 2, top),
+                Size::new(side as u32, side as u32),
+            );
+            crate::icons::draw_icon(display, button.icon, area, fg, bg)?;
+        }
+        if has_label {
+            // 半角と全角の実際の幅で中央に置く。ピクトグラムがあれば下に寄せる。
+            let width =
+                crate::font::text_width(&button.label).min(frame.size.width.saturating_sub(8));
+            let y = if button.icon == protocol::Icon::None {
+                frame.center().y - 10
+            } else {
+                frame.top_left.y + frame.size.height as i32 - 26
+            };
+            let origin = Point::new(frame.center().x - width as i32 / 2, y);
+            let cell = Rectangle::new(origin, Size::new(width, 20));
+            if button.active {
+                // 文字の描画は白固定のため、塗った枠の上では色を反転して描く。
+                draw_cell_label(&mut Inverted(display), &button.label, cell)?;
+            } else {
+                draw_cell_label(display, &button.label, cell)?;
+            }
+        }
     }
     Ok(())
+}
+
+/// 白と黒を入れ替えて描く描画先。塗った枠の上に文字を描くために用いる。
+struct Inverted<'a, D>(&'a mut D);
+
+impl<D: DrawTarget<Color = Rgb565>> Dimensions for Inverted<'_, D> {
+    fn bounding_box(&self) -> Rectangle {
+        self.0.bounding_box()
+    }
+}
+
+impl<D: DrawTarget<Color = Rgb565>> DrawTarget for Inverted<'_, D> {
+    type Color = Rgb565;
+    type Error = D::Error;
+
+    fn draw_iter<I: IntoIterator<Item = Pixel<Rgb565>>>(
+        &mut self,
+        pixels: I,
+    ) -> Result<(), D::Error> {
+        self.0
+            .draw_iter(pixels.into_iter().map(|Pixel(point, color)| {
+                let color = if color == Rgb565::WHITE {
+                    Rgb565::BLACK
+                } else if color == Rgb565::BLACK {
+                    Rgb565::WHITE
+                } else {
+                    color
+                };
+                Pixel(point, color)
+            }))
+    }
 }
 
 /// 画像領域を描く。画素が領域に足りない場合は描かない (領域は黒のまま)。
@@ -699,6 +835,7 @@ mod tests {
                     gaze: Gaze::Right,
                     eyes: EyeStyle::Auto,
                     ttl_s: 1,
+                    accessory: protocol::Accessory::None,
                 }),
                 0,
                 &mut screen,
@@ -736,6 +873,7 @@ mod tests {
                     gaze: Gaze::Center,
                     eyes: EyeStyle::Wide,
                     ttl_s: 0,
+                    accessory: protocol::Accessory::None,
                 }),
                 5_000,
                 &mut screen,
@@ -777,6 +915,7 @@ mod tests {
                     gaze: Gaze::Center,
                     eyes: EyeStyle::Auto,
                     ttl_s: 0,
+                    accessory: protocol::Accessory::None,
                 }),
                 0,
                 &mut screen,
@@ -823,6 +962,7 @@ mod tests {
                         gaze: Gaze::Center,
                         eyes,
                         ttl_s: 0,
+                        accessory: protocol::Accessory::None,
                     }),
                     0,
                     &mut screen,

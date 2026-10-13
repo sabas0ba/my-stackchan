@@ -71,6 +71,7 @@ fn frame(width: u16, height: u16, index: u16) -> PluginMessage {
         width,
         height,
         ttl_s: FRAME_TTL_S,
+        inset: false,
         pixels: pattern(width, height, index),
     })
 }

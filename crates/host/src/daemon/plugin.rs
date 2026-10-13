@@ -114,6 +114,7 @@ pub enum Event {
 /// plugin の要求のうち、daemon が画面または顔に反映するもの。
 pub enum Request {
     Put(CardPut),
+    Panel(plugin_api::PanelPut),
     Remove(u8),
     Notify(plugin_api::Notify),
     Presence(protocol::Presence),
@@ -384,6 +385,9 @@ impl PluginRuntime {
             PluginMessage::CardPut(card) if granted.cards > 0 => {
                 Outcome::Request(Request::Put(card))
             }
+            PluginMessage::PanelPut(panel) if granted.cards > 0 => {
+                Outcome::Request(Request::Panel(panel))
+            }
             PluginMessage::CardRemove { card } => Outcome::Request(Request::Remove(card)),
             PluginMessage::Notify(notify) if granted.notify => {
                 Outcome::Request(Request::Notify(notify))
@@ -414,6 +418,7 @@ impl PluginRuntime {
                 Outcome::Nothing
             }
             PluginMessage::CardPut(_)
+            | PluginMessage::PanelPut(_)
             | PluginMessage::Notify(_)
             | PluginMessage::Presence(_)
             | PluginMessage::Emote(_)
