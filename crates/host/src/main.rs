@@ -138,6 +138,9 @@ enum Command {
         gaze: FaceGaze,
         #[arg(long, value_enum, default_value = "auto")]
         eyes: HostEyeStyle,
+        /// 顔に重ねる装飾。
+        #[arg(long, value_enum, default_value = "none")]
+        accessory: HostAccessory,
         #[arg(long, default_value_t = 0)]
         ttl: u16,
     },
@@ -153,6 +156,9 @@ enum Command {
         gaze: FaceGaze,
         #[arg(long, value_enum, default_value = "auto")]
         eyes: HostEyeStyle,
+        /// 顔に重ねる装飾。daemon 経由では既定値になる
+        #[arg(long, value_enum, default_value = "none")]
+        accessory: HostAccessory,
         #[arg(long, default_value_t = 30)]
         ttl: u16,
         /// port を開かず、動作中の daemon へ spool 経由で渡す。視線と目の形は既定値になる
@@ -323,6 +329,21 @@ impl From<FaceGaze> for protocol::Gaze {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum HostAccessory {
+    None,
+    Headphones,
+}
+
+impl From<HostAccessory> for protocol::Accessory {
+    fn from(value: HostAccessory) -> Self {
+        match value {
+            HostAccessory::None => Self::None,
+            HostAccessory::Headphones => Self::Headphones,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum HostEyeStyle {
     Auto,
     Open,
@@ -486,10 +507,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             expression,
             gaze,
             eyes,
+            accessory,
             ttl,
         } => send_display(
             port,
-            &presence_message(None, "", expression.into(), gaze.into(), eyes.into(), ttl)?,
+            &presence_message(
+                None,
+                "",
+                expression.into(),
+                gaze.into(),
+                eyes.into(),
+                ttl,
+                accessory.into(),
+            )?,
             Some(&trim_file),
         ),
         Command::Status {
@@ -512,6 +542,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             detail,
             gaze,
             eyes,
+            accessory,
             ttl,
             ..
         } => {
@@ -525,6 +556,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gaze.into(),
                     eyes.into(),
                     ttl,
+                    accessory.into(),
                 )?,
                 Some(&trim_file),
             )
@@ -776,6 +808,7 @@ fn presence_message(
     gaze: protocol::Gaze,
     eyes: protocol::EyeStyle,
     ttl_s: u16,
+    accessory: protocol::Accessory,
 ) -> Result<protocol::Message, String> {
     let detail = detail.try_into().map_err(|_| {
         format!(
@@ -790,6 +823,7 @@ fn presence_message(
         gaze,
         eyes,
         ttl_s,
+        accessory,
     }))
 }
 
@@ -1199,6 +1233,7 @@ mod tests {
             gaze.into(),
             eyes.into(),
             ttl,
+            protocol::Accessory::None,
         )
         .unwrap();
         let protocol::Message::Presence(presence) = message else {
@@ -1215,7 +1250,8 @@ mod tests {
                 protocol::Expression::Happy,
                 protocol::Gaze::Center,
                 protocol::EyeStyle::Auto,
-                0
+                0,
+                protocol::Accessory::None,
             )
             .is_err()
         );
@@ -1652,6 +1688,7 @@ mod tests {
                 protocol::Gaze::Left,
                 protocol::EyeStyle::Wide,
                 0,
+                protocol::Accessory::Headphones,
             )
             .unwrap(),
             presence_message(
@@ -1661,6 +1698,7 @@ mod tests {
                 protocol::Gaze::Right,
                 protocol::EyeStyle::HalfLidded,
                 1,
+                protocol::Accessory::None,
             )
             .unwrap(),
         ] {

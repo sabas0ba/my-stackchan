@@ -19,7 +19,7 @@ pub use frame::{FrameError, FrameReader, write_frame};
 use serde::{Deserialize, Serialize};
 
 /// plugin API の版。互換性の無い変更を行った場合に増やす。
-pub const API_VERSION: u16 = 3;
+pub const API_VERSION: u16 = 4;
 
 /// COBS 符号化後のフレームの最大バイト数。受信側はこれを超える入力を確保せずに破棄する。
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -176,6 +176,14 @@ pub enum EyeStyle {
     HalfLidded,
 }
 
+/// 顔に重ねる装飾。デバイスプロトコルの `Accessory` に対応する。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Accessory {
+    #[default]
+    None,
+    Headphones,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Presence {
     pub activity: Option<Activity>,
@@ -184,7 +192,66 @@ pub struct Presence {
     pub gaze: Gaze,
     pub eyes: EyeStyle,
     pub ttl_s: u16,
+    /// 版 4 で追加した。
+    pub accessory: Accessory,
 }
+
+/// Panel のボタンに描くピクトグラム。デバイスプロトコルの `Icon` に対応する。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Icon {
+    #[default]
+    None,
+    Play,
+    Pause,
+    Stop,
+    Next,
+    Previous,
+    Shuffle,
+    Repeat,
+    RepeatOne,
+    Close,
+    Back,
+    Forward,
+    First,
+    Plus,
+    Minus,
+    Reset,
+    Save,
+    Gear,
+    Timer,
+    Power,
+    Face,
+    Speech,
+    Motion,
+    Light,
+    Touch,
+    Sense,
+    Dark,
+    Pace,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Button {
+    pub icon: Icon,
+    pub label: String,
+    /// 枠を塗って状態 (ON 等) を示す。
+    pub active: bool,
+}
+
+/// 操作画面 (版 4)。Overlay に置き、ボタンのタップを `Action { card, action: ボタンの番号 }`
+/// で返す。Card と同じ識別子の空間を使い、`CardPut` / `CardRemove` と置き換え合う。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelPut {
+    pub card: u8,
+    pub priority: Priority,
+    /// 1 以上。期限の無い Panel は顔を隠し続けるため設けない。
+    pub ttl_s: u16,
+    pub lines: Vec<String>,
+    pub buttons: Vec<Button>,
+}
+
+pub const MAX_PANEL_LINES: usize = 2;
+pub const MAX_PANEL_BUTTONS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Emote {
@@ -204,6 +271,8 @@ pub struct ImageFrame {
     pub height: u16,
     /// 表示を保つ秒数。0 は既定 (10 秒)。期限の無い Overlay は顔を隠し続けるため設けない。
     pub ttl_s: u16,
+    /// 真の場合は顔を隠さず、顔の右下に小さく重ねて表示する (版 4)。
+    pub inset: bool,
     pub pixels: Vec<u8>,
 }
 
@@ -246,6 +315,8 @@ pub enum PluginMessage {
     },
     /// capability `image` が必要。
     ImageFrame(ImageFrame),
+    /// 操作画面 (版 4)。Card と同じく capability `cards` の枠を使う。
+    PanelPut(PanelPut),
 }
 
 /// デバイスが表示できる大きさ。plugin はこの範囲で Card を組み立てる。
@@ -417,6 +488,26 @@ impl PluginMessage {
                 }
                 if frame.pixels.len() != usize::from(frame.width) * usize::from(frame.height) * 2 {
                     return Err("画素の長さが幅 × 高さ × 2 と一致しません");
+                }
+            }
+            Self::PanelPut(panel) => {
+                if panel.card >= MAX_CARDS {
+                    return Err("Card の識別子が範囲外です");
+                }
+                if panel.ttl_s == 0 {
+                    return Err("Panel の ttl_s は 1 以上にしてください");
+                }
+                if panel.lines.len() > MAX_PANEL_LINES {
+                    return Err("Panel の行数が範囲外です");
+                }
+                for line in &panel.lines {
+                    check_len(line, MAX_TEXT_BYTES, "Panel の行が長すぎます")?;
+                }
+                if panel.buttons.is_empty() || panel.buttons.len() > MAX_PANEL_BUTTONS {
+                    return Err("Panel のボタン数が範囲外です");
+                }
+                for button in &panel.buttons {
+                    check_len(&button.label, MAX_TEXT_BYTES, "ボタンのラベルが長すぎます")?;
                 }
             }
         }
@@ -598,6 +689,7 @@ mod tests {
             width: 2,
             height: 1,
             ttl_s: 0,
+            inset: false,
             pixels: vec![0xAB; 4],
         };
         let text = format!("{frame:?}");
@@ -612,6 +704,7 @@ mod tests {
                 width,
                 height,
                 ttl_s: 0,
+                inset: false,
                 pixels: vec![0; len],
             })
         };

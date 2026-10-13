@@ -96,10 +96,12 @@ fn serve<D: Device, S: Spawner>(config: Config, device: D, spawner: S, spool_dir
     }
 }
 
-const SLOTS: [protocol::Slot; 3] = [
-    protocol::Slot::BannerTop,
-    protocol::Slot::BannerBottom,
-    protocol::Slot::Overlay,
+/// 表示先。None は顔に重ねる画像 (slot ではなく、顔の領域に置く)。
+const TARGETS: [Option<protocol::Slot>; 4] = [
+    Some(protocol::Slot::BannerTop),
+    Some(protocol::Slot::BannerBottom),
+    Some(protocol::Slot::Overlay),
+    None,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -117,7 +119,7 @@ pub struct Daemon<D, S> {
     scheduler: Scheduler,
     events: Receiver<Event>,
     sender: Sender<Event>,
-    sent: [Option<Sent>; 3],
+    sent: [Option<Sent>; 4],
     /// 画像をデバイスへ最後に送った時刻。
     image_sent: Option<Instant>,
     visible: Vec<CardKey>,
@@ -150,7 +152,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
             scheduler: Scheduler::new(refresh),
             events,
             sender,
-            sent: [None; 3],
+            sent: [None; 4],
             image_sent: None,
             visible: Vec::new(),
             refresh,
@@ -204,6 +206,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                     protocol::Gaze::Center,
                     protocol::EyeStyle::Auto,
                     ttl_s,
+                    protocol::Accessory::None,
                 ) {
                     Ok(protocol::Message::Presence(presence)) => {
                         let deadline =
@@ -321,7 +324,21 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                     card.placement,
                     card.priority,
                     card.ttl_s,
-                    rows,
+                    scheduler::Body::Rows(rows),
+                    self.plugins[plugin].granted().cards,
+                    now,
+                )
+            }),
+            Request::Panel(panel) => convert::panel(&panel).and_then(|body| {
+                self.scheduler.put(
+                    CardKey {
+                        plugin,
+                        card: panel.card,
+                    },
+                    plugin_api::Placement::Overlay,
+                    panel.priority,
+                    panel.ttl_s,
+                    scheduler::Body::Panel(body),
                     self.plugins[plugin].granted().cards,
                     now,
                 )
@@ -348,7 +365,8 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                     height: frame.height,
                     pixels: frame.pixels,
                 };
-                self.scheduler.image(plugin, image, frame.ttl_s, now);
+                self.scheduler
+                    .image(plugin, image, frame.ttl_s, frame.inset, now);
                 Ok(())
             }
         };
@@ -365,7 +383,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                 }
                 if delivery == Delivery::Reset {
                     // 表示状態が失われたため、次の割当てで全 slot を送り直す。
-                    self.sent = [None; 3];
+                    self.sent = [None; 4];
                 }
                 true
             }
@@ -434,8 +452,8 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
     }
 
     fn sync_slots(&mut self, plan: &Plan, now: Instant) {
-        let desired = [&plan.top, &plan.bottom, &plan.overlay];
-        for (index, (slot, shown)) in SLOTS.into_iter().zip(desired).enumerate() {
+        let desired = [&plan.top, &plan.bottom, &plan.overlay, &plan.inset];
+        for (index, (slot, shown)) in TARGETS.into_iter().zip(desired).enumerate() {
             let previous = self.sent[index];
             match shown {
                 Some(shown) => {
@@ -474,7 +492,7 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
                     };
                     // 1 秒以内に firmware 側の期限で消える表示には、消去を送らない。
                     if sent.expires > now + Duration::from_secs(1)
-                        && !self.send_device(&protocol::Message::ClearSlot(slot), now)
+                        && !self.send_device(&clear_message(slot), now)
                     {
                         continue;
                     }
@@ -518,7 +536,20 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
 }
 
 /// slot の表示内容をデバイスへのメッセージにする。画像は複数のメッセージになる。
-fn slot_messages(slot: protocol::Slot, ttl_s: u16, shown: &Shown) -> Vec<protocol::Message> {
+fn clear_message(slot: Option<protocol::Slot>) -> protocol::Message {
+    match slot {
+        Some(slot) => protocol::Message::ClearSlot(slot),
+        None => protocol::Message::ClearInset,
+    }
+}
+
+fn slot_messages(
+    target: Option<protocol::Slot>,
+    ttl_s: u16,
+    shown: &Shown,
+) -> Vec<protocol::Message> {
+    // Card と文字は slot にだけ割り当てられる (Scheduler)。
+    let slot = target.unwrap_or(protocol::Slot::Overlay);
     let id = match shown.source {
         Source::Card { key, .. } => key.device_id(),
         // デバイスは受信中の画像との照合にだけ使うため、下位 16 bit で足りる。
@@ -535,10 +566,21 @@ fn slot_messages(slot: protocol::Slot, ttl_s: u16, shown: &Shown) -> Vec<protoco
             // Scheduler に入る前に長さを検証済みである。
             text: text.as_str().try_into().unwrap_or_default(),
         }],
-        // 画像は Overlay にだけ割り当てられる (Scheduler)。
-        Content::Image(image) => {
-            convert::image_messages(id, ttl_s, image.width, image.height, &image.pixels)
-        }
+        // 画像と Panel は Overlay にだけ割り当てられる (Scheduler)。
+        Content::Image(image) => convert::image_messages(
+            id,
+            ttl_s,
+            image.width,
+            image.height,
+            &image.pixels,
+            target.is_none(),
+        ),
+        Content::Panel(panel) => vec![protocol::Message::Panel(protocol::Panel {
+            id,
+            ttl_s,
+            lines: panel.lines.clone(),
+            buttons: panel.buttons.clone(),
+        })],
     }
 }
 

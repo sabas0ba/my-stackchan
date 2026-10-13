@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。互換性の無い変更を行った場合に増やす。
-pub const VERSION: u8 = 9;
+pub const VERSION: u8 = 10;
 
 /// 1 メッセージ中のテキストの最大バイト数 (UTF-8)。
 pub const MAX_TEXT_BYTES: usize = 512;
@@ -118,6 +118,15 @@ pub enum EyeStyle {
     HalfLidded,
 }
 
+/// 顔に重ねる装飾。表情とは独立に指定し、どの表情にも重ねて描く。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Accessory {
+    #[default]
+    None,
+    /// ヘッドフォン。音楽の再生中などに用いる。
+    Headphones,
+}
+
 /// 顔と PC 状態をまとめて更新する。TTL が満了すると既定の顔に戻る。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Presence {
@@ -127,6 +136,8 @@ pub struct Presence {
     pub gaze: Gaze,
     pub eyes: EyeStyle,
     pub ttl_s: u16,
+    /// 版 10 で追加した。Emote は装飾を持たず、Presence の装飾を保ったまま顔を上書きする。
+    pub accessory: Accessory,
 }
 
 /// 一時的な表情。期限満了後は直前の Presence に戻る。
@@ -268,6 +279,103 @@ impl Card {
     }
 }
 
+/// Panel の文字の行と、ボタンの数とラベルの上限。
+pub const MAX_PANEL_LINES: usize = 2;
+/// 10 px の文字で画面の幅 (左右 10 px の余白を除く) に収まる長さ。
+pub const MAX_PANEL_LINE_BYTES: usize = 30;
+pub const MAX_PANEL_BUTTONS: usize = 6;
+/// ボタンのラベル。短い日本語を保持できる長さで、描画時は枠の幅で省略する。
+pub const MAX_BUTTON_LABEL_BYTES: usize = 24;
+
+/// ボタンに描くピクトグラム。画像を持たず、renderer が図形で描く。
+/// variant の追加は末尾に限る (postcard の番号を維持するため)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Icon {
+    /// ピクトグラムなし。ラベルだけを描く。
+    #[default]
+    None,
+    Play,
+    Pause,
+    Stop,
+    Next,
+    Previous,
+    Shuffle,
+    Repeat,
+    RepeatOne,
+    Close,
+    Back,
+    Forward,
+    First,
+    Plus,
+    Minus,
+    Reset,
+    Save,
+    Gear,
+    Timer,
+    Power,
+    Face,
+    Speech,
+    Motion,
+    Light,
+    Touch,
+    Sense,
+    Dark,
+    Pace,
+}
+
+/// Panel のボタン。ピクトグラムの下にラベルを置く。`active` は枠を塗って状態 (ON 等) を示す。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Button {
+    pub icon: Icon,
+    pub label: heapless::String<MAX_BUTTON_LABEL_BYTES>,
+    pub active: bool,
+}
+
+impl Button {
+    /// ラベルは上限まで入れ、収まらない分は捨てる (表示が欠けるだけで、動作は続ける)。
+    pub fn new(icon: Icon, label: &str, active: bool) -> Self {
+        let mut fitted = heapless::String::new();
+        for ch in label.chars() {
+            if fitted.push(ch).is_err() {
+                break;
+            }
+        }
+        Self {
+            icon,
+            label: fitted,
+            active,
+        }
+    }
+}
+
+/// Overlay に出す操作画面。文字の行の下に、ボタンを 3 列に並べる。
+///
+/// Card と別に設けるのは、Card の行 (高さ 20 px) が指での操作に小さすぎるためである。
+/// Client 側の plugin (firmware 内) と host の両方が置ける。host が置く場合は `id` で
+/// 識別し、ボタンのタップを `Event::Tap { card: Some(id), action: Some(番号) }` で返す。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Panel {
+    /// host が付ける識別子。0 は識別なし (Client 側) を表す。
+    pub id: u16,
+    /// 表示を保つ秒数。host が置く Panel は顔を隠し続けないよう 1 以上とする。
+    pub ttl_s: u16,
+    pub lines: heapless::Vec<heapless::String<MAX_PANEL_LINE_BYTES>, MAX_PANEL_LINES>,
+    pub buttons: heapless::Vec<Button, MAX_PANEL_BUTTONS>,
+}
+
+impl Panel {
+    /// host から受けた Panel を検証する。ボタンが無い Panel は閉じる手段を持たないため拒否する。
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.buttons.is_empty() {
+            return Err("Panel にボタンがありません");
+        }
+        if self.ttl_s == 0 {
+            return Err("Panel の ttl_s は 1 以上にしてください");
+        }
+        Ok(())
+    }
+}
+
 /// 画面のタップの扱い。firmware の RAM にのみ保持し、再起動すると `Demo` に戻る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputMode {
@@ -299,6 +407,9 @@ pub struct ImageBegin {
     pub height: u16,
     /// 表示を保つ秒数。0 は Clear または上書きまで保つ。
     pub ttl_s: u16,
+    /// 真の場合は Overlay に置かず、顔と帯を残したまま顔の領域に重ねて描く (版 10)。
+    /// 画素の領域は Overlay の画像と共用するため、どちらか一方だけを表示する。
+    pub inset: bool,
 }
 
 impl ImageBegin {
@@ -376,6 +487,10 @@ pub enum Message {
     ImageRows(ImageRows),
     /// 画像領域の完了。全行を受け取っていれば Overlay に表示する。
     ImageEnd { id: u16 },
+    /// 操作画面を Overlay に置く (版 10)。ボタンのタップは `Event::Tap` で返す。
+    Panel(Panel),
+    /// 顔に重ねた画像 (`ImageBegin` の `inset`) を消す (版 10)。
+    ClearInset,
 }
 
 /// firmware から host へ返す応答。
@@ -790,6 +905,7 @@ mod tests {
             gaze: Gaze::Right,
             eyes: EyeStyle::HalfLidded,
             ttl_s: 30,
+            accessory: Accessory::Headphones,
         });
         let mut frame = [0; MAX_FRAME_BYTES];
         let len = encode(&message, &mut frame).unwrap().len();
@@ -798,6 +914,46 @@ mod tests {
         assert_eq!(received[0], 4);
         assert!(
             heapless::String::<MAX_STATUS_DETAIL_BYTES>::try_from("x".repeat(21).as_str()).is_err()
+        );
+    }
+
+    #[test]
+    fn panel_roundtrip_and_validation() {
+        let mut panel = Panel {
+            id: 9,
+            ttl_s: 10,
+            ..Panel::default()
+        };
+        panel.lines.push("再生中".try_into().unwrap()).unwrap();
+        panel
+            .buttons
+            .push(Button::new(Icon::Play, "", false))
+            .unwrap();
+        panel
+            .buttons
+            .push(Button::new(Icon::Shuffle, "シャッフル", true))
+            .unwrap();
+        assert_eq!(panel.validate(), Ok(()));
+        let message = Message::Panel(panel.clone());
+        let mut frame = [0; MAX_FRAME_BYTES];
+        let len = encode(&message, &mut frame).unwrap().len();
+        let mut received = frame;
+        assert_eq!(decode::<Message>(&mut received[..len]), Ok(message));
+
+        assert!(
+            Panel {
+                ttl_s: 0,
+                ..panel.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        panel.buttons.clear();
+        assert!(panel.validate().is_err());
+        // ラベルは上限で切る。
+        assert_eq!(
+            Button::new(Icon::None, &"x".repeat(40), false).label.len(),
+            MAX_BUTTON_LABEL_BYTES
         );
     }
 
@@ -875,6 +1031,7 @@ mod tests {
             width: 160,
             height: 120,
             ttl_s: 5,
+            inset: false,
         };
         assert_eq!(begin.validate(), Ok(()));
         for invalid in [
@@ -911,6 +1068,7 @@ mod tests {
                     width: u16::MAX,
                     height: u16::MAX,
                     ttl_s: u16::MAX,
+                    inset: true,
                 }),
                 10,
             ),

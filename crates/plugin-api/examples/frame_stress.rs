@@ -118,6 +118,20 @@ fn corpus() -> Vec<Vec<u8>> {
             gaze: Gaze::Point { x: 100, y: -100 },
             eyes: EyeStyle::Wide,
             ttl_s: 30,
+            accessory: plugin_api::Accessory::Headphones,
+        })),
+        wire(&PluginMessage::PanelPut(plugin_api::PanelPut {
+            card: 1,
+            priority: Priority::High,
+            ttl_s: 10,
+            lines: vec!["x".repeat(30), String::new()],
+            buttons: (0..6)
+                .map(|index| plugin_api::Button {
+                    icon: plugin_api::Icon::Shuffle,
+                    label: "x".repeat(24),
+                    active: index % 2 == 0,
+                })
+                .collect(),
         })),
         wire(&PluginMessage::Emote(Emote {
             expression: Expression::Wink,
@@ -135,6 +149,7 @@ fn corpus() -> Vec<Vec<u8>> {
             width: 160,
             height: 120,
             ttl_s: 10,
+            inset: true,
             pixels: vec![0xA5; 160 * 120 * 2],
         })),
         wire(&HostMessage::Action { card: 1, action: 2 }),

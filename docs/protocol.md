@@ -35,9 +35,11 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 | `PitchTrim(PitchTrim)` | ピッチ中心の補正 | -96..64 step |
 | `ClearSlot(Slot)` | 1 つの Slot だけを消す | - |
 | `InputMode(InputMode)` | タップの扱いを `Demo` / `Forward` に切り替える | - |
-| `ImageBegin(ImageBegin)` | Overlay の画像領域の受信を始める | 160×120 px 以下、画面内 |
+| `ImageBegin(ImageBegin)` | 画像領域の受信を始める。`inset` が真なら Overlay ではなく顔に重ねる | 160×120 px 以下、画面内 |
 | `ImageRows(ImageRows)` | 画像領域の行の組 | 画素 960 byte (幅 160 px で 3 行) |
 | `ImageEnd { id }` | 画像領域を表示する | - |
+| `Panel(Panel)` | 操作画面を Overlay に置く。ボタンはピクトグラムとラベルを持つ | 文字 2 行 (各 30 byte)、ボタン 6 個 (ラベル 24 byte)、`ttl_s` は 1 以上 |
+| `ClearInset` | 顔に重ねた画像を消す | - |
 
 `protocol::Reply` (firmware -> host):
 
@@ -49,7 +51,7 @@ host から firmware へ表示内容を送るための、シリアル上のフ�
 | `HardwareStatus { .. }` | `HardwareProbe` への応答 |
 | `Event(Event)` | 要求と独立に送る入力。現在は `Tap { slot, card, action }` のみ |
 
-版 1 は Card、版 2 は Card への画像追加、版 3 は Presence、版 6 は Emote・二軸視線・HardwareProbe、版 7 は PitchTrim と HardwareStatus の補正値追加、版 8 は Card の識別子・行の action・ClearSlot・InputMode・Event、版 9 は画像領域 (ImageBegin / ImageRows / ImageEnd) に対応する。版 4・5 は使用していない。既存 Message variant の番号は維持する。
+版 1 は Card、版 2 は Card への画像追加、版 3 は Presence、版 6 は Emote・二軸視線・HardwareProbe、版 7 は PitchTrim と HardwareStatus の補正値追加、版 8 は Card の識別子・行の action・ClearSlot・InputMode・Event、版 9 は画像領域 (ImageBegin / ImageRows / ImageEnd)、版 10 は装飾 (Presence の `accessory`)・操作画面 (Panel)・顔に重ねる画像 (ImageBegin の `inset`、ClearInset) に対応する。版 4・5 は使用していない。既存 Message variant の番号は維持する。
 
 ### 現在の実装範囲
 
@@ -201,6 +203,32 @@ decoder の coverage-guided fuzz 検証は別途実施する。
 - 1 件の `ImageRows` は USB の受信 FIFO (64 byte) を十数回満たす。firmware はフレームの途中では FIFO が空になっても最大 3 ms 次の byte を待って読み続け (1 周あたり最大 30 ms)、フレームごとにメインループを周回しないようにする
 - firmware は 160×120 px 1 枚分 (38,400 byte) の画素を static に持つ。受信した行はこの領域に書くため、表示中の画像を送り直す間に別の理由で再描画が起きると、書換え途中の画像が一時的に見え得る。1 fps 以下の更新を前提として許容する
 
+
+### 装飾・操作画面・顔に重ねる画像 (版 10)
+
+版 10 は、再生中の曲の表示のために追加した。`Presence` と `ImageBegin` へのフィールドの追加を含み、postcard の符号化が変わるため、版 9 の host と firmware は互いに通信できない (`Ping` の版の照合で検出する)。
+
+装飾:
+
+- `Presence` に `accessory` (None / Headphones) を追加した。装飾は表情と独立に指定し、どの表情にも重ねて描く
+- `Emote` は装飾を持たない。`Emote` が顔を上書きしている間も、有効な `Presence` の装飾を保つ。`Presence` が無い (または期限で消えた) 場合は装飾も無い
+- ヘッドフォンは、上の帯 (高さ 48 px) と目の間に収まる浅い弧と、目の外側の塗りつぶした耳当てで描く。追加の画像は持たない
+- host CLI では `stackchan face --expression playful --accessory headphones` で指定する
+
+操作画面 (`Panel`):
+
+- `Panel { id, ttl_s, lines, buttons }` を Overlay に置く。文字の行 (最大 2 行) の下に、ボタン (最大 6 個) を 3 列 × 2 行に並べる。ボタンは約 98×80 px で、Card の行 (高さ 20 px) より指で操作しやすい
+- ボタンは `icon` (ピクトグラム)、`label`、`active` を持つ。ピクトグラムは firmware が図形で描き、画像を送らない。`active` のボタンは枠を塗って色を反転し、ON 等の状態を示す。`icon` が None のボタンはラベルだけを中央に描く
+- `Icon` は Play / Pause / Stop / Next / Previous / Shuffle / Repeat / RepeatOne / Close / Back / Forward / First / Plus / Minus / Reset / Save / Gear / Timer / Power / Face / Speech / Motion / Light / Touch / Sense / Dark / Pace。追加は末尾に限る
+- `ttl_s` は 1 以上、ボタンは 1 個以上とし、それ以外は拒否する。期限の無い Panel は顔を隠し続け、ボタンの無い Panel は利用者が閉じられないためである
+- `Forward` の間、ボタンのタップは `Event::Tap { slot: Overlay, card: Some(id), action: Some(ボタンの番号) }` で返す。番号は左上から 0 始まりである。ボタンの外のタップは `action` を持たない
+- firmware 内の Client 側の plugin (タイマー、設定) も同じ型の Panel を出す。Client 側の Panel は `id` と `ttl_s` を使わず、host の Panel より手前に出る
+
+顔に重ねる画像:
+
+- `ImageBegin` の `inset` が真の場合、`ImageEnd` で Overlay に置かず、顔と帯を残したまま指定の位置に描く。白い枠 (1 px) で顔の線と区別する。Overlay が出ている間は隠れる
+- 画素の領域は Overlay の画像と共用する (1 枚分)。新しく届いた画像が、もう一方を置き換える
+- `ttl_s` は 0 で期限なし。`ClearInset` または `Clear` で消す。タップは顔の領域として扱う (画像への照合は行わない)
 ## 不変条件
 
 - 可変長のフィールドはすべて `heapless` の上限付き型で表す。上限を超える入力は `Deserialize` の時点で失敗し、firmware のメモリに到達しない (`oversized_text_is_rejected` テスト)

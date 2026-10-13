@@ -11,16 +11,17 @@ pub mod preferences;
 pub mod timer;
 
 use embedded_graphics::{prelude::*, primitives::Rectangle};
+pub use protocol::{Button, Icon, Panel};
 use protocol::{Card, Emote};
 
-pub const PANEL_LINES: usize = 2;
+pub const PANEL_LINES: usize = protocol::MAX_PANEL_LINES;
 /// Panel の文字の行の長さ。10 px の文字で画面の幅 (左右 10 px の余白を除く) に収まる。
-pub const PANEL_LINE_BYTES: usize = 30;
-pub const PANEL_BUTTONS: usize = 6;
+pub const PANEL_LINE_BYTES: usize = protocol::MAX_PANEL_LINE_BYTES;
+pub const PANEL_BUTTONS: usize = protocol::MAX_PANEL_BUTTONS;
 /// 日本語の短いラベルを保持するバイト上限。描画時は枠の画素幅で省略する。
-pub const BUTTON_LABEL_BYTES: usize = 24;
-/// 登録できる plugin の数。一覧の Panel に 1 画面で並ぶ数とする。
-pub const MAX_PLUGINS: usize = PANEL_BUTTONS;
+pub const BUTTON_LABEL_BYTES: usize = protocol::MAX_BUTTON_LABEL_BYTES;
+/// 登録できる plugin の数。一覧の Panel に 1 画面で並ぶ数とする (CLOSE の分を除く)。
+pub const MAX_PLUGINS: usize = PANEL_BUTTONS - 1;
 
 /// plugin の一覧の Panel と、複数の Card の巡回の間隔。
 const LAUNCHER_IDLE_MS: u64 = 30_000;
@@ -46,26 +47,25 @@ pub fn fit<const N: usize>(text: &str) -> heapless::String<N> {
     fitted
 }
 
-/// Overlay に出す操作画面。文字の行とボタンからなる。
-///
-/// Card と別に設けるのは、Card の行 (高さ 20 px) が指での操作に小さすぎるためである。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Panel {
-    pub lines: [Line; PANEL_LINES],
-    pub buttons: heapless::Vec<Label, PANEL_BUTTONS>,
+/// Client 側の Panel を組み立てる。型は host が置く Panel (`protocol::Panel`) と共用し、
+/// 識別子と TTL は持たない (期限は plugin が自身で判断する)。行とボタンは上限で切る。
+pub fn panel(lines: [&str; PANEL_LINES], buttons: &[Button]) -> Panel {
+    Panel {
+        id: 0,
+        ttl_s: 0,
+        lines: lines.iter().map(|line| fit(line)).collect(),
+        buttons: buttons.iter().take(PANEL_BUTTONS).cloned().collect(),
+    }
 }
 
-impl Panel {
-    pub fn new(lines: [&str; PANEL_LINES], buttons: &[&str]) -> Self {
-        Self {
-            lines: lines.map(fit),
-            buttons: buttons
-                .iter()
-                .take(PANEL_BUTTONS)
-                .map(|label| fit(label))
-                .collect(),
-        }
-    }
+/// ピクトグラムだけのボタン。
+pub fn icon_button(icon: Icon) -> Button {
+    Button::new(icon, "", false)
+}
+
+/// ピクトグラムとラベルのボタン。`active` は枠を塗って ON を示す。
+pub fn labeled_button(icon: Icon, label: &str, active: bool) -> Button {
+    Button::new(icon, label, active)
 }
 
 /// `index` 番目のボタンの枠。3 列に左上から並べる。描画とタップの照合で共用する。
@@ -92,6 +92,8 @@ pub fn button_at(x: u16, y: u16, count: usize) -> Option<usize> {
 pub trait Plugin {
     /// 一覧の Panel に出す名前。
     fn name(&self) -> &'static str;
+    /// 一覧の Panel に出すピクトグラム。
+    fn icon(&self) -> Icon;
     /// 周期的に呼ばれる。期限の判定に用いる。
     fn tick(&mut self, now_ms: u64);
     /// 長押しから開かれた。
@@ -234,14 +236,18 @@ impl<R: Registry> Manager<R> {
     pub fn view(&self, now_ms: u64) -> View {
         let plugins = self.registry.plugins();
         let panel = if self.launcher_until_ms.is_some() {
-            let mut buttons: heapless::Vec<Label, PANEL_BUTTONS> =
-                plugins.iter().map(|plugin| fit(plugin.name())).collect();
+            let mut buttons: heapless::Vec<Button, PANEL_BUTTONS> = plugins
+                .iter()
+                .map(|plugin| labeled_button(plugin.icon(), plugin.name(), false))
+                .collect();
             // 一覧が上限まで埋まっている場合は置けない。その場合は時間切れで閉じる。
-            let _ = buttons.push(fit("CLOSE"));
+            let _ = buttons.push(icon_button(Icon::Close));
             Some((
                 Owner::Launcher,
                 Panel {
-                    lines: [fit("PLUGINS"), Line::new()],
+                    id: 0,
+                    ttl_s: 0,
+                    lines: heapless::Vec::from_iter([fit("PLUGINS")]),
                     buttons,
                 },
             ))
@@ -296,6 +302,9 @@ mod tests {
         fn name(&self) -> &'static str {
             self.name
         }
+        fn icon(&self) -> Icon {
+            Icon::Timer
+        }
         fn tick(&mut self, _now_ms: u64) {}
         fn open(&mut self, _now_ms: u64) {
             self.calls.get_mut().push("open".into());
@@ -323,7 +332,13 @@ mod tests {
             })
         }
         fn panel(&self, _now_ms: u64) -> Option<Panel> {
-            Some(Panel::new([self.panel?, ""], &["A", "B"]))
+            Some(panel(
+                [self.panel?, ""],
+                &[
+                    labeled_button(Icon::None, "A", false),
+                    icon_button(Icon::Close),
+                ],
+            ))
         }
         fn take_emote(&mut self) -> Option<Emote> {
             None
@@ -387,13 +402,14 @@ mod tests {
 
     #[test]
     fn long_text_is_cut_to_the_capacity() {
-        let panel = Panel::new(
-            ["0123456789012345678901234567890123", ""],
-            &["012345678901234567890123456", "a", "b", "c", "d", "e", "f"],
-        );
+        let buttons: Vec<Button> = ["012345678901234567890123456", "a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|label| labeled_button(Icon::None, label, false))
+            .collect();
+        let panel = panel(["0123456789012345678901234567890123", ""], &buttons);
         assert_eq!(panel.lines[0].len(), PANEL_LINE_BYTES);
         assert_eq!(panel.buttons.len(), PANEL_BUTTONS);
-        assert_eq!(panel.buttons[0], "012345678901234567890123");
+        assert_eq!(panel.buttons[0].label, "012345678901234567890123");
     }
 
     #[test]
@@ -422,7 +438,19 @@ mod tests {
         manager.open(1_000);
         let (owner, panel) = manager.view(1_000).panel.unwrap();
         assert_eq!(owner, Owner::Launcher);
-        assert_eq!(panel.buttons, ["ONE", "TWO", "CLOSE"]);
+        let labels: Vec<(Icon, &str)> = panel
+            .buttons
+            .iter()
+            .map(|button| (button.icon, button.label.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                (Icon::Timer, "ONE"),
+                (Icon::Timer, "TWO"),
+                (Icon::Close, "")
+            ]
+        );
 
         manager.button(Owner::Launcher, 1, 2_000);
         assert_eq!(manager.registry.0[1].calls(), ["open"]);

@@ -13,7 +13,7 @@ PC 側の情報源と、それに伴う描画・操作を本リポジトリ外�
 | Claude / Codex 使用率 | ローカルのセッションログ | Card (Bar) | 表示期間の切替 |
 | 3D プリンタの進捗とカメラ | LAN 上のプリンタ | Card (Bar)、画像領域 | カメラ表示の開始・終了 |
 | タイマー | デバイスの単調時計 | Card (Bar)、操作画面 | 時間の設定、開始、取消 |
-| 再生中の曲 | Windows のメディア制御 API (SMTC) | Card (帯)、画像領域 (カバー)、操作画面 (Overlay) | 再生・一時停止、曲送り、シャッフル、リピート |
+| 再生中の曲 | Windows のメディア制御 API (SMTC) | Card (帯)、顔の右下に重ねる画像 (カバー)、操作画面 (Panel)、ヘッドフォンを付けた表情 | 再生・一時停止、曲送り、シャッフル、リピート |
 
 plugin には実行場所の異なる 2 種がある。両者は連携できる。
 
@@ -213,7 +213,8 @@ plugin-api の型は host 側でのみ使うため、`String` / `Vec` を用い�
 | `Presence` | 表情・活動状態の要求。capability `presence` が必要。採否は daemon が決める |
 | `Emote` | 一時的な表情と視線の要求。capability `presence` が必要。機構部の駆動には加えて `motion` が必要 |
 | `Log` | 診断用の文字列 |
-| `ImageFrame` | 画像 1 枚 (幅、高さ、TTL、RGB565 big-endian の画素)。capability `image` が必要 |
+| `ImageFrame` | 画像 1 枚 (幅、高さ、TTL、RGB565 big-endian の画素、`inset`)。capability `image` が必要 |
+| `PanelPut` | 操作画面。論理 Card ID、優先度、TTL (1 以上)、文字の行、ボタン (ピクトグラム、ラベル、`active`)。Card と同じく capability `cards` の枠を使う |
 
 ### daemon -> plugin
 
@@ -236,6 +237,12 @@ Card の識別子は plugin ごとに 0..7 とする。Card の内容はデバ�
 - 版 1 から版 2 への変更は `Capabilities` と `Limits` のフィールド追加を含み、postcard の符号化が変わる。daemon は版の異なる plugin の `Hello` を拒否するため、外部 plugin は plugin-api の rev を更新して再構築する
 
 版 3 では `Init` に `endpoints` を追加した ([接続先の許可](#接続先の許可))。版 2 と同じく符号化が変わるため、外部 plugin は再構築を要する。
+
+版 4 では次を追加した (段階 P8)。デバイスプロトコルの版 10 ([protocol.md](protocol.md#装飾操作画面顔に重ねる画像-版-10)) に対応する。`Presence` と `ImageFrame` のフィールド追加を含むため、外部 plugin は再構築を要する。
+
+- 装飾: `Presence` の `accessory` (None / Headphones)。表情と独立に指定する。`Emote` は装飾を持たず、`Presence` の装飾を保ったまま顔を上書きする
+- 操作画面: `PanelPut`。Overlay に置き、ボタンのタップを `Action { card, action: ボタンの番号 }` で返す (番号は左上から 0 始まり)。Card と同じ識別子の空間を使い、同じ識別子の `CardPut` と置き換え合う。取り除くには `CardRemove` を用いる。Card の行 (高さ 20 px) は指での操作に小さく、文字だけでは操作の内容が分かりにくいため、ピクトグラムのボタンで操作を表す
+- 顔に重ねる画像: `ImageFrame` の `inset`。真の場合は顔を隠さず、daemon が顔の領域の右下 (下の帯の上、右端から 8 px) に置く。大きさは 96×96 px 以下とする。顔を隠さないため長く出し続けられるが、TTL は必須のままとし (0 は 10 秒)、plugin が出し直すことで保つ。plugin の停止時に表示が残らないようにするためである。daemon が保持する画像は従来どおり 1 枚で、Overlay の画像と顔に重ねる画像は互いを置き換える
 
 `plugin-api` の検証は大きさの一般的な上限 (文字列 256 byte、8 行 × 4 要素) だけを扱い、デバイスに収まるかは daemon が変換時に検証する。plugin API の版をデバイスの上限値の変更から切り離すためである。
 
@@ -475,8 +482,13 @@ PowerShell スクリプト                                     daemon
 | --- | --- | --- |
 | `[card]` | `card` (0..7、必須)、`placement` (`banner` / `overlay`、必須)、`priority` (`low` / `normal` / `high`、既定 `normal`)、`ttl_s` (既定 0。`overlay` では 1 以上が必須)、`row<N>.text` または `row<N>.bar` (0..100) と `row<N>.label`、または `row<N>.spacer` (1..32)、`row<N>.action` (0..255、任意) | `CardPut` と同じ |
 | `[card-remove]` | `card` (必須) | `CardRemove` と同じ |
-| `[image]` | `width`、`height` (必須)、`ttl_s` (既定 0 = 10 秒)、`data` (必須。同じディレクトリ内の画素ファイルの名前) | `ImageFrame` と同じ。画素は 4 KiB に収まらないため、別ファイルに置く |
+| `[image]` | `width`、`height` (必須)、`ttl_s` (既定 0 = 10 秒)、`placement` (`overlay` / `inset`、既定 `overlay`)、`data` (必須。同じディレクトリ内の画素ファイルの名前) | `ImageFrame` と同じ。画素は 4 KiB に収まらないため、別ファイルに置く。`inset` は顔の右下に重ねる |
 | `[log]` | `text` (必須) | `Log` と同じ |
+| `[panel]` | `card` (必須)、`ttl_s` (1 以上、必須)、`priority` (既定 `high`)、`line1`、`line2`、`button<N>.icon`、`button<N>.label`、`button<N>.active` (N は 1 から 6。各ボタンは `icon` か `label` を持つ) | `PanelPut` と同じ。`icon` は `play` `pause` `stop` `next` `previous` `shuffle` `repeat` `repeat-one` `close` `back` `forward` `first` `plus` `minus` `reset` `save` `gear` `timer` `power` `face` `speech` `motion` `light` `touch` `sense` `dark` `pace` `none` |
+| `[presence]` | `expression` (既定 `happy`)、`gaze` (既定 `center`)、`eyes` (既定 `auto`)、`accessory` (`none` / `headphones`、既定 `none`)、`activity`、`detail`、`ttl_s` (既定 0) | `Presence` と同じ。capability `presence` が必要 |
+| `[emote]` | `expression`、`gaze`、`eyes`、`intensity` (0..100、既定 0)、`duration_ms` (100..10000、既定 1000) | `Emote` と同じ。capability `presence` が必要。`intensity` が機構部に反映されるのは `motion` を許可した場合だけである |
+
+`[panel]` のタップは `[action]` で届き、`action` はボタンの番号 (`button1` が 0) である。`gaze` は `center` / `left` / `right` / `up` / `down` だけを受け付け、二軸の指定は扱わない。
 
 画素ファイルの扱い:
 
@@ -570,12 +582,14 @@ plugin は画素を直接描かない。host が送るものと同じ宣言的�
 | plugin が出力するもの | 内容 |
 | --- | --- |
 | 帯の Card | 1 枚まで。内容は `protocol::Card` と同じ (Text / Bar / Spacer) |
-| Panel | Overlay に出す操作画面。文字の行 (2 行まで) と、ボタン (6 個まで) からなる。開いている間は顔を隠すため、操作が無ければ一定時間で閉じる |
+| Panel | Overlay に出す操作画面。文字の行 (2 行まで) と、ボタン (6 個まで) からなる。ボタンはピクトグラムとラベルを持つ。開いている間は顔を隠すため、操作が無ければ一定時間で閉じる |
 | 表情 | 一時的な表情 (Emote)。完了の通知等に用いる |
 
 Panel を Card と別に設けるのは、Card の行 (高さ 20 px、画面上で約 2.5 mm) が指での操作に小さすぎるためである。ボタンは 3 列 × 2 行に置き、1 個を約 100 × 80 px とする。
 
-登録は firmware 内の一覧 (`firmware/src/client/mod.rs` の `Builtin`) への追加で行い、構築時に確定する。登録できる数は 6 個までとする (一覧の Panel に 1 画面で並ぶ数)。plugin は `Plugin` trait を実装する。plugin の呼出しと表示の取込みは 100 ms ごとに行い、入力の直後にも行う。
+ボタンには操作を表すピクトグラムを描く。文字だけのボタンは、操作の内容を読まないと判別できないためである。ピクトグラムは表情と同じく画像を持たず、`firmware/src/icons.rs` が図形で描く。切替の項目 (設定の ON / OFF) は、ピクトグラムの下に項目名を置き、ON を枠の塗り (色の反転) で示す。値を選ぶ項目 (時間の加算、表現の強さ) はラベルに値を出す。Panel の型は host が置く操作画面 (`protocol::Panel`、版 10) と共用する。
+
+登録は firmware 内の一覧 (`firmware/src/client/mod.rs` の `Builtin`) への追加で行い、構築時に確定する。登録できる数は 5 個までとする (一覧の Panel に、閉じるボタンと合わせて 1 画面で並ぶ数)。plugin は一覧に出す名前とピクトグラムを持つ。plugin は `Plugin` trait を実装する。plugin の呼出しと表示の取込みは 100 ms ごとに行い、入力の直後にも行う。
 
 ### 画面の配分
 
@@ -612,8 +626,8 @@ firmware は接触をタップと長押しに判定し、表示中の内容に�
 | 状態 | 表示 | 操作 |
 | --- | --- | --- |
 | 停止中 | なし | 長押しで設定の Panel を開く |
-| 設定中 | Panel。設定中の時間と、`+1h` `+10m` `+1m` `CLEAR` `START` `CLOSE` のボタン | `START` で開始する。`CLOSE` は設定を捨てる。30 秒操作が無ければ閉じる |
-| 動作中 | 上の帯の Card。経過の割合の Bar と残り時間 (時:分:秒)、合計時間 | Card のタップまたは長押しで `+10m` `-10m` `STOP` `CLOSE` の Panel を開く。30 秒操作が無ければ Panel を閉じる (動作は続く) |
+| 設定中 | Panel。設定中の時間と、加算 (プラスの下に `1h` `10m` `1m`)、消去 (Reset)、開始 (Play)、閉じる (Close) のボタン | 開始のボタンで開始する。閉じるボタンは設定を捨てる。30 秒操作が無ければ閉じる |
+| 動作中 | 上の帯の Card。経過の割合の Bar と残り時間 (時:分:秒)、合計時間 | Card のタップまたは長押しで、加算 (プラスと `10m`)、減算 (マイナスと `10m`)、停止 (Stop)、閉じる (Close) の Panel を開く。30 秒操作が無ければ Panel を閉じる (動作は続く) |
 | 完了 | 上の帯の Card。`DONE` と、完了からの経過 (分) | Card のタップまたは長押しで消す。30 分で消える |
 
 - 時間は時・分で指定し、上限は 99 時間 59 分とする
@@ -688,6 +702,7 @@ C1 の範囲外であり、Host 側の対応する plugin を作る段階で実�
 | P5 | plugin ごとのコンテナ分離 (socket での接続、`plugin-run`、起動計画、`container.sh`) | 同梱の plugin が plugin ごとのコンテナで動作する。plugin のコンテナから設定ディレクトリと外部への通信に到達できない | 実装済み |
 | P6 | 接続先の許可 (`net.allow`、中継、plugin API 版 3 の `endpoints`) | 列挙した宛先にだけ plugin から接続できる | 実装済み |
 | P7 | spool 接続の plugin (`spool = true`、`spool/plugin/<id>/` の取込みと書出し) | Windows 側の PowerShell スクリプトが帯と画像を表示し、タップが `.evt` で届く | 実装済み。結合テストで要求・画像・タップ・拒否の往復を確認した。2026-10-14 に実機で、Windows 側のスクリプトからの帯の表示と `[visibility]` の往復、カバー画像の送信、帯と操作画面 (Overlay) のタップが `[action]` として届くことを確認した |
+| P8 | デバイスプロトコル版 10 と plugin API 版 4 (装飾、操作画面 `PanelPut`、顔に重ねる画像)、Client 側の Panel のピクトグラム、spool の `[panel]` `[presence]` `[emote]` | host の plugin がピクトグラムの操作画面を出し、タップがボタンの番号で届く。ヘッドフォンを付けた表情と、顔の右下の画像が顔を隠さずに出る | 実装済み。表示は `simulate.rs` の画像 (43〜51) で確認した |
 | C1 | Client 側の plugin の枠組み (登録、Panel、画面と入力の配分、長押し) とタイマー | host を接続せずに、タイマーの設定・開始・補正・完了の表示ができる。host の表示と同時に使っても、互いの内容を壊さない | 実装済み。host を接続しない状態での設定・開始・補正を実機で確認した (2026-10-06)。表情による合図と、daemon との同時使用は実機で未確認 |
 | C2 | host との連携 (plugin 宛てのデータ、Client 側の Card を含めた配分) | Host 側の plugin からタイマーを設定できる。daemon の `Visibility` が実際の表示と一致する | 未着手 |
 
@@ -714,6 +729,9 @@ Claude / Codex 使用率は P3 の最初の外部 plugin とする。design.md �
 | タップの切替 | CLI で明示的に切り替える。起動時は Demo | 単体での動作確認を保ち、daemon の暗黙の状態変更を避ける |
 | 設定ディレクトリ | OS ごとの既定値を持ち、`--config-dir` で起動時に変更できる | 複数の構成の併用と試験での分離 |
 | Windows 向けの構築 | コンテナ内で `x86_64-pc-windows-gnu` 向けに cross build する | ホストに toolchain を導入しない規約を保つ |
+| 操作画面 | host の plugin も Panel (ピクトグラムのボタン) を出せるようにし、Client 側の Panel も同じ描画でピクトグラムにする (2026-10-14) | Card の行をタップする方式は、行が小さく、文字を読まないと操作が分からない。実機での操作で確認した |
+| 装飾 | 顔の装飾 (ヘッドフォン) は表情の追加ではなく、表情と独立の軸として `Presence` に持たせる (2026-10-14) | どの表情とも組み合わせられ、後から装飾を増やしても表情の数が掛け算で増えない |
+| カバー画像の位置 | 再生中の曲のカバーは全画面にせず、顔の右下に重ねる (2026-10-14) | 顔を隠すほどの内容ではなく、隠さなければ再生中は出し続けられる |
 | spool 接続の plugin | Windows 側の PowerShell スクリプトを、設定ディレクトリ内のファイル交換 (`spool/plugin/<id>/`) で daemon に接続する plugin として扱う。secret は渡さない (2026-10-13) | Smart App Control により exe を実行できず、コンテナからは Windows の API に触れない。spool と同じく std だけで両 OS に対応でき、アクセス制御を OS に委ねられる |
 | 再生中の曲の情報源 | Windows の SMTC を用い、Spotify Web API は採らない (2026-10-13) | 認証情報と外部通信を不要にする。Web API は refresh token を plugin に置き、中継の名前解決と TLS 等の crate を要し、開発者規約の制約を受ける |
 

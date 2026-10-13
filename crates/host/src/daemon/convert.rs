@@ -28,7 +28,31 @@ pub fn image_frame(frame: &api::ImageFrame) -> Result<(), &'static str> {
     {
         return Err("画像がデバイスの画像領域より大きいです");
     }
+    if frame.inset && (frame.width > MAX_INSET_SIDE || frame.height > MAX_INSET_SIDE) {
+        return Err("顔に重ねる画像は 96x96 px 以下にしてください");
+    }
     Ok(())
+}
+
+/// 顔に重ねる画像の一辺の上限。顔の領域 (上下の帯の間の 144 px) で、目と口を隠さない大きさ。
+pub const MAX_INSET_SIDE: u16 = 96;
+/// 顔の領域の下端 (下の帯の上端) と、画面の右端からの余白。
+const FACE_BOTTOM: u16 = 192;
+const INSET_MARGIN: u16 = 8;
+
+/// 画像の左上の位置。Overlay では画面の中央、顔に重ねる場合は顔の領域の右下とする。
+fn image_origin(width: u16, height: u16, inset: bool) -> (u16, u16) {
+    if inset {
+        (
+            protocol::SCREEN_WIDTH - INSET_MARGIN - width,
+            FACE_BOTTOM - INSET_MARGIN - height,
+        )
+    } else {
+        (
+            (protocol::SCREEN_WIDTH - width) / 2,
+            (protocol::SCREEN_HEIGHT - height) / 2,
+        )
+    }
 }
 
 /// 画像を画面の中央に置き、デバイスへ送るメッセージの列にする。行は `ImageRows` 1 件に
@@ -39,14 +63,17 @@ pub fn image_messages(
     width: u16,
     height: u16,
     pixels: &[u8],
+    inset: bool,
 ) -> Vec<protocol::Message> {
+    let (x, y) = image_origin(width, height, inset);
     let begin = protocol::ImageBegin {
         id,
-        x: (protocol::SCREEN_WIDTH - width) / 2,
-        y: (protocol::SCREEN_HEIGHT - height) / 2,
+        x,
+        y,
         width,
         height,
         ttl_s,
+        inset,
     };
     let row_bytes = usize::from(width) * 2;
     let rows_per_message = (protocol::MAX_IMAGE_ROWS_BYTES / row_bytes).max(1);
@@ -167,6 +194,83 @@ fn activity(value: api::Activity) -> protocol::Activity {
     }
 }
 
+fn accessory(value: api::Accessory) -> protocol::Accessory {
+    match value {
+        api::Accessory::None => protocol::Accessory::None,
+        api::Accessory::Headphones => protocol::Accessory::Headphones,
+    }
+}
+
+fn icon(value: api::Icon) -> protocol::Icon {
+    use api::Icon as A;
+    use protocol::Icon as P;
+    match value {
+        A::None => P::None,
+        A::Play => P::Play,
+        A::Pause => P::Pause,
+        A::Stop => P::Stop,
+        A::Next => P::Next,
+        A::Previous => P::Previous,
+        A::Shuffle => P::Shuffle,
+        A::Repeat => P::Repeat,
+        A::RepeatOne => P::RepeatOne,
+        A::Close => P::Close,
+        A::Back => P::Back,
+        A::Forward => P::Forward,
+        A::First => P::First,
+        A::Plus => P::Plus,
+        A::Minus => P::Minus,
+        A::Reset => P::Reset,
+        A::Save => P::Save,
+        A::Gear => P::Gear,
+        A::Timer => P::Timer,
+        A::Power => P::Power,
+        A::Face => P::Face,
+        A::Speech => P::Speech,
+        A::Motion => P::Motion,
+        A::Light => P::Light,
+        A::Touch => P::Touch,
+        A::Sense => P::Sense,
+        A::Dark => P::Dark,
+        A::Pace => P::Pace,
+    }
+}
+
+/// plugin の Panel をデバイスの Panel にする。識別子と TTL は daemon が割当て時に決める
+/// ため、ここでは 0 にしておく。
+pub fn panel(value: &api::PanelPut) -> Result<protocol::Panel, &'static str> {
+    let mut panel = protocol::Panel::default();
+    for line in &value.lines {
+        let line = line
+            .as_str()
+            .try_into()
+            .map_err(|_| "Panel の行が長すぎます")?;
+        panel
+            .lines
+            .push(line)
+            .map_err(|_| "Panel の行が多すぎます")?;
+    }
+    for button in &value.buttons {
+        let label = button
+            .label
+            .as_str()
+            .try_into()
+            .map_err(|_| "ボタンのラベルが長すぎます")?;
+        panel
+            .buttons
+            .push(protocol::Button {
+                icon: icon(button.icon),
+                label,
+                active: button.active,
+            })
+            .map_err(|_| "Panel のボタンが多すぎます")?;
+    }
+    if panel.buttons.is_empty() {
+        return Err("Panel にボタンがありません");
+    }
+    Ok(panel)
+}
+
 pub fn presence(value: &api::Presence) -> Result<protocol::Presence, &'static str> {
     let presence = protocol::Presence {
         activity: value.activity.map(activity),
@@ -179,6 +283,7 @@ pub fn presence(value: &api::Presence) -> Result<protocol::Presence, &'static st
         gaze: gaze(value.gaze),
         eyes: eyes(value.eyes),
         ttl_s: value.ttl_s,
+        accessory: accessory(value.accessory),
     };
     presence.gaze.validate()?;
     Ok(presence)
@@ -243,8 +348,12 @@ mod tests {
             gaze: api::Gaze::Center,
             eyes: api::EyeStyle::Auto,
             ttl_s: 30,
+            accessory: api::Accessory::Headphones,
         };
-        assert!(super::presence(&presence).is_ok());
+        assert_eq!(
+            super::presence(&presence).map(|p| p.accessory),
+            Ok(protocol::Accessory::Headphones)
+        );
         presence.detail.push('x');
         assert!(super::presence(&presence).is_err());
     }
@@ -252,7 +361,7 @@ mod tests {
     #[test]
     fn images_are_centered_and_split_into_frames_that_fit() {
         let pixels: Vec<u8> = (0..160 * 120 * 2).map(|i| i as u8).collect();
-        let messages = image_messages(3, 5, 160, 120, &pixels);
+        let messages = image_messages(3, 5, 160, 120, &pixels, false);
         let protocol::Message::ImageBegin(begin) = messages[0] else {
             panic!("最初は ImageBegin");
         };
@@ -281,12 +390,13 @@ mod tests {
             Some(&protocol::Message::ImageEnd { id: 3 })
         );
         // 端数の行と、1 行が 1 件を超えない幅。
-        assert_eq!(image_messages(0, 0, 7, 5, &[0; 70]).len(), 3);
+        assert_eq!(image_messages(0, 0, 7, 5, &[0; 70], false).len(), 3);
         assert!(
             image_frame(&api::ImageFrame {
                 width: 161,
                 height: 1,
                 ttl_s: 0,
+                inset: false,
                 pixels: vec![]
             })
             .is_err()

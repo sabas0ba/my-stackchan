@@ -122,6 +122,7 @@ mod tests {
             gaze: Gaze::Left,
             eyes: EyeStyle::Auto,
             ttl_s: 0,
+            accessory: protocol::Accessory::None,
         };
         let output = target(Some(&presence), Some(&emote(Gaze::Right, 100)));
         assert_eq!(output.x_tenth_deg, 300);

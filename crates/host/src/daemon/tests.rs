@@ -769,6 +769,103 @@ fn spool_plugin_exchanges_cards_taps_and_images_through_files() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn panel_taps_return_button_index_and_inset_image_keeps_the_face() {
+    let mut harness = Harness::new("cards = 2\nimage = true\n");
+    let plugin = harness.start_plugin(|reader, writer| {
+        let capabilities = api::Capabilities {
+            cards: 2,
+            image: true,
+            ..api::Capabilities::default()
+        };
+        let mut connection = client::connect(reader, writer, hello(capabilities)).unwrap();
+        connection
+            .send(&api::PluginMessage::ImageFrame(api::ImageFrame {
+                width: 64,
+                height: 64,
+                ttl_s: 30,
+                inset: true,
+                pixels: vec![0x5A; 64 * 64 * 2],
+            }))
+            .unwrap();
+        connection
+            .send(&api::PluginMessage::PanelPut(api::PanelPut {
+                card: 1,
+                priority: api::Priority::High,
+                ttl_s: 10,
+                lines: vec!["title".into()],
+                buttons: vec![
+                    api::Button {
+                        icon: api::Icon::Previous,
+                        label: String::new(),
+                        active: false,
+                    },
+                    api::Button {
+                        icon: api::Icon::Shuffle,
+                        label: "ON".into(),
+                        active: true,
+                    },
+                ],
+            }))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Ok(Some(HostMessage::Action { card, action })) =
+                connection.recv_timeout(Duration::from_millis(50))
+            {
+                return Some((card, action));
+            }
+        }
+        None
+    });
+    harness.run_until("Panel と画像の送信", |sent| {
+        !sent_images(sent).is_empty()
+            && sent
+                .iter()
+                .any(|message| matches!(message, protocol::Message::Panel(_)))
+    });
+    let sent = harness.device.messages();
+    let (begin, _) = &sent_images(&sent)[0];
+    assert!(begin.inset, "顔に重ねる画像として送る");
+    assert_eq!(
+        (begin.x, begin.y, begin.width, begin.height),
+        (248, 120, 64, 64),
+        "顔の領域の右下に置く"
+    );
+    assert!(
+        !sent.contains(&protocol::Message::ClearSlot(protocol::Slot::Overlay)),
+        "顔に重ねる画像は Overlay を使わない"
+    );
+    let panel = sent
+        .iter()
+        .find_map(|message| match message {
+            protocol::Message::Panel(panel) => Some(panel.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(panel.id, 0);
+    assert!((1..=10).contains(&panel.ttl_s));
+    assert_eq!(panel.buttons[1].icon, protocol::Icon::Shuffle);
+    assert!(panel.buttons[1].active);
+    // firmware は Panel のタップをボタンの番号で返す。
+    harness
+        .device
+        .events
+        .lock()
+        .unwrap()
+        .push(protocol::Event::Tap {
+            slot: Some(protocol::Slot::Overlay),
+            card: Some(panel.id),
+            action: Some(1),
+        });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !plugin.is_finished() {
+        assert!(Instant::now() < deadline, "Action が plugin に届きません");
+        harness.daemon.step(Duration::from_millis(20));
+    }
+    assert_eq!(plugin.join().unwrap(), Some((1, 1)));
+}
+
 fn image_frame(first: u8) -> api::PluginMessage {
     let mut pixels: Vec<u8> = (0..40 * 30 * 2).map(|i| i as u8).collect();
     pixels[0] = first;
@@ -776,6 +873,7 @@ fn image_frame(first: u8) -> api::PluginMessage {
         width: 40,
         height: 30,
         ttl_s: 5,
+        inset: false,
         pixels,
     })
 }
@@ -871,6 +969,7 @@ fn image_frame_without_capability_is_rejected() {
                 width: 1,
                 height: 1,
                 ttl_s: 1,
+                inset: false,
                 pixels: vec![0, 0],
             }))
             .unwrap();

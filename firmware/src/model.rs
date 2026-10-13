@@ -38,7 +38,8 @@ pub enum Content {
     Card(Card),
     /// 画像領域。画素は Controller の ImagePixels にあり、表示状態には領域だけを持つ。
     Image(ImageRegion),
-    /// Client 側の plugin の操作画面。host からは置けない。
+    /// 操作画面。Client 側の plugin が出すものと、host が `Message::Panel` で置くもの
+    /// (版 10) の両方で、型は同じ。
     Panel(crate::client::Panel),
 }
 
@@ -103,9 +104,22 @@ pub struct DisplayState {
     slots: [Option<Entry>; 3],
     presence: Option<PresenceEntry>,
     emote: Option<EmoteEntry>,
+    /// 顔に重ねる画像 (版 10)。Overlay とは別に持ち、顔と帯を隠さない。
+    inset: Option<InsetEntry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InsetEntry {
+    region: ImageRegion,
+    deadline_ms: Option<u64>,
 }
 
 impl DisplayState {
+    /// 顔に重ねる画像の領域。
+    pub fn inset(&self) -> Option<ImageRegion> {
+        self.inset.map(|entry| entry.region)
+    }
+
     fn can_blink(&self) -> bool {
         self.get(Slot::Overlay).is_none() && self.active_eyes() == EyeStyle::Auto
     }
@@ -165,6 +179,9 @@ impl DisplayState {
                 .emote
                 .as_ref()
                 .is_some_and(|entry| now_ms >= entry.deadline_ms)
+            || self
+                .inset
+                .is_some_and(|entry| entry.deadline_ms.is_some_and(|deadline| now_ms >= deadline))
     }
 
     fn expire(&mut self, now_ms: u64) {
@@ -189,6 +206,12 @@ impl DisplayState {
             .is_some_and(|entry| now_ms >= entry.deadline_ms)
         {
             self.emote = None;
+        }
+        if self
+            .inset
+            .is_some_and(|entry| entry.deadline_ms.is_some_and(|deadline| now_ms >= deadline))
+        {
+            self.inset = None;
         }
     }
 }
@@ -294,8 +317,21 @@ impl Controller {
     }
 
     /// タップ位置を表示中の slot と Card の行に照合する。y は画面上端からの位置。
-    /// Card の行は画面幅いっぱいに置かれるため、横方向の位置は照合に使わない。
-    pub fn hit(&self, y: u16) -> Event {
+    /// Card の行は画面幅いっぱいに置かれるため、横方向の位置は Panel のボタンの照合にだけ使う。
+    pub fn hit(&self, x: u16, y: u16) -> Event {
+        // host の Panel はボタンに照合し、ボタンの番号を action として返す。
+        if let Some(Entry {
+            content: Content::Panel(panel),
+            ..
+        }) = self.state.get(Slot::Overlay)
+        {
+            return Event::Tap {
+                slot: Some(Slot::Overlay),
+                card: (panel.id != 0).then_some(panel.id),
+                action: crate::client::button_at(x, y, panel.buttons.len())
+                    .map(|index| index as u8),
+            };
+        }
         let (slot, top) = if self.state.get(Slot::Overlay).is_some() {
             (Slot::Overlay, 0)
         } else if y < BANNER_HEIGHT && self.state.get(Slot::BannerTop).is_some() {
@@ -472,6 +508,14 @@ impl Controller {
                 self.seq = self.seq.wrapping_add(1);
                 return Ok(Reply::Ack { seq: self.seq });
             }
+            Message::Panel(panel) => {
+                panel.validate().map_err(|_| HandleError::InvalidCard)?;
+                if self.demo_index.is_some() {
+                    next.presence = None;
+                }
+                let ttl_s = panel.ttl_s;
+                next.set(Slot::Overlay, Content::Panel(panel), ttl_s, now_ms);
+            }
             Message::ImageEnd { id } => {
                 let pending = self.pending_image.take().ok_or(HandleError::InvalidImage)?;
                 if pending.begin.id != id || pending.next_row != pending.begin.height {
@@ -484,8 +528,29 @@ impl Controller {
                     width: begin.width,
                     height: begin.height,
                 };
-                next.set(Slot::Overlay, Content::Image(region), begin.ttl_s, now_ms);
+                // 画素の領域は 1 枚分しか無いため、Overlay の画像と顔に重ねる画像は
+                // どちらか一方だけを持つ。新しく届いた方が、もう一方を置き換える。
+                if begin.inset {
+                    if matches!(
+                        next.get(Slot::Overlay),
+                        Some(Entry {
+                            content: Content::Image(_),
+                            ..
+                        })
+                    ) {
+                        next.slots[slot_index(Slot::Overlay)] = None;
+                    }
+                    next.inset = Some(InsetEntry {
+                        region,
+                        deadline_ms: (begin.ttl_s != 0)
+                            .then(|| now_ms.saturating_add(u64::from(begin.ttl_s) * 1000)),
+                    });
+                } else {
+                    next.inset = None;
+                    next.set(Slot::Overlay, Content::Image(region), begin.ttl_s, now_ms);
+                }
             }
+            Message::ClearInset => next.inset = None,
         }
         next.presence()
             .map(|presence| presence.gaze.validate())
@@ -525,6 +590,7 @@ impl Controller {
                 gaze: Gaze::Center,
                 eyes: EyeStyle::Auto,
                 ttl_s: 0,
+                accessory: protocol::Accessory::None,
             },
             now_ms,
         );
@@ -698,7 +764,7 @@ impl Controller {
             self.startup = false;
             self.draw(display, &self.state, self.blink)?;
         }
-        Ok((self.input_mode == InputMode::Forward).then(|| self.hit(y)))
+        Ok((self.input_mode == InputMode::Forward).then(|| self.hit(x, y)))
     }
 }
 
@@ -904,6 +970,7 @@ mod tests {
             gaze: protocol::Gaze::Right,
             eyes: protocol::EyeStyle::Auto,
             ttl_s: 1,
+            accessory: protocol::Accessory::None,
         };
         assert_eq!(
             controller.handle(Message::Presence(presence.clone()), 100, &mut display),
@@ -933,6 +1000,7 @@ mod tests {
             gaze: Gaze::Center,
             eyes: EyeStyle::Auto,
             ttl_s: 0,
+            accessory: protocol::Accessory::None,
         };
         controller
             .handle(Message::Presence(presence.clone()), 0, &mut display)
@@ -1140,7 +1208,7 @@ mod tests {
             card: None,
             action: None,
         };
-        assert_eq!(controller.hit(10), none);
+        assert_eq!(controller.hit(0, 10), none);
         controller
             .handle(card_with_actions(Slot::BannerTop, 42), 0, &mut display)
             .unwrap();
@@ -1156,7 +1224,7 @@ mod tests {
             (0, None),
         ] {
             assert_eq!(
-                controller.hit(y),
+                controller.hit(0, y),
                 Event::Tap {
                     slot: Some(Slot::BannerTop),
                     card: Some(42),
@@ -1165,9 +1233,9 @@ mod tests {
                 "y={y}"
             );
         }
-        assert_eq!(controller.hit(120), none, "顔の領域");
+        assert_eq!(controller.hit(0, 120), none, "顔の領域");
         assert_eq!(
-            controller.hit(200),
+            controller.hit(0, 200),
             Event::Tap {
                 slot: Some(Slot::BannerBottom),
                 card: None,
@@ -1179,7 +1247,7 @@ mod tests {
             .handle(card_with_actions(Slot::Overlay, 0), 0, &mut display)
             .unwrap();
         assert_eq!(
-            controller.hit(10),
+            controller.hit(0, 10),
             Event::Tap {
                 slot: Some(Slot::Overlay),
                 card: None,
@@ -1236,7 +1304,151 @@ mod tests {
             width,
             height,
             ttl_s: 5,
+            inset: false,
         })
+    }
+
+    #[test]
+    fn inset_image_keeps_the_face_and_expires_or_clears_on_its_own() {
+        let mut controller = Controller::default();
+        let mut frame = std::boxed::Box::new(crate::framebuffer::FrameBuffer::new());
+        let inset = |id: u16, ttl_s: u16| {
+            Message::ImageBegin(ImageBegin {
+                id,
+                x: 200,
+                y: 100,
+                width: 4,
+                height: 2,
+                ttl_s,
+                inset: true,
+            })
+        };
+        let rows = |id: u16| {
+            Message::ImageRows(protocol::ImageRows {
+                id,
+                row: 0,
+                pixels: heapless::Vec::from_slice(&[0xF8, 0x00].repeat(8)).unwrap(),
+            })
+        };
+        controller.handle(inset(1, 5), 0, &mut *frame).unwrap();
+        controller.handle(rows(1), 0, &mut *frame).unwrap();
+        controller
+            .handle(Message::ImageEnd { id: 1 }, 0, &mut *frame)
+            .unwrap();
+        use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
+        assert!(
+            controller.state.get(Slot::Overlay).is_none(),
+            "Overlay を使わず、顔を残す"
+        );
+        assert_eq!(frame.pixel(200, 100), Rgb565::RED);
+        assert_eq!(frame.pixel(198, 98), Rgb565::WHITE, "枠");
+        // タップは顔の領域として扱う。
+        assert_eq!(
+            controller.hit(201, 101),
+            Event::Tap {
+                slot: None,
+                card: None,
+                action: None
+            }
+        );
+        // 期限で消える。
+        controller.tick(5_000, &mut *frame).unwrap();
+        assert_eq!(controller.state.inset(), None);
+        assert_eq!(frame.pixel(200, 100), Rgb565::BLACK);
+
+        // 期限なしで置き、ClearInset で消す。
+        controller.handle(inset(2, 0), 6_000, &mut *frame).unwrap();
+        controller.handle(rows(2), 6_000, &mut *frame).unwrap();
+        controller
+            .handle(Message::ImageEnd { id: 2 }, 6_000, &mut *frame)
+            .unwrap();
+        assert!(controller.state.inset().is_some());
+        controller
+            .handle(Message::ClearInset, 7_000, &mut *frame)
+            .unwrap();
+        assert_eq!(controller.state.inset(), None);
+
+        // Overlay の画像は同じ画素の領域を使うため、顔に重ねた画像を置き換える。
+        controller.handle(inset(3, 0), 8_000, &mut *frame).unwrap();
+        controller.handle(rows(3), 8_000, &mut *frame).unwrap();
+        controller
+            .handle(Message::ImageEnd { id: 3 }, 8_000, &mut *frame)
+            .unwrap();
+        controller
+            .handle(begin(4, 4, 2), 9_000, &mut *frame)
+            .unwrap();
+        controller.handle(rows(4), 9_000, &mut *frame).unwrap();
+        controller
+            .handle(Message::ImageEnd { id: 4 }, 9_000, &mut *frame)
+            .unwrap();
+        assert_eq!(controller.state.inset(), None);
+        assert!(matches!(
+            controller.state.get(Slot::Overlay),
+            Some(Entry {
+                content: Content::Image(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn host_panel_taps_return_the_button_index() {
+        let mut controller = Controller::default();
+        let mut display = Display::default();
+        let mut panel = protocol::Panel {
+            id: 9,
+            ttl_s: 10,
+            ..protocol::Panel::default()
+        };
+        for icon in [protocol::Icon::Previous, protocol::Icon::Pause] {
+            panel
+                .buttons
+                .push(protocol::Button::new(icon, "", false))
+                .unwrap();
+        }
+        assert!(matches!(
+            controller.handle(Message::Panel(panel.clone()), 0, &mut display),
+            Ok(Reply::Ack { .. })
+        ));
+        let center = crate::client::button_frame(1).center();
+        assert_eq!(
+            controller.hit(center.x as u16, center.y as u16),
+            Event::Tap {
+                slot: Some(Slot::Overlay),
+                card: Some(9),
+                action: Some(1)
+            }
+        );
+        // ボタンの外と、存在しないボタンの位置は action を持たない。
+        let missing = crate::client::button_frame(2).center();
+        for (x, y) in [(160, 20), (missing.x as u16, missing.y as u16)] {
+            assert_eq!(
+                controller.hit(x, y),
+                Event::Tap {
+                    slot: Some(Slot::Overlay),
+                    card: Some(9),
+                    action: None
+                }
+            );
+        }
+        // 期限で消え、ボタンの無い Panel と期限の無い Panel は拒否する。
+        controller.tick(10_000, &mut display).unwrap();
+        assert!(controller.state.get(Slot::Overlay).is_none());
+        let no_ttl = protocol::Panel {
+            ttl_s: 0,
+            ..panel.clone()
+        };
+        assert!(
+            controller
+                .handle(Message::Panel(no_ttl), 0, &mut display)
+                .is_err()
+        );
+        panel.buttons.clear();
+        assert!(
+            controller
+                .handle(Message::Panel(panel), 0, &mut display)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1288,7 +1500,7 @@ mod tests {
             embedded_graphics::pixelcolor::Rgb565::BLACK
         );
         assert_eq!(
-            controller.hit(21),
+            controller.hit(0, 21),
             Event::Tap {
                 slot: Some(Slot::Overlay),
                 card: None,

@@ -1,6 +1,6 @@
 //! 自律動作の設定画面。変更は即時反映し、保存は利用者の明示操作で要求する。
 
-use super::{Panel, Plugin};
+use super::{Icon, Panel, Plugin, icon_button, labeled_button};
 use crate::settings::Settings;
 use protocol::{Card, Emote};
 
@@ -44,6 +44,9 @@ pub struct Preferences {
 impl Plugin for Preferences {
     fn name(&self) -> &'static str {
         "SETTINGS"
+    }
+    fn icon(&self) -> Icon {
+        Icon::Gear
     }
     fn tick(&mut self, now_ms: u64) {
         if self.open_until_ms.is_some_and(|until| now_ms >= until) {
@@ -94,44 +97,54 @@ impl Plugin for Preferences {
     fn panel(&self, _now_ms: u64) -> Option<Panel> {
         self.open_until_ms?;
         let s = self.settings;
+        // 切替のボタンはピクトグラムと項目名を出し、ON を枠の塗りで示す。
+        let toggle = |icon, label, on| labeled_button(icon, label, on);
         let buttons = if self.page == 1 {
             [
-                if s.touch { "TOUCH ON" } else { "TOUCH OFF" },
-                if s.sensors { "SENSE ON" } else { "SENSE OFF" },
-                if s.dark_quiet { "DARK ON" } else { "DARK OFF" },
-                s.pace.label(),
-                "SAVE",
-                "MORE",
+                toggle(Icon::Touch, "TOUCH", s.touch),
+                toggle(Icon::Sense, "SENSE", s.sensors),
+                toggle(Icon::Dark, "DARK", s.dark_quiet),
+                labeled_button(Icon::Pace, s.pace.label(), false),
+                icon_button(Icon::Save),
+                icon_button(Icon::Forward),
             ]
         } else if self.page == 2 {
             use crate::settings::Pace;
             [
-                match s.expression {
-                    Pace::Quiet => "表現：弱",
-                    Pace::Normal => "表現：中",
-                    Pace::Lively => "表現：強",
-                },
-                match s.speech_pace {
-                    Pace::Quiet => "発話：少",
-                    Pace::Normal => "発話：中",
-                    Pace::Lively => "発話：多",
-                },
-                "FIRST",
-                "BACK",
-                "SAVE",
-                "CLOSE",
+                labeled_button(
+                    Icon::Face,
+                    match s.expression {
+                        Pace::Quiet => "表現：弱",
+                        Pace::Normal => "表現：中",
+                        Pace::Lively => "表現：強",
+                    },
+                    false,
+                ),
+                labeled_button(
+                    Icon::Speech,
+                    match s.speech_pace {
+                        Pace::Quiet => "発話：少",
+                        Pace::Normal => "発話：中",
+                        Pace::Lively => "発話：多",
+                    },
+                    false,
+                ),
+                icon_button(Icon::First),
+                icon_button(Icon::Back),
+                icon_button(Icon::Save),
+                icon_button(Icon::Close),
             ]
         } else {
             [
-                if s.enabled { "AUTO ON" } else { "AUTO OFF" },
-                if s.speech { "TEXT ON" } else { "TEXT OFF" },
-                if s.motion { "MOVE ON" } else { "MOVE OFF" },
-                if s.led { "LED ON" } else { "LED OFF" },
-                "NEXT",
-                "CLOSE",
+                toggle(Icon::Power, "AUTO", s.enabled),
+                toggle(Icon::Speech, "TEXT", s.speech),
+                toggle(Icon::Motion, "MOVE", s.motion),
+                toggle(Icon::Light, "LED", s.led),
+                icon_button(Icon::Forward),
+                icon_button(Icon::Close),
             ]
         };
-        Some(Panel::new(
+        Some(super::panel(
             [
                 match self.page {
                     0 => "SETTINGS 1/3",
