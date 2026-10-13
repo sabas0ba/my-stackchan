@@ -10,6 +10,7 @@ mod plugin;
 mod scheduler;
 #[cfg(unix)]
 mod socket;
+mod spool_plugin;
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -51,6 +52,16 @@ pub fn run(
         "spool を {} から取り込みます",
         spool_dir.display()
     );
+    for plugin in config.plugins.iter().filter(|plugin| plugin.spool) {
+        log::info!(
+            "daemon",
+            "plugin {} は spool 接続です ({}/{}/{})",
+            plugin.id,
+            spool_dir.display(),
+            spool_plugin::DIR_NAME,
+            plugin.id
+        );
+    }
     match socket_dir {
         None => {
             // 子プロセス方式では plugin が daemon と同じ範囲へ接続でき、宛先を制限できない。
@@ -376,7 +387,13 @@ impl<D: Device, S: Spawner> Daemon<D, S> {
         self.drain_spool(now);
         self.flush_pending(now);
         for index in 0..self.plugins.len() {
-            self.plugins[index].start_if_due(index, now, &mut self.spawner, &self.sender);
+            self.plugins[index].start_if_due(
+                index,
+                now,
+                &mut self.spawner,
+                self.spool.as_deref(),
+                &self.sender,
+            );
             if self.plugins[index].check_timeout(now) {
                 self.scheduler.remove_plugin(index);
             }

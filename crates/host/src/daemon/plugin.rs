@@ -5,6 +5,7 @@
 //! capability) はメッセージ単位で拒否し、plugin へ理由を返す。
 
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::thread;
@@ -188,19 +189,33 @@ impl PluginRuntime {
     }
 
     /// 再起動の時刻に達していれば起動する。
+    ///
+    /// spool 接続の plugin は `spawner` ではなく、`spool_dir` 内のファイル交換で接続する
+    /// (spool_plugin.rs)。spool が無効な場合は起動の失敗として扱う。
     pub fn start_if_due(
         &mut self,
         index: usize,
         now: Instant,
         spawner: &mut impl Spawner,
+        spool_dir: Option<&Path>,
         events: &Sender<Event>,
     ) {
         let due = matches!(self.state, State::Idle { retry_at } if now >= retry_at);
         if !due {
-            spawner.refuse(&self.config);
+            if !self.config.spool {
+                spawner.refuse(&self.config);
+            }
             return;
         }
-        let spawned = match spawner.spawn(&self.config) {
+        let spawned = if self.config.spool {
+            match spool_dir {
+                Some(dir) => super::spool_plugin::spawn(&self.config, dir).map(Some),
+                None => Err(io::Error::other("spool が無効です")),
+            }
+        } else {
+            spawner.spawn(&self.config)
+        };
+        let spawned = match spawned {
             Ok(Some(spawned)) => spawned,
             Ok(None) => return,
             Err(error) => {

@@ -610,6 +610,165 @@ fn spool_device_commands_survive_disconnection_and_respect_deadline() {
 }
 
 /// 画像の画素を先頭の値で区別する。
+/// spool 接続の plugin の `in/` に要求を書く。書きかけを読まれないよう rename で置く。
+fn write_spool_request(dir: &std::path::Path, name: &str, content: &str) {
+    let temporary = dir.join(format!("{name}.tmp"));
+    std::fs::write(&temporary, content).unwrap();
+    std::fs::rename(temporary, dir.join(format!("{name}.req"))).unwrap();
+}
+
+/// `out/` の通知を名前の順に読み、削除する。
+fn take_spool_events(dir: &std::path::Path) -> Vec<String> {
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "evt"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(&path).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            text
+        })
+        .collect()
+}
+
+#[test]
+fn spool_plugin_exchanges_cards_taps_and_images_through_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "stackchan-daemon-spool-plugin-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = crate::config::parse(
+        "[daemon]\nrotate_s = 10\n[plugin np]\nspool = true\ncards = 2\nimage = true\n",
+        None,
+    )
+    .unwrap();
+    let spawned = Arc::new(AtomicUsize::new(0));
+    let (sender, _plugin_ends) = mpsc::channel();
+    let spawner = PipeSpawner {
+        spawned: spawned.clone(),
+        plugin_ends: sender,
+    };
+    let device = FakeDevice::default();
+    let mut daemon =
+        Daemon::new(config, device.clone(), spawner, Instant::now()).with_spool(dir.clone());
+    daemon.step(Duration::ZERO);
+    let in_dir = dir.join("plugin").join("np").join("in");
+    let out_dir = dir.join("plugin").join("np").join("out");
+    assert!(
+        in_dir.is_dir() && out_dir.is_dir(),
+        "起動時にディレクトリを作る"
+    );
+    assert_eq!(
+        spawned.load(Ordering::SeqCst),
+        0,
+        "spool 接続では spawner を使わない"
+    );
+
+    let mut events = Vec::new();
+    let mut run_until =
+        |daemon: &mut Daemon<FakeDevice, PipeSpawner>,
+         what: &str,
+         done: &mut dyn FnMut(&[protocol::Message], &[String]) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                events.extend(take_spool_events(&out_dir));
+                if done(&device.messages(), &events) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "{what} に至りません");
+                daemon.step(Duration::from_millis(20));
+            }
+        };
+
+    write_spool_request(
+        &in_dir,
+        "0001",
+        "\u{feff}[card]\r\ncard = 0\r\nplacement = \"banner\"\r\nrow1.text = \"DEMON'S SHOT\"\r\n\
+         row1.action = 1\r\nrow2.bar = 40\r\nrow2.label = \"Aiobahn +81\"\r\nrow2.action = 2\r\n",
+    );
+    run_until(&mut daemon, "Card の送信", &mut |sent, _| {
+        sent.iter()
+            .any(|message| card_text(message).is_some_and(|(_, _, text)| text == "DEMON'S SHOT"))
+    });
+    let card = device
+        .messages()
+        .iter()
+        .find_map(|message| match message {
+            protocol::Message::Card(card) => Some(card.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(card.rows[0].action, Some(1));
+    assert!(matches!(
+        card.rows[1].elements[0],
+        protocol::Element::Bar { ratio: 40, .. }
+    ));
+    run_until(&mut daemon, "表示の通知", &mut |_, events| {
+        events.contains(&"[visibility]\ncard = 0\nvisible = true\n".to_owned())
+    });
+    assert!(
+        in_dir.read_dir().unwrap().next().is_none(),
+        "処理した要求は削除する"
+    );
+
+    device.events.lock().unwrap().push(protocol::Event::Tap {
+        slot: Some(protocol::Slot::BannerTop),
+        card: Some(card.id),
+        action: Some(1),
+    });
+    run_until(&mut daemon, "タップの通知", &mut |_, events| {
+        events.contains(&"[action]\ncard = 0\naction = 1\n".to_owned())
+    });
+
+    std::fs::write(in_dir.join("cover.rgb565"), [0x12u8; 4 * 2 * 2]).unwrap();
+    write_spool_request(
+        &in_dir,
+        "0002",
+        "[image]\nwidth = 4\nheight = 2\nttl_s = 5\ndata = \"cover.rgb565\"\n",
+    );
+    run_until(&mut daemon, "画像の送信", &mut |sent, _| {
+        !sent_images(sent).is_empty()
+    });
+    let (begin, pixels) = &sent_images(&device.messages())[0];
+    assert_eq!((begin.width, begin.height), (4, 2));
+    assert_eq!(pixels, &[0x12u8; 16]);
+    assert!(
+        !in_dir.join("cover.rgb565").exists(),
+        "画素ファイルも削除する"
+    );
+
+    // 書式の誤りは取込み側で、内容の誤り (長すぎる Text) は daemon の検証で拒否され、
+    // どちらも [rejected] として届く。
+    write_spool_request(&in_dir, "0003", "[notify]\ntext = \"x\"\n");
+    write_spool_request(
+        &in_dir,
+        "0004",
+        &format!(
+            "[card]\ncard = 1\nplacement = \"banner\"\nrow1.text = \"{}\"\n",
+            "a".repeat(protocol::MAX_CARD_TEXT_BYTES + 1)
+        ),
+    );
+    run_until(&mut daemon, "拒否の通知", &mut |_, events| {
+        events
+            .iter()
+            .filter(|event| event.starts_with("[rejected]\n"))
+            .count()
+            >= 2
+    });
+    let rejected: Vec<&String> = events
+        .iter()
+        .filter(|event| event.starts_with("[rejected]\n"))
+        .collect();
+    assert!(rejected[0].contains("0003.req"), "{}", rejected[0]);
+    assert!(rejected[1].contains("Text"), "{}", rejected[1]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 fn image_frame(first: u8) -> api::PluginMessage {
     let mut pixels: Vec<u8> = (0..40 * 30 * 2).map(|i| i as u8).collect();
     pixels[0] = first;

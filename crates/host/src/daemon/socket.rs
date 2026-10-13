@@ -41,7 +41,8 @@ pub struct SocketSpawner {
 impl SocketSpawner {
     pub fn new(dir: &Path, config: &Config) -> io::Result<Self> {
         let mut listeners = HashMap::new();
-        for plugin in &config.plugins {
+        // spool 接続の plugin は socket で接続しない。
+        for plugin in config.plugins.iter().filter(|plugin| !plugin.spool) {
             let plugin_dir = dir.join(&plugin.id);
             std::fs::create_dir_all(&plugin_dir)?;
             let path = plugin_dir.join(SOCKET_NAME);

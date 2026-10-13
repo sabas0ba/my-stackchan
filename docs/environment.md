@@ -174,6 +174,27 @@ Set-Content -Encoding utf8 -NoNewline -Path (Join-Path $dir "$name.tmp") -Value 
 Rename-Item (Join-Path $dir "$name.tmp") "$name.req"
 ```
 
+Windows 側で動く plugin (PowerShell スクリプト) は、spool 接続 ([plugin.md](plugin.md#spool-接続の-plugin)) で daemon とつなぐ。利用者設定に `spool = true` の plugin を書くと、daemon は `<設定ディレクトリ>/spool/plugin/<id>/in` と `out` を作る。スクリプトは `in/` に要求 (`[card]`、`[card-remove]`、`[image]`、`[log]`) を、`out/` から通知 (`[action]`、`[visibility]`、`[rejected]`) を読む。コンテナも実行ファイルも要らない。
+
+```
+[plugin nowplaying]
+spool = true
+cards = 2
+image = true
+```
+
+経路は、スクリプトを使わずに手で確かめられる。`in/` に `[card]` の要求を置くと帯に表示され、`out/` に `[visibility]` が書かれる。`input forward` の間に行をタップすると `[action]` が書かれる。
+
+```powershell
+$dir = Join-Path $env:APPDATA "stackchan\spool\plugin\nowplaying"
+$request = "[card]`ncard = 0`nplacement = `"banner`"`nrow1.text = `"hello`"`nrow1.action = 1`n"
+Set-Content -Encoding utf8 -NoNewline -Path (Join-Path $dir "in\0001.tmp") -Value $request
+Rename-Item (Join-Path $dir "in\0001.tmp") "0001.req"
+Get-Content (Join-Path $dir "out\*.evt")
+```
+
+2026-10-14 に Windows 上の Podman machine で、Windows 側が書いた要求がマウント越しに daemon へ届くまでの時間を、要求の本文に書いた時刻と daemon のログの時刻の差で測った。3 回で 44〜190 ms であり、取込み間隔 (200 ms) に収まる。逆方向 (`out/`) も同じ経路であり、タップから Windows 側の処理までは 2 方向の取込み間隔を合わせて 0.5 秒以内に収まる。
+
 `input forward` の間、帯の Card の行をタップすると、その行に action を持つ plugin へ通知される。帯のそれ以外の位置をタップすると帯の巡回が次の組へ進む。`input demo` で従来の表情デモに戻す。daemon の動作中は port を占有するため、切替は daemon の起動前に行う。
 
 daemon のログは stderr と `<設定ディレクトリ>/logs/daemon.log` に出る。各行は UTC の時刻 (RFC 3339)、重要度、発生元 (`daemon`、`device`、`device text`、`plugin <id>`、`plugin <id> stderr`) を持つ。ファイルは 1 MiB を超えると `daemon.log.1`、`daemon.log.2` へ送り、それより古いものは消す。
