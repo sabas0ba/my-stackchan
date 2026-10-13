@@ -13,15 +13,17 @@ PC 側の情報源と、それに伴う描画・操作を本リポジトリ外�
 | Claude / Codex 使用率 | ローカルのセッションログ | Card (Bar) | 表示期間の切替 |
 | 3D プリンタの進捗とカメラ | LAN 上のプリンタ | Card (Bar)、画像領域 | カメラ表示の開始・終了 |
 | タイマー | デバイスの単調時計 | Card (Bar)、操作画面 | 時間の設定、開始、取消 |
+| 再生中の曲 | Windows のメディア制御 API (SMTC) | Card (帯)、画像領域 (カバー)、操作画面 (Overlay) | 再生・一時停止、曲送り、シャッフル、リピート |
 
 plugin には実行場所の異なる 2 種がある。両者は連携できる。
 
 | 種別 | 実行場所 | 追加の方法 | 信頼の水準 |
 | --- | --- | --- | --- |
 | Host 側 | PC (daemon の子プロセス、または plugin ごとのコンテナ) | 実行ファイルを構築し、利用者設定に書く | 信頼しない。daemon が権限を制限し、コンテナで隔離する |
+| Host 側 (spool 接続) | Windows (PowerShell スクリプト。daemon とは設定ディレクトリ内のファイル交換で接続する) | スクリプトを置き、利用者設定に書く | 利用者自身のスクリプトとして扱う。daemon は capability と内容の検証だけを行い、隔離はしない |
 | Client 側 | デバイス (firmware に構築時に組み込む) | firmware に登録して再構築し、書き込む | firmware の一部として信頼する。隔離できない |
 
-本書の大半は Host 側を扱う。Client 側は [Client 側の plugin](#client-側の-plugin) に記す。
+本書の大半は Host 側を扱う。spool 接続は [spool 接続の plugin](#spool-接続の-plugin) に、Client 側は [Client 側の plugin](#client-側の-plugin) に記す。
 
 範囲に含むもの:
 
@@ -441,6 +443,94 @@ relay<TAB><id><TAB><番号><TAB><IP アドレス>:<port>
 - 全コンテナが開発用のイメージを共用するため、plugin のコンテナにも compiler 等と、イメージの構築時に複製されたリポジトリの内容 (`/workspace`) が含まれる。ネットワークが無く、ファイルシステムが読取り専用であることで影響を抑える
 - 第三者製の plugin の導入前のソース確認と commit SHA による固定は、引き続き必要である
 
+## spool 接続の plugin
+
+Windows 側でしか得られない情報源 (OS のメディア制御 API 等) を扱う plugin のための接続方式である。段階 P7 で追加する。
+
+### 目的
+
+daemon は Linux 側のコンテナで動き、Windows の API には触れない。Windows 側では Smart App Control により利用者が build した exe を実行できないが、PowerShell のスクリプトは実行でき、WinRT の API を扱える (2026-10-13 に `FullLanguage` であることと、`Windows.Media.Control` の読取り・操作を確認した)。そこで、Windows 側の PowerShell スクリプトを plugin として daemon に接続する経路を設ける。
+
+経路には、通知の受付と同じ設定ディレクトリ内のファイル交換を用いる。理由は spool と同じで、Windows と Linux の両方で std だけで実装でき、アクセス制御を OS のファイル権限に委ねられ、設定ディレクトリは既に daemon のコンテナにマウントされているためである。daemon のコンテナを `--network none` に保ったまま成立する。
+
+### 構成
+
+```
+Windows                                                 daemon のコンテナ
+PowerShell スクリプト                                     daemon
+  | 書く  <設定ディレクトリ>/spool/plugin/<id>/in/*.req   --> 200 ms ごとに取込み --> 検証、scheduler (通常の plugin と同じ)
+  | 読む  <設定ディレクトリ>/spool/plugin/<id>/out/*.evt  <-- 書出し             <-- Action / Visibility / Rejected
+```
+
+- 利用者設定の `[plugin <id>]` に `spool = true` を書く。`command`、`dir`、`rev`、`env.*`、`net.allow`、`param.*` とは併用できない。`param.*` を渡せないため、spool 接続の plugin は secret を扱えない。扱うべき secret が無い用途に限る
+- capability (`cards`、`notify`、`presence`、`motion`、`image`) は通常の plugin と同じ key で許可する。`Hello` と `Init` は無く、許可した値がそのまま有効になる。上限値 (帯 2 行、Overlay 4 行、Text 48 byte、Bar のラベル 12 byte、画像 160×120 px) は `Init` で伝える代わりに本書と [protocol.md](protocol.md) の値を用いる
+- daemon は起動時に `spool/plugin/<id>/in` と `out` を作る。起動計画には出力せず、コンテナは起動しない
+- daemon の内部では、ファイルから復元したメッセージを通常の plugin と同じ経路 (検証、流量制限、scheduler、入力の振分け) に流す。接続方式だけが異なり、plugin の扱いは分けない
+
+### スクリプト -> daemon (`in/*.req`)
+
+書式は通知の受付と同じ (行単位のテキスト、section 見出しが種類、`*.tmp` に書いてから `*.req` へ rename、1 ファイル 4 KiB まで、200 ms ごとに名前の順で最大 8 件)。Card の行は `row<N>.*` の key で表し、N は 1 から 4 とする。各行は 1 要素とする。複数要素の行は本接続では表せないが、想定する用途 (曲名、進行、操作画面) には足りる。
+
+| 見出し | key | 内容 |
+| --- | --- | --- |
+| `[card]` | `card` (0..7、必須)、`placement` (`banner` / `overlay`、必須)、`priority` (`low` / `normal` / `high`、既定 `normal`)、`ttl_s` (既定 0。`overlay` では 1 以上が必須)、`row<N>.text` または `row<N>.bar` (0..100) と `row<N>.label`、または `row<N>.spacer` (1..32)、`row<N>.action` (0..255、任意) | `CardPut` と同じ |
+| `[card-remove]` | `card` (必須) | `CardRemove` と同じ |
+| `[image]` | `width`、`height` (必須)、`ttl_s` (既定 0 = 10 秒)、`data` (必須。同じディレクトリ内の画素ファイルの名前) | `ImageFrame` と同じ。画素は 4 KiB に収まらないため、別ファイルに置く |
+| `[log]` | `text` (必須) | `Log` と同じ |
+
+画素ファイルの扱い:
+
+- 書き手は画素ファイル (`<名前>.rgb565`、RGB565 big-endian、`width × height × 2` byte) を先に書き終えてから、`[image]` の `.req` を rename で置く
+- `data` はファイル名だけを許し、path の区切りや `..` を含むものは拒否する。daemon は `.req` と同じディレクトリでだけ探す
+- daemon は画素ファイルの大きさが `width × height × 2` に一致し、38,400 byte (160×120) 以下であることを読む前に確かめる。一致しない、または無い場合は拒否する
+- `.req` と画素ファイルは処理後に削除する。拒否した場合も削除する
+
+### daemon -> スクリプト (`out/*.evt`)
+
+daemon は `out/` に 1 件 1 ファイルで書く。書式は `in/` と同じ行単位のテキストで、`*.tmp` に書いてから `*.evt` へ rename する。ファイル名は spool と同じ時刻と連番の形式とし、名前の順が発生順になる。スクリプトは名前の順に読み、処理したものを削除する。
+
+| 見出し | key | 内容 |
+| --- | --- | --- |
+| `[action]` | `card`、`action` | `Action` と同じ |
+| `[visibility]` | `card`、`visible` (`true` / `false`) | `Visibility` と同じ。変化した時だけ書く |
+| `[rejected]` | `request` (拒否した `.req` の名前)、`reason` | `Rejected` と同じ |
+
+- daemon は取込みのたびに `out/` を見て、60 秒より古いファイルと、64 件を超える分の古いファイルを削除する。スクリプトが動いていない間に溜まり続けないようにするためである
+- `Shutdown` に相当するものは無い。daemon の終了時には `out/` の内容を削除する
+
+### 生存と停止
+
+スクリプトはプロセスとして daemon の管理下に無く、daemon は起動も再起動もしない。
+
+- 生存の確認は Card の TTL で代える。スクリプトは TTL を 15 秒以下にした Card を送り続け、停止すれば TTL で表示が消える。画像も TTL で消える
+- 流量の上限 (秒間件数) は通常の plugin と同じ値を適用する。超過した場合は停止の代わりに、その plugin の `in/` の取込みを 10 秒止め、`[rejected]` で知らせる
+- 利用者設定に無い `<id>` のディレクトリは無視する
+
+### 信頼境界
+
+- スクリプトは利用者の権限で動き、設定ディレクトリは利用者のプロファイル内にある。書けるのは同じ利用者のプロセスだけであり、通知の受付 (hook) と同じ水準である
+- スクリプトは secret を受け取らず、daemon はスクリプトに設定ディレクトリの他の内容を渡さない。スクリプト自身は設定ディレクトリを読めるが、これは hook と同じで、本接続で新たに生じる経路ではない
+- daemon はファイルから復元した内容を、通常の plugin と同じ検証と capability の制限に通す。spool 接続であることで許可の範囲が広がることはない
+- スクリプトの隔離は行わない。作者は利用者自身であり、読むのは OS の API だけである
+
+### 利用者設定の例
+
+```
+[plugin nowplaying]
+spool = true
+cards = 2
+image = true
+```
+
+### 検証
+
+| 対象 | 方法 |
+| --- | --- |
+| `in/` の解析 | `[card]` の各 key (行の要素、action、placement と ttl の組合せ)、`[card-remove]`、`[image]` の画素ファイルの検証 (大きさの不一致、欠落、path を含む `data`)、`[log]`、不正な入力の拒否。固定 seed の変異入力を含める |
+| `out/` の書出し | 書式、`.tmp` から rename、古いファイルと超過分の削除 |
+| daemon | 一時ディレクトリを設定ディレクトリとした結合テスト。`.req` から `CardPut` が scheduler に入ること、タップが `[action]` として書かれること、流量超過での取込みの停止、許可外 capability の拒否 |
+| 実機 | Windows 側のスクリプトと、コンテナで動く daemon の組合せで、ファイルがマウント越しに見えるまでの遅延 (両方向) とタップから操作までの応答時間を測る (未決事項 8) |
+
 ## Client 側の plugin
 
 ### 目的
@@ -595,6 +685,7 @@ C1 の範囲外であり、Host 側の対応する plugin を作る段階で実�
 | P4 | 画像領域 | 外部 plugin からの画像が Overlay に表示される | 実装済み |
 | P5 | plugin ごとのコンテナ分離 (socket での接続、`plugin-run`、起動計画、`container.sh`) | 同梱の plugin が plugin ごとのコンテナで動作する。plugin のコンテナから設定ディレクトリと外部への通信に到達できない | 実装済み |
 | P6 | 接続先の許可 (`net.allow`、中継、plugin API 版 3 の `endpoints`) | 列挙した宛先にだけ plugin から接続できる | 実装済み |
+| P7 | spool 接続の plugin (`spool = true`、`spool/plugin/<id>/` の取込みと書出し) | Windows 側の PowerShell スクリプトが帯と画像を表示し、タップが `.evt` で届く | 未着手 |
 | C1 | Client 側の plugin の枠組み (登録、Panel、画面と入力の配分、長押し) とタイマー | host を接続せずに、タイマーの設定・開始・補正・完了の表示ができる。host の表示と同時に使っても、互いの内容を壊さない | 実装済み。host を接続しない状態での設定・開始・補正を実機で確認した (2026-10-06)。表情による合図と、daemon との同時使用は実機で未確認 |
 | C2 | host との連携 (plugin 宛てのデータ、Client 側の Card を含めた配分) | Host 側の plugin からタイマーを設定できる。daemon の `Visibility` が実際の表示と一致する | 未着手 |
 
@@ -605,6 +696,7 @@ Claude / Codex 使用率は P3 の最初の外部 plugin とする。design.md �
 - Claude / Codex 使用率: ログ形式、およびサブスクリプションの残量を取得する公式手段の有無は、着手時に一次情報で確認する
 - 3D プリンタ: LAN 経由の制御・映像取得には公式仕様ではなく第三者の解析に依拠するものがあり、プリンタの firmware 更新により第三者のアクセスが制限される場合もある。利用条件の確認を含め plugin 側の責務とし、本リポジトリにはプリンタ固有のコードを置かない。状態 (進捗、残り時間、温度) の取得にはプリンタのアクセスコードが要る見込みである。このコードは LAN 内から公式ソフトでプリンタを操作できる認証情報でもあり、閲覧専用の認証情報は確認できていない。表示だけの用途で操作可能な認証情報を PC に保存しないため、認証を要する情報は扱わないことにし、進捗表示の plugin は見送った (2026-10-05)。同日に Bambu Lab A2L (クラウドモード、印刷中) で、LAN 内の MQTT (TLS、port 8883) が待ち受けていること、認証情報なしの接続要求が CONNACK の戻り値 5 (認可されていない) で拒否されることを確認した。認証情報を付けた接続は試していない。代わりに、プリンタと通信しないタイマーを Client 側の plugin として設ける
 - 通知: OS の通知を横取りする方式は OS ごとの制約が大きいため、第一段階では spool 経由の受付で受ける
+- 再生中の曲: 別リポジトリ (`stackchan-plugin-nowplaying`) の spool 接続の plugin (PowerShell スクリプト) とし、情報源は Windows のメディア制御 API (SMTC、`Windows.Media.Control`) とする。再生環境が Windows の Spotify アプリだけであるため成立する。2026-10-13 に Spotify アプリ (Store 版) で、曲名・アーティスト・アルバム・サムネイル (PNG 300×300)・timeline (位置と長さ)・シャッフル・リピートの値が取れること、シャッフルとリピートの変更要求が受理され反映されることを確認した。Spotify Web API は採らない。認証情報 (OAuth の refresh token) を plugin に置くこと、CDN 配下の宛先のために中継に名前解決を加えること、TLS / JSON / JPEG の crate を要すること、開発者規約 (アプリ名、画像の加工、ブランド表記) の制約を受けることが理由である。本リポジトリには Spotify 固有のコードを置かない。plugin 側の設計は当該リポジトリの `docs/design.md` に記す
 
 ## 決定事項
 
@@ -620,6 +712,8 @@ Claude / Codex 使用率は P3 の最初の外部 plugin とする。design.md �
 | タップの切替 | CLI で明示的に切り替える。起動時は Demo | 単体での動作確認を保ち、daemon の暗黙の状態変更を避ける |
 | 設定ディレクトリ | OS ごとの既定値を持ち、`--config-dir` で起動時に変更できる | 複数の構成の併用と試験での分離 |
 | Windows 向けの構築 | コンテナ内で `x86_64-pc-windows-gnu` 向けに cross build する | ホストに toolchain を導入しない規約を保つ |
+| spool 接続の plugin | Windows 側の PowerShell スクリプトを、設定ディレクトリ内のファイル交換 (`spool/plugin/<id>/`) で daemon に接続する plugin として扱う。secret は渡さない (2026-10-13) | Smart App Control により exe を実行できず、コンテナからは Windows の API に触れない。spool と同じく std だけで両 OS に対応でき、アクセス制御を OS に委ねられる |
+| 再生中の曲の情報源 | Windows の SMTC を用い、Spotify Web API は採らない (2026-10-13) | 認証情報と外部通信を不要にする。Web API は refresh token を plugin に置き、中継の名前解決と TLS 等の crate を要し、開発者規約の制約を受ける |
 
 ## Windows 向けの cross build
 
@@ -652,3 +746,4 @@ P2 の実機確認で、Forward 状態のタップ後に daemon が送る Card �
 5. Client 側の plugin の表示と daemon の配分の関係。C1 では Client 側の Card が上の帯を占め、daemon はそれを知らない。C2 で通知と配分を定める
 6. 長押しの判定時間 (0.6 秒) と Panel のボタンの大きさ、タイマーの合図 (見回しとうなずきの振幅・速さ、発光の強さ、表情の割当て)。実機で操作して決める
 7. USB の給電が止まった場合 (PC のスリープ等) のタイマーの扱い。CoreS3 の内蔵電池での継続時間と、復帰後の表示を実機で確かめる
+8. spool 接続の plugin で、Windows 側の書込みが daemon のコンテナ (マウント越し) から見えるまでの遅延と、その逆方向の遅延。タップから操作までの応答時間を決める。P7 の実機確認で測り、取込み間隔 (200 ms) の見直しの要否を判断する
