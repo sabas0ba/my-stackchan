@@ -464,8 +464,8 @@ PowerShell スクリプト                                     daemon
 
 - 利用者設定の `[plugin <id>]` に `spool = true` を書く。`command`、`dir`、`rev`、`env.*`、`net.allow`、`param.*` とは併用できない。`param.*` を渡せないため、spool 接続の plugin は secret を扱えない。扱うべき secret が無い用途に限る
 - capability (`cards`、`notify`、`presence`、`motion`、`image`) は通常の plugin と同じ key で許可する。`Hello` と `Init` は無く、許可した値がそのまま有効になる。上限値 (帯 2 行、Overlay 4 行、Text 48 byte、Bar のラベル 12 byte、画像 160×120 px) は `Init` で伝える代わりに本書と [protocol.md](protocol.md) の値を用いる
-- daemon は起動時に `spool/plugin/<id>/in` と `out` を作る。起動計画には出力せず、コンテナは起動しない
-- daemon の内部では、ファイルから復元したメッセージを通常の plugin と同じ経路 (検証、流量制限、scheduler、入力の振分け) に流す。接続方式だけが異なり、plugin の扱いは分けない
+- daemon は起動時に `spool/plugin/<id>/in` と `out` を作り、前回の daemon が `out/` に残した通知を消す。起動計画には出力せず、コンテナは起動しない
+- daemon の内部では、ファイルから復元したメッセージを通常の plugin と同じ経路 (検証、流量制限、scheduler、入力の振分け) に流す。接続方式だけが異なり、plugin の扱いは分けない。実装 (`crates/host/src/daemon/spool_plugin.rs`) は、`in/` を読んでフレームにするスレッドと、daemon からのフレームを `out/` に書くスレッドを pipe で plugin の stdout / stdin に見せ、最初のフレームとして利用者設定の許可をそのまま要求する `Hello` を送る。daemon のログには通常の plugin と同じく `Hello` の内容 (名前は id、版は `spool`) が出る
 
 ### スクリプト -> daemon (`in/*.req`)
 
@@ -493,17 +493,17 @@ daemon は `out/` に 1 件 1 ファイルで書く。書式は `in/` と同じ�
 | --- | --- | --- |
 | `[action]` | `card`、`action` | `Action` と同じ |
 | `[visibility]` | `card`、`visible` (`true` / `false`) | `Visibility` と同じ。変化した時だけ書く |
-| `[rejected]` | `request` (拒否した `.req` の名前)、`reason` | `Rejected` と同じ |
+| `[rejected]` | `reason` | `Rejected` と同じ。書式の誤りで取込み側が拒否した場合は、拒否した `.req` の名前を理由の先頭に付ける |
 
 - daemon は取込みのたびに `out/` を見て、60 秒より古いファイルと、64 件を超える分の古いファイルを削除する。スクリプトが動いていない間に溜まり続けないようにするためである
-- `Shutdown` に相当するものは無い。daemon の終了時には `out/` の内容を削除する
+- `Shutdown` に相当するものは無い。daemon の終了時に `out/` は消さず、次の起動時に消す
 
 ### 生存と停止
 
 スクリプトはプロセスとして daemon の管理下に無く、daemon は起動も再起動もしない。
 
 - 生存の確認は Card の TTL で代える。スクリプトは TTL を 15 秒以下にした Card を送り続け、停止すれば TTL で表示が消える。画像も TTL で消える
-- 流量の上限 (秒間件数) は通常の plugin と同じ値を適用する。超過した場合は停止の代わりに、その plugin の `in/` の取込みを 10 秒止め、`[rejected]` で知らせる
+- 流量の上限 (秒間件数) と手順違反の扱いは通常の plugin と同じである。daemon は接続を「停止」し (取込みと書出しのスレッドを止める)、指数的な待ち時間の後に再び取り込む。待ち時間の間に書かれた `.req` は、再開後に名前の順で取り込まれる。取込みは 200 ms ごとに最大 8 件であり、流量の上限 (秒間 50 件) には通常は達しない
 - 利用者設定に無い `<id>` のディレクトリは無視する
 
 ### 信頼境界
@@ -529,7 +529,9 @@ image = true
 | `in/` の解析 | `[card]` の各 key (行の要素、action、placement と ttl の組合せ)、`[card-remove]`、`[image]` の画素ファイルの検証 (大きさの不一致、欠落、path を含む `data`)、`[log]`、不正な入力の拒否。固定 seed の変異入力を含める |
 | `out/` の書出し | 書式、`.tmp` から rename、古いファイルと超過分の削除 |
 | daemon | 一時ディレクトリを設定ディレクトリとした結合テスト。`.req` から `CardPut` が scheduler に入ること、タップが `[action]` として書かれること、流量超過での取込みの停止、許可外 capability の拒否 |
-| 実機 | Windows 側のスクリプトと、コンテナで動く daemon の組合せで、ファイルがマウント越しに見えるまでの遅延 (両方向) とタップから操作までの応答時間を測る (未決事項 8) |
+| 実機 | Windows 側のスクリプトと、コンテナで動く daemon の組合せで、ファイルがマウント越しに見えるまでの遅延とタップから操作までの応答時間を測る |
+
+2026-10-14 に Windows 上の Podman machine で、Windows 側が書いた要求が daemon に届くまでの時間を測った (要求の本文に書いた時刻と daemon のログの時刻の差)。3 回で 44〜190 ms であり、取込み間隔 (200 ms) の見直しは要らない。手順は [environment.md](environment.md#daemon-と-plugin) に置く。
 
 ## Client 側の plugin
 
@@ -685,7 +687,7 @@ C1 の範囲外であり、Host 側の対応する plugin を作る段階で実�
 | P4 | 画像領域 | 外部 plugin からの画像が Overlay に表示される | 実装済み |
 | P5 | plugin ごとのコンテナ分離 (socket での接続、`plugin-run`、起動計画、`container.sh`) | 同梱の plugin が plugin ごとのコンテナで動作する。plugin のコンテナから設定ディレクトリと外部への通信に到達できない | 実装済み |
 | P6 | 接続先の許可 (`net.allow`、中継、plugin API 版 3 の `endpoints`) | 列挙した宛先にだけ plugin から接続できる | 実装済み |
-| P7 | spool 接続の plugin (`spool = true`、`spool/plugin/<id>/` の取込みと書出し) | Windows 側の PowerShell スクリプトが帯と画像を表示し、タップが `.evt` で届く | 未着手 |
+| P7 | spool 接続の plugin (`spool = true`、`spool/plugin/<id>/` の取込みと書出し) | Windows 側の PowerShell スクリプトが帯と画像を表示し、タップが `.evt` で届く | 実装済み。結合テストで要求・画像・タップ・拒否の往復を確認した。2026-10-14 に実機で、Windows 側のスクリプトからの帯の表示と `[visibility]` の往復、カバー画像の送信、帯と操作画面 (Overlay) のタップが `[action]` として届くことを確認した |
 | C1 | Client 側の plugin の枠組み (登録、Panel、画面と入力の配分、長押し) とタイマー | host を接続せずに、タイマーの設定・開始・補正・完了の表示ができる。host の表示と同時に使っても、互いの内容を壊さない | 実装済み。host を接続しない状態での設定・開始・補正を実機で確認した (2026-10-06)。表情による合図と、daemon との同時使用は実機で未確認 |
 | C2 | host との連携 (plugin 宛てのデータ、Client 側の Card を含めた配分) | Host 側の plugin からタイマーを設定できる。daemon の `Visibility` が実際の表示と一致する | 未着手 |
 
@@ -746,4 +748,3 @@ P2 の実機確認で、Forward 状態のタップ後に daemon が送る Card �
 5. Client 側の plugin の表示と daemon の配分の関係。C1 では Client 側の Card が上の帯を占め、daemon はそれを知らない。C2 で通知と配分を定める
 6. 長押しの判定時間 (0.6 秒) と Panel のボタンの大きさ、タイマーの合図 (見回しとうなずきの振幅・速さ、発光の強さ、表情の割当て)。実機で操作して決める
 7. USB の給電が止まった場合 (PC のスリープ等) のタイマーの扱い。CoreS3 の内蔵電池での継続時間と、復帰後の表示を実機で確かめる
-8. spool 接続の plugin で、Windows 側の書込みが daemon のコンテナ (マウント越し) から見えるまでの遅延と、その逆方向の遅延。タップから操作までの応答時間を決める。P7 の実機確認で測り、取込み間隔 (200 ms) の見直しの要否を判断する

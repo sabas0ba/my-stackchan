@@ -50,7 +50,11 @@ impl Default for DaemonConfig {
 #[derive(Clone, PartialEq, Eq)]
 pub struct PluginConfig {
     pub id: String,
-    /// 起動する argv。先頭が実行ファイル。隔離コマンドを前置きしてもよい。
+    /// `spool = true`。daemon が起動せず、設定ディレクトリ内のファイル交換で接続する plugin
+    /// (docs/plugin.md の「spool 接続の plugin」)。`command` 等の起動に関わる key と、
+    /// `Init` で渡す `param.*` は持てない。
+    pub spool: bool,
+    /// 起動する argv。先頭が実行ファイル。隔離コマンドを前置きしてもよい。spool 接続では空。
     pub command: Vec<String>,
     /// plugin の実行ファイルを置いたホスト側のディレクトリ。コンテナ分離時に plugin の
     /// コンテナへマウントする (起動スクリプトが起動計画から読む)。daemon は使わない。
@@ -76,6 +80,7 @@ impl std::fmt::Debug for PluginConfig {
         };
         f.debug_struct("PluginConfig")
             .field("id", &self.id)
+            .field("spool", &self.spool)
             .field("command", &self.command)
             .field("dir", &self.dir)
             .field("rev", &self.rev)
@@ -99,10 +104,14 @@ pub fn summary(dir: &Path, config: &Config) -> String {
     ];
     for plugin in &config.plugins {
         let allowed = plugin.allowed;
+        let transport = if plugin.spool {
+            "spool".to_owned()
+        } else {
+            format!("command={:?}", plugin.command)
+        };
         lines.push(format!(
-            "plugin {}: command={:?}, rev={}, cards={}, notify={}, presence={}, motion={}",
+            "plugin {}: {transport}, rev={}, cards={}, notify={}, presence={}, motion={}",
             plugin.id,
-            plugin.command,
             plugin.rev.as_deref().unwrap_or("-"),
             allowed.cards,
             allowed.notify,
@@ -317,6 +326,7 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
     };
     let mut plugin = PluginConfig {
         id: id.into(),
+        spool: false,
         command: Vec::new(),
         dir: None,
         rev: None,
@@ -345,6 +355,7 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
             {
                 plugin.rev = Some(rev.to_ascii_lowercase());
             }
+            ("spool", Value::Bool(value)) => plugin.spool = value,
             ("cards", Value::Integer(cards)) if cards <= u32::from(plugin_api::MAX_CARDS) => {
                 plugin.allowed.cards = cards as u8;
             }
@@ -363,8 +374,8 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
                 push_param(&mut plugin, key, value).map_err(|reason| error(line, reason.into()))?;
             }
             (
-                "command" | "dir" | "rev" | "cards" | "notify" | "presence" | "motion" | "image"
-                | "net.allow",
+                "spool" | "command" | "dir" | "rev" | "cards" | "notify" | "presence" | "motion"
+                | "image" | "net.allow",
                 _,
             ) => {
                 return Err(error(line, format!("{key} の値が不正です")));
@@ -372,7 +383,24 @@ fn plugin_section(id: &str, section: Section) -> Result<PluginConfig, ConfigErro
             _ => return Err(error(line, format!("未知の key です: {key}"))),
         }
     }
-    if plugin.command.is_empty() {
+    if plugin.spool {
+        // spool 接続では daemon が起動せず Init も送らないため、起動と Init に関わる key は
+        // 意味を持たない。黙って無視すると設定の誤りに気づけないので拒否する。
+        let conflicting = !plugin.command.is_empty()
+            || plugin.dir.is_some()
+            || plugin.rev.is_some()
+            || !plugin.params.is_empty()
+            || !plugin.env.is_empty()
+            || !plugin.net_allow.is_empty();
+        if conflicting {
+            return Err(error(
+                section.line,
+                format!(
+                    "plugin {id} は spool 接続のため command、dir、rev、param、env、net.allow を書けません"
+                ),
+            ));
+        }
+    } else if plugin.command.is_empty() {
         return Err(error(
             section.line,
             format!("plugin {id} に command がありません"),
@@ -418,6 +446,15 @@ fn merge_secrets(config: &mut Config, secrets: &str) -> Result<(), ConfigError> 
         };
         for (key, (line, value)) in section.entries {
             match value {
+                Value::String(_) if key.starts_with("param.") && plugin.spool => {
+                    return Err(error(
+                        line,
+                        format!(
+                            "plugin {} は spool 接続のため param を受け取れません",
+                            plugin.id
+                        ),
+                    ));
+                }
                 Value::String(value) if key.starts_with("param.") => {
                     push_param(plugin, &key, value).map_err(|reason| error(line, reason.into()))?
                 }
@@ -675,6 +712,41 @@ motion = false
             )
             .is_err(),
             "secrets.conf から宛先を追加できない"
+        );
+    }
+
+    #[test]
+    fn spool_plugin_excludes_launch_keys_and_params() {
+        let config = parse("[plugin np]\nspool = true\ncards = 2\nimage = true\n", None).unwrap();
+        let plugin = &config.plugins[0];
+        assert!(plugin.spool && plugin.command.is_empty());
+        assert_eq!((plugin.allowed.cards, plugin.allowed.image), (2, true));
+        assert!(summary(Path::new("/config"), &config).contains("plugin np: spool"));
+        for bad in [
+            "command = [\"x\"]",
+            "dir = \"C:/x\"",
+            "rev = \"0123456789abcdef0123456789abcdef01234567\"",
+            "param.a = \"1\"",
+            "env.A = \"1\"",
+            "net.allow = [\"192.168.1.50:1\"]",
+            "spool = 1",
+        ] {
+            assert!(
+                parse(&format!("[plugin np]\nspool = true\n{bad}\n"), None).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            parse("[plugin np]\nspool = false\n", None).is_err(),
+            "spool = false では command が要る"
+        );
+        assert!(
+            parse(
+                "[plugin np]\nspool = true\n",
+                Some("[plugin np]\nparam.token = \"x\"\n")
+            )
+            .is_err(),
+            "secrets.conf からも param を渡せない"
         );
     }
 

@@ -100,7 +100,8 @@ pub fn child_env(
 /// 検証で拒否している)。
 pub fn plan(config: &Config) -> String {
     let mut lines = String::new();
-    for plugin in &config.plugins {
+    // spool 接続の plugin はコンテナを起動しない (Windows 側で動く)。
+    for plugin in config.plugins.iter().filter(|plugin| !plugin.spool) {
         lines.push_str(&format!(
             "plugin\t{}\t{}\n",
             plugin.id,
@@ -202,13 +203,15 @@ mod tests {
         let config = crate::config::parse(
             "[plugin clock]\ncommand = [\"/plugin/clock\", \"--secret-arg\"]\n\
              [plugin ext]\ncommand = [\"/plugin/ext\"]\ndir = \"C:/Users/a b/release\"\n\
-             param.token = \"hidden\"\nenv.E = \"hidden\"\n",
+             param.token = \"hidden\"\nenv.E = \"hidden\"\n\
+             [plugin np]\nspool = true\ncards = 1\n",
             None,
         )
         .unwrap();
         assert_eq!(
             plan(&config),
-            "plugin\tclock\t\nplugin\text\tC:/Users/a b/release\n"
+            "plugin\tclock\t\nplugin\text\tC:/Users/a b/release\n",
+            "spool 接続の plugin はコンテナを起動しない"
         );
     }
 
